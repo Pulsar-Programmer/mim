@@ -4169,6 +4169,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .register_asynchronous_uri_scheme_protocol("thumb", |_ctx, req, responder| {
             let path = req.uri().path().to_string();
             std::thread::spawn(move || {

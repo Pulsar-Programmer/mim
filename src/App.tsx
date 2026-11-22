@@ -28,6 +28,7 @@ import { ProfilesView } from "./ProfilesView";
 import { PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
 import { ProgressBar, useProgress } from "./Progress";
 import { PacksView } from "./PacksView";
+import { UpdateButton } from "./UpdateButton";
 import { ConfigView } from "./ConfigView";
 import { Settings, applySettings, brief, loadSettings, saveSettings } from "./settings";
 import "./App.css";
@@ -179,12 +180,15 @@ function App() {
               sample folder
             </div>
           )}
-          <button
-            className={`nav-item ${view === "settings" ? "active" : ""}`}
-            onClick={() => setView("settings")}
-          >
-            Settings
-          </button>
+          <div className="foot-row">
+            <button
+              className={`nav-item ${view === "settings" ? "active" : ""}`}
+              onClick={() => setView("settings")}
+            >
+              Settings
+            </button>
+            <UpdateButton notify={notify} />
+          </div>
           <button className="btn ghost" onClick={() => api.openLauncher()}>
             Open Launcher ↗
           </button>

@@ -3,6 +3,8 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 // Per-machine UI preferences, kept in localStorage (they're conveniences,
 // nothing breaks if storage is unavailable).
 
+export type Theme = "system" | "light" | "dark";
+
 export type FontChoice = "default" | "minecraft" | "minecraftia" | "system" | "mono" | "custom";
 
 export interface Settings {
@@ -11,6 +13,7 @@ export interface Settings {
   fontScope: "headings" | "everything";
   scale: number; // 0.9 – 1.2
   reducedText: boolean;
+  theme: Theme;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -19,6 +22,7 @@ export const DEFAULT_SETTINGS: Settings = {
   fontScope: "headings",
   scale: 1,
   reducedText: true,
+  theme: "system",
 };
 
 /** Bundled with the app (src/assets/fonts), so no install needed. */
@@ -68,6 +72,14 @@ const STACKS: Record<Exclude<FontChoice, "minecraft" | "custom">, string | null>
 };
 
 let reduced = DEFAULT_SETTINGS.reducedText;
+let theme: Theme = DEFAULT_SETTINGS.theme;
+
+const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
+function applyTheme() {
+  const dark = theme === "dark" || (theme === "system" && darkQuery.matches);
+  document.documentElement.dataset.theme = dark ? "dark" : "light";
+}
+darkQuery.addEventListener("change", applyTheme);
 
 /** With Reduced text on, drops the " — explanation" tail of a UI string. */
 export function brief(text: string): string {
@@ -77,6 +89,8 @@ export function brief(text: string): string {
 /** Pushes settings onto the CSS variables the stylesheet reads. */
 export function applySettings(s: Settings) {
   reduced = s.reducedText;
+  theme = s.theme;
+  applyTheme();
   // .more spans (long explanations) hide under :root.reduced
   document.documentElement.classList.toggle("reduced", s.reducedText);
   const root = document.documentElement.style;

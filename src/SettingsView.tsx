@@ -115,6 +115,21 @@ export function SettingsView({
       </section>
 
       <section className="settings-block">
+        <h2>Appearance</h2>
+        <div className="segmented">
+          {(["system", "light", "dark"] as const).map((t) => (
+            <button
+              key={t}
+              className={settings.theme === t ? "active" : ""}
+              onClick={() => set({ theme: t })}
+            >
+              {t[0].toUpperCase() + t.slice(1)}
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="settings-block">
         <h2>Reduced text</h2>
         <div className="segmented">
           {[true, false].map((on) => (
