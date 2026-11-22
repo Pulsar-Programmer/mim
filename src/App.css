@@ -70,9 +70,19 @@ img {
   -webkit-user-drag: none;
 }
 
-input,
-textarea,
-[contenteditable] {
+/* chrome stays unselectable; text worth copying (paths, descriptions,
+   errors, shot details) opts back in. Not inside buttons/clickable rows,
+   not inline code in prose, and fields only while focused so a page
+   drag or ⌘A doesn't paint their placeholders. */
+input:focus,
+textarea:focus,
+[contenteditable],
+code:not(button code, p code),
+.settings-block code,
+.mod-desc,
+.mod-file,
+.hint.bad,
+.vs-info dd {
   -webkit-user-select: text;
   user-select: text;
 }
