@@ -3,7 +3,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 // Per-machine UI preferences, kept in localStorage (they're conveniences,
 // nothing breaks if storage is unavailable).
 
-export type FontChoice = "default" | "minecraft" | "system" | "mono" | "custom";
+export type FontChoice = "default" | "minecraft" | "minecraftia" | "system" | "mono" | "custom";
 
 export interface Settings {
   font: FontChoice;
@@ -60,6 +60,7 @@ export function fontInstalled(family: string): boolean {
 
 const STACKS: Record<Exclude<FontChoice, "minecraft" | "custom">, string | null> = {
   default: null, // keep the stylesheet's stacks
+  minecraftia: MINECRAFT_BODY,
   system: '-apple-system, "SF Pro Text", "Helvetica Neue", sans-serif',
   mono: 'ui-monospace, "SF Mono", Menlo, monospace',
 };

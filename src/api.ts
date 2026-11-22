@@ -158,6 +158,8 @@ export interface Screenshot {
   location: string;
   modified: string | null;
   size_bytes: number;
+  width: number;
+  height: number;
 }
 
 export interface InstallSpec {
