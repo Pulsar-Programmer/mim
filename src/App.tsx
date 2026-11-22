@@ -899,7 +899,9 @@ function StandardsView({
         side shows up everywhere. <b>Shared</b> is built in: the Minecraft folder's own
         resource packs, saves and screenshots. Your own standards live in{" "}
         <code>minecraft/standards</code> — top-level files apply to every version, a subfolder
-        named like a version (<code>1.21.10/</code>) only to that version.
+        named like a version (<code>1.21.10/</code>) only to that version. A <code>config/</code>{" "}
+        folder is linked file by file, so installations keep their other mod configs — use{" "}
+        <b>Share</b> on the Config page to put one there.
       </p>
 
       <div className="row-inline std-new">
@@ -1126,7 +1128,7 @@ const CATEGORIES: [FolderCategory, string, string][] = [
   ["logs", "Logs", "Text records of what the game and launcher did. Useful for debugging crashes, safe to delete."],
   ["cache", "Cache", "Temporary downloads and caches. Safe to delete — the launcher and game rebuild them."],
   ["yours", "Library", "Worlds, packs, screenshots, mods and settings. MIM never touches these."],
-  ["game", "Game files", "Downloaded by the launcher. Deleting them just forces a big re-download."],
+  ["game", "Dependencies", "Downloaded by the launcher. Deleting them just forces a big re-download."],
   ["launcher", "Launcher", "Launcher accounts, profiles and settings. Leave these alone."],
   ["other", "Other", "Mod data and anything MIM doesn't recognize."],
 ];
