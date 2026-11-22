@@ -4,6 +4,7 @@ import { FontChoice, Settings, fontInstalled } from "./settings";
 const FONTS: { id: FontChoice; label: string; family?: string }[] = [
   { id: "default", label: "MIM default", family: '"P22 Mackinack Pro", "Lora", serif' },
   { id: "minecraft", label: "Minecraft", family: '"MIM Minecrafter", monospace' },
+  { id: "minecraftia", label: "Minecraftia", family: '"MIM Minecraftia", monospace' },
   { id: "system", label: "System", family: "-apple-system, sans-serif" },
   { id: "mono", label: "Monospace", family: "ui-monospace, monospace" },
   { id: "custom", label: "Custom…" },
@@ -53,7 +54,7 @@ export function SettingsView({
                 Aa
               </span>
               <span className="font-label">{f.label}</span>
-              {f.id === "minecraft" && <span className="font-status ok">built in</span>}
+              {(f.id === "minecraft" || f.id === "minecraftia") && <span className="font-status ok">built in</span>}
             </button>
           ))}
         </div>
