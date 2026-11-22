@@ -1,0 +1,1 @@
+Implement a very thin, slim, clean, and extremely minimal UI interface containing a desktop app written in Tauri + React. 
