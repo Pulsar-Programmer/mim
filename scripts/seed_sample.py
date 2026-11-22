@@ -366,8 +366,24 @@ def seed():
     write("runtime/java-runtime-delta/mac-os-arm64/jre.bundle", blob(1500), 60)
 
     # your stuff
-    write("resourcepacks/Faithful 32x.zip", blob(1800), 50)
-    write("resourcepacks/My Tweaks/pack.mcmeta", '{"pack":{"pack_format":46}}', 20)
+    def pack_zip(rel, fmt, desc, colors, age):
+        p = ROOT / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(p, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("pack.mcmeta", json.dumps({"pack": {"pack_format": fmt, "description": desc}}))
+            z.writestr("pack.png", png(64, 64, *colors))
+            z.writestr("assets/minecraft/textures/filler.bin", rng.randbytes(300 * 1024))
+        os.utime(p, (NOW - age * DAY, NOW - age * DAY))
+
+    pack_zip("resourcepacks/Faithful 32x.zip", 64, "§7The classic look, doubled.",
+             ((120, 170, 90), (70, 110, 50)), 50)
+    pack_zip("resourcepacks/Fresh Animations.zip", 64, {"text": "Brings mobs to life"},
+             ((230, 160, 90), (150, 80, 40)), 12)
+    pack_zip("resourcepacks/Low Fire.zip", 34, "Fire doesn't cover half the screen",
+             ((250, 120, 40), (120, 30, 10)), 80)
+    write("resourcepacks/My Tweaks/pack.mcmeta",
+          '{"pack":{"pack_format":46,"description":"My own little fixes"}}', 20)
+    write("resourcepacks/My Tweaks/pack.png", png(64, 64, (150, 110, 200), (70, 40, 120)), 20)
     write("shaderpacks/Complementary Reimagined.zip", blob(600), 40)
     shots = [  # sky, horizon, ground, size
         ((110, 165, 235), (235, 225, 200), (95, 160, 70), (480, 270)),
@@ -448,6 +464,7 @@ def seed():
     install(
         "Hypixel 1.21.10", "1.21.10", "fabric", 0.1,
         options(fov="0.25", renderDistance="8", maxFps="260", guiScale="3",
+                resourcePacks='["vanilla","fabric","file/Low Fire.zip","file/Faithful 32x.zip"]',
                 **{"key_key.sprint": "key.keyboard.r", "soundCategory_music": "0.0"}),
         mods=(
             ("sodium-fabric-0.6.0.jar",
@@ -462,6 +479,12 @@ def seed():
              *fabric_mod("modmenu", "Mod Menu", "12.0.0",
                          "Adds a mod menu to view the list of mods you have installed.",
                          ["Prospector"], ((140, 140, 160), (60, 60, 80))), None),
+            ("fabric-api-0.130.0.jar",
+             {**fabric_mod("fabric-api", "Fabric API", "0.130.0+1.21.10",
+                           "Lightweight and modular API providing common hooks.",
+                           ["FabricMC"], ((220, 200, 160), (150, 120, 80)))[0],
+              "custom": {"modmenu": {"badges": ["library"]}}},
+             png(64, 64, (220, 200, 160), (150, 120, 80)), None),
             ("zoomify-2.14.jar.disabled",
              *fabric_mod("zoomify", "Zoomify", "2.14.0",
                          "A zoom mod with infinite customizability.",
@@ -474,6 +497,16 @@ def seed():
           gzip.compress(game_log(2, "1.21.10").encode()), 2)
     write("installations/Hypixel 1.21.10/hs_err_pid51234.log",
           "# A fatal error has been detected by the Java Runtime Environment:\n" * 10, 2)
+    h = "installations/Hypixel 1.21.10"
+    write(f"{h}/config/sodium-options.json",
+          json.dumps({"quality": {"weather_quality": "FAST"}, "performance": {"chunk_builder_threads": 0}}, indent=2), 1)
+    write(f"{h}/config/sodium-mixins.properties", "# overrides\n", 1)
+    write(f"{h}/config/modmenu.json", json.dumps({"sorting": "ascending", "count_libraries": True}, indent=2), 4)
+    write(f"{h}/config/zoomify.json", json.dumps({"initialZoom": 4}, indent=2), 9)
+    write(f"{h}/config/fabric/indigo-renderer.properties", "ambient-occlusion-mode=hybrid\n", 20)
+    write(f"{h}/config/old-hud-mod.toml", "[hud]\nenabled = true\n", 70)
+    write(f"{h}/journeymap/data/mp/Hypixel/waypoints/home.json", '{"name":"Home"}', 2)
+    write(f"{h}/XaeroWaypoints/Multiplayer_mc.hypixel.net/waypoints.txt", "waypoint:Lobby:L:0:64:0\n", 2)
     survival = install("Survival 1.21.4", "1.21.4", "vanilla", 26, None, own_saves=True)
     w = "installations/Survival 1.21.4/saves/Old Survival"
     write(f"{w}/level.dat", level_dat("Old Survival", "1.21.4", 0, 26, 99887766), 26)

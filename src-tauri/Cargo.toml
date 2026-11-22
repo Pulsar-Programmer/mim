@@ -27,6 +27,7 @@ uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 flate2 = "1"
 percent-encoding = "2"
+sha2 = "0.10"
 
 # decoding PNGs for thumbnails is ~10x slower unoptimised
 [profile.dev.package.image]

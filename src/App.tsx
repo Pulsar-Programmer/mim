@@ -6,11 +6,13 @@ import {
   formatBytes,
   timeAgo,
   Installation,
+  LinkInfo,
+  Loader,
+  reportSummary,
   GameVersion,
   LoaderVersion,
   Standard,
   entriesFor,
-  PacksOverview,
   LogEntry,
   FolderItem,
   FolderCategory,
@@ -24,6 +26,9 @@ import { ScreenshotsView } from "./ScreenshotsView";
 import { SettingsView } from "./SettingsView";
 import { ProfilesView } from "./ProfilesView";
 import { PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
+import { ProgressBar, useProgress } from "./Progress";
+import { PacksView } from "./PacksView";
+import { ConfigView } from "./ConfigView";
 import { Settings, applySettings, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
@@ -38,6 +43,7 @@ type View =
   | "screenshots"
   | "mods"
   | "options"
+  | "config"
   | "logs"
   | "profiles"
   | "settings";
@@ -53,6 +59,7 @@ const NAV: [string, [View, string][]][] = [
       ["mods", "Mods"],
       ["packs", "Resource Packs"],
       ["options", "Options"],
+      ["config", "Config"],
       ["servers", "Servers"],
       ["screenshots", "Screenshots"],
     ],
@@ -202,7 +209,7 @@ function App() {
         {view === "standards" && (
           <StandardsView notify={notify} installations={installations} />
         )}
-        {view === "packs" && <PacksView notify={notify} />}
+        {view === "packs" && <PacksView notify={notify} installations={installations} />}
         {view === "folder" && (
           <FolderView
             notify={notify}
@@ -212,6 +219,7 @@ function App() {
         )}
         {view === "saves" && <SavesView notify={notify} installations={installations} />}
         {view === "options" && <OptionsView notify={notify} installations={installations} />}
+        {view === "config" && <ConfigView notify={notify} installations={installations} />}
         {view === "logs" && <LogsView notify={notify} installations={installations} />}
         {view === "servers" && <ServersView notify={notify} installations={installations} />}
         {view === "screenshots" && (
@@ -320,7 +328,9 @@ function InstallationsView({
               {!inst.icon?.startsWith("data:") && (
                 <span className="card-initial">{inst.name[0]}</span>
               )}
-              {inst.loader === "fabric" && <span className="chip on-art">fabric</span>}
+              {inst.loader && inst.loader !== "vanilla" && (
+                <span className="chip on-art">{inst.loader}</span>
+              )}
             </div>
             <div className="card-body">
               <div className="card-name" title={inst.name}>
@@ -383,7 +393,7 @@ function NewInstallView({
   );
   const [showSnapshots, setShowSnapshots] = useState(false);
   const [gameVersion, setGameVersion] = useState("");
-  const [fabric, setFabric] = useState(true);
+  const [loader, setLoader] = useState<Loader>("fabric");
   const [loaders, setLoaders] = useState<LoaderVersion[]>([]);
   const [loaderVersion, setLoaderVersion] = useState("");
   const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
@@ -399,6 +409,28 @@ function NewInstallView({
   const [busy, setBusy] = useState<string | null>(null);
   // standards show as one checkbox each; expanding one lets you pick single files
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  // optional Modrinth/CurseForge links imported right after installing
+  const [links, setLinks] = useState<string[]>([""]);
+  const [automodpack, setAutomodpack] = useState(false);
+  const [modsOpen, setModsOpen] = useState(false);
+  const progress = useProgress(!!busy);
+  const wanted = [...links.filter((l) => l.trim()), ...(automodpack ? ["automodpack"] : [])];
+
+  /** A pasted mod or pack picks its newest game version and a loader it supports. */
+  function matchLink(info: LinkInfo, only: boolean) {
+    if (info.kind === "modpack" || only) {
+      const v = versions.find((x) => info.game_versions.includes(x.id));
+      if (v) {
+        if (v.type !== "release") setShowSnapshots(true);
+        setGameVersion(v.id);
+      }
+    }
+    if (info.loaders.length && !info.loaders.includes(loader)) {
+      const fit = (["fabric", "neoforge", "forge"] as const).find((l) => info.loaders.includes(l));
+      if (fit) setLoader(fit);
+    }
+    if (info.kind === "modpack" || info.kind === "collection") setName((n) => n || info.title);
+  }
 
   // pictures already in use on installations, plus any dropped into a standard
   const images = useMemo(
@@ -425,18 +457,18 @@ function NewInstallView({
   }, [versions, gameVersion]);
 
   useEffect(() => {
-    if (!fabric || !gameVersion) return;
+    if (loader === "vanilla" || !gameVersion) return;
     setLoaders([]);
     setLoaderVersion("");
     api
-      .listLoaderVersions(gameVersion)
+      .listLoaderVersions(loader, gameVersion)
       .then((l) => {
         setLoaders(l);
         const stable = l.find((x) => x.stable) ?? l[0];
         if (stable) setLoaderVersion(stable.version);
       })
       .catch(() => setLoaders([]));
-  }, [fabric, gameVersion]);
+  }, [loader, gameVersion]);
 
   const visibleVersions = useMemo(
     () => versions.filter((v) => showSnapshots || v.type === "release"),
@@ -451,10 +483,23 @@ function NewInstallView({
     [standards, gameVersion]
   );
 
+  // stacking standards is fine, but only one can supply each file: picking
+  // PvP's options.txt drops Everyday's
   function toggle(rels: string[], on: boolean) {
+    const all = relevantStandards.flatMap((g) => g.entries);
+    const std = (r: string) => r.split("/")[0];
     setPicked(() => {
       const next = new Set(picked);
-      for (const r of rels) on ? next.add(r) : next.delete(r);
+      for (const r of rels) {
+        if (!on) {
+          next.delete(r);
+          continue;
+        }
+        const name = all.find((e) => e.rel_path === r)?.name;
+        for (const e of all)
+          if (e.name === name && std(e.rel_path) !== std(r)) next.delete(e.rel_path);
+        next.add(r);
+      }
       return next;
     });
   }
@@ -462,19 +507,31 @@ function NewInstallView({
   async function install() {
     if (!name.trim()) return notify("Give it a name first");
     if (!gameVersion) return notify("Pick a version");
-    setBusy("Installing…");
+    setBusy(
+      loader === "forge" ? "Installing Forge…" : loader === "neoforge" ? "Installing NeoForge…" : "Installing…"
+    );
     try {
       await api.createInstallation({
         name: name.trim(),
         game_version: gameVersion,
-        fabric,
-        loader_version: fabric && loaderVersion ? loaderVersion : null,
+        loader,
+        loader_version: loader !== "vanilla" && loaderVersion ? loaderVersion : null,
         standards: [...picked].filter((r) =>
           relevantStandards.some((g) => g.entries.some((e) => e.rel_path === r))
         ),
       });
       if (imagePath) {
         await api.setCustomIcon(name.trim(), imagePath).catch(() => {});
+      }
+      if (loader !== "vanilla" && wanted.length) {
+        setBusy("Importing from Modrinth…");
+        try {
+          const r = await api.importLinks(wanted, name.trim());
+          notify(`Installed "${name.trim()}" · ${reportSummary(r)}`);
+        } catch (e) {
+          notify(`Installed "${name.trim()}", but the import failed: ${e}`);
+        }
+        return onDone();
       }
       notify(`Installed "${name.trim()}" — it's in your launcher`);
       onDone();
@@ -530,18 +587,17 @@ function NewInstallView({
           <div className="field">
             <span>Loader</span>
             <div className="segmented">
-              <button className={!fabric ? "active" : ""} onClick={() => setFabric(false)}>
-                Vanilla
-              </button>
-              <button className={fabric ? "active" : ""} onClick={() => setFabric(true)}>
-                Fabric
-              </button>
+              {(["vanilla", "fabric", "forge", "neoforge"] as const).map((l) => (
+                <button key={l} className={loader === l ? "active" : ""} onClick={() => setLoader(l)}>
+                  {LOADER_NAMES[l]}
+                </button>
+              ))}
             </div>
           </div>
 
-          {fabric && (
+          {loader !== "vanilla" && (
             <label>
-              <span>Fabric loader</span>
+              <span>{loader === "fabric" ? "Fabric loader" : `${LOADER_NAMES[loader]} version`}</span>
               <select
                 value={loaderVersion}
                 onChange={(e) => setLoaderVersion(e.target.value)}
@@ -551,11 +607,62 @@ function NewInstallView({
                 {loaders.map((l) => (
                   <option key={l.version} value={l.version}>
                     {l.version}
-                    {l.stable ? "" : " (beta)"}
+                    {loader === "forge" ? (l.stable ? " (recommended)" : "") : l.stable ? "" : " (beta)"}
                   </option>
                 ))}
               </select>
             </label>
+          )}
+
+          {loader !== "vanilla" && (
+            <details
+              className="field mods-from"
+              open={modsOpen}
+              onToggle={(e) => setModsOpen(e.currentTarget.open)}
+            >
+              <summary>
+                Mods from Modrinth
+                <span className="optional">
+                  {wanted.length
+                    ? `${wanted.length} to add${modsOpen ? "" : " · edit"}`
+                    : "optional"}
+                </span>
+              </summary>
+              <div className="mods-from-body">
+                {links.map((l, i) => (
+                  <LinkField
+                    key={i}
+                    value={l}
+                    loader={loader}
+                    gameVersion={gameVersion}
+                    onChange={(v) => setLinks((prev) => prev.map((x, j) => (j === i ? v : x)))}
+                    onRemove={
+                      links.length > 1
+                        ? () => setLinks((prev) => prev.filter((_, j) => j !== i))
+                        : undefined
+                    }
+                    onResolved={(info) => matchLink(info, links.filter((x) => x.trim()).length === 1)}
+                  />
+                ))}
+                <div className="mods-from-foot">
+                  <button className="linklike" onClick={() => setLinks((prev) => [...prev, ""])}>
+                    + another link
+                  </button>
+                  <label className="inline-check" title="Syncs a server's mods when you join it">
+                    <input
+                      type="checkbox"
+                      checked={automodpack}
+                      onChange={(e) => setAutomodpack(e.target.checked)}
+                    />
+                    Add AutoModpack
+                  </label>
+                </div>
+                <p className="hint">
+                  A mod, collection or modpack — CurseForge links work when the mod is on
+                  Modrinth too. Only builds for this version and loader are installed.
+                </p>
+              </div>
+            </details>
           )}
 
           <div className="field">
@@ -684,6 +791,11 @@ function NewInstallView({
         <button className="btn primary big install-go" onClick={install} disabled={!!busy}>
           {busy ?? "Install"}
         </button>
+        {busy && (
+          <div className="install-progress">
+            <ProgressBar p={progress} fallback={busy} />
+          </div>
+        )}
       </div>
     </>
   );
@@ -917,66 +1029,94 @@ function StandardsView({
   );
 }
 
-// ---------------------------------------------------------------------------
+/** One pasted link, looked up as you type so you can see what it is. */
+function LinkField({
+  value,
+  loader,
+  gameVersion,
+  onChange,
+  onRemove,
+  onResolved,
+}: {
+  value: string;
+  loader: Loader;
+  gameVersion: string;
+  onChange: (v: string) => void;
+  onRemove?: () => void;
+  onResolved: (info: LinkInfo) => void;
+}) {
+  const [info, setInfo] = useState<LinkInfo | string | null>(null);
+  useEffect(() => {
+    setInfo(null);
+    if (!value.trim()) return;
+    const t = setTimeout(() => {
+      api
+        .resolveLink(value)
+        .then((i) => {
+          setInfo(i);
+          onResolved(i);
+        })
+        .catch((e) => setInfo(String(e)));
+    }, 400);
+    return () => clearTimeout(t);
+    // onResolved changes every render; only a new link should look it up again
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
 
-function PacksView({ notify }: { notify: (m: string) => void }) {
-  const [packs] = useCached<PacksOverview>("packs", api.listResourcepacks, notify);
-
-  if (!packs) return null;
-
+  const ok = info && typeof info !== "string" ? info : null;
+  const warn = ok
+    ? [
+        ok.kind === "collection" && `${ok.projects.length} projects`,
+        ok.note,
+        ok.kind !== "collection" &&
+          ok.game_versions.length > 0 &&
+          !ok.game_versions.includes(gameVersion) &&
+          `no ${gameVersion} version`,
+        ok.kind !== "collection" &&
+          ok.loaders.length > 0 &&
+          ["mod", "modpack"].includes(ok.kind) &&
+          !ok.loaders.includes(loader) &&
+          `not made for ${loader}`,
+      ].filter(Boolean)
+    : [];
   return (
-    <>
-      <header className="page-head">
-        <div>
-          <h1>Resource Packs</h1>
-          <p className="sub">
-            shared across {packs.linked_installations.length} linked installation
-            {packs.linked_installations.length === 1 ? "" : "s"}
-          </p>
-        </div>
-        <button className="btn" onClick={() => api.revealPath(packs.shared_path, false)}>
-          Open Folder
-        </button>
-      </header>
-
-      <ul className="pack-list">
-        {packs.shared.map((p) => (
-          <li key={p.name}>
-            <span className="pack-name">
-              {p.name}
-              {p.is_dir ? "/" : ""}
-            </span>
-            <span className="pack-size">{formatBytes(p.size_bytes)}</span>
-          </li>
-        ))}
-        {packs.shared.length === 0 && (
-          <div className="empty">Shared resourcepacks folder is empty.</div>
+    <div className="link-field">
+      <div className="link-input">
+        <input
+          value={value}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder="Paste a Modrinth link"
+        />
+        {onRemove && (
+          <button className="link-remove" onClick={onRemove} title="Remove this link">
+            ×
+          </button>
         )}
-      </ul>
-
-      {packs.local.map((l) => (
-        <section key={l.installation} className="std-group">
-          <h2>
-            {l.installation} <span className="chip">not linked</span>
-          </h2>
-          <ul className="pack-list">
-            {l.packs.map((p) => (
-              <li key={p.name}>
-                <span className="pack-name">
-                  {p.name}
-                  {p.is_dir ? "/" : ""}
-                </span>
-                <span className="pack-size">{formatBytes(p.size_bytes)}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
-    </>
+      </div>
+      {value.trim() && (
+        <p className={`link-info ${typeof info === "string" ? "bad" : ""} ${warn.length ? "warn" : ""}`}>
+          {ok?.icon && <img src={ok.icon} alt="" />}
+          <span>
+            {info == null
+              ? "Looking it up…"
+              : typeof info === "string"
+                ? info
+                : [`${info.title} · ${info.kind}`, ...warn].join(" · ")}
+          </span>
+        </p>
+      )}
+    </div>
   );
 }
 
 // ---------------------------------------------------------------------------
+
+const LOADER_NAMES: Record<Loader, string> = {
+  vanilla: "Vanilla",
+  fabric: "Fabric",
+  forge: "Forge",
+  neoforge: "NeoForge",
+};
 
 const purgeLogs = async (installation: string | null = null) =>
   `Moved ${await api.purgeLogs(installation)} log items to Trash`;
@@ -985,7 +1125,7 @@ const purgeCache = async () => `Moved ${await api.purgeCache()} cache items to T
 const CATEGORIES: [FolderCategory, string, string][] = [
   ["logs", "Logs", "Text records of what the game and launcher did. Useful for debugging crashes, safe to delete."],
   ["cache", "Cache", "Temporary downloads and caches. Safe to delete — the launcher and game rebuild them."],
-  ["yours", "Your stuff", "Worlds, packs, screenshots, mods and settings. MIM never touches these."],
+  ["yours", "Library", "Worlds, packs, screenshots, mods and settings. MIM never touches these."],
   ["game", "Game files", "Downloaded by the launcher. Deleting them just forces a big re-download."],
   ["launcher", "Launcher", "Launcher accounts, profiles and settings. Leave these alone."],
   ["other", "Other", "Mod data and anything MIM doesn't recognize."],

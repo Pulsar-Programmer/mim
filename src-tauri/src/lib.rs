@@ -152,10 +152,41 @@ fn parse_version_id(version_id: &str) -> (String, String) {
             return ("fabric".into(), game.into());
         }
     }
+    if let Some(v) = version_id.strip_prefix("neoforge-") {
+        return ("neoforge".into(), neoforge_game(v));
+    }
     if version_id.to_lowercase().contains("forge") {
-        return ("forge".into(), version_id.into());
+        // "1.20.1-forge-47.2.0"
+        let game = version_id.split('-').next().unwrap_or(version_id);
+        return ("forge".into(), game.into());
     }
     ("vanilla".into(), version_id.into())
+}
+
+/// NeoForge numbers its builds after the game: 21.1.77 is for 1.21.1, 21.0.x
+/// for 1.21, and since the year-based versions 26.1.0.x is for 26.1.
+fn neoforge_game(neo: &str) -> String {
+    let p: Vec<&str> = neo.split(['.', '-']).collect();
+    let year_based = p[0].parse::<u32>().is_ok_and(|n| n >= 25);
+    match (year_based, p.as_slice()) {
+        (true, [y, m, "0", ..]) => format!("{y}.{m}"),
+        (true, [y, m, patch, ..]) => format!("{y}.{m}.{patch}"),
+        (false, [a, "0", ..]) => format!("1.{a}"),
+        (false, [a, b, ..]) => format!("1.{a}.{b}"),
+        _ => neo.into(),
+    }
+}
+
+/// The start every NeoForge build for `game` shares: "1.21.1" -> "21.1.", "26.1" -> "26.1.0.".
+fn neoforge_prefix(game: &str) -> String {
+    let p: Vec<&str> = game.split('.').collect();
+    match p.as_slice() {
+        ["1", a] => format!("{a}.0."),
+        ["1", a, b] => format!("{a}.{b}."),
+        [y, m] => format!("{y}.{m}.0."),
+        [y, m, patch] => format!("{y}.{m}.{patch}."),
+        _ => format!("{game}."),
+    }
 }
 
 fn data_url_from_png(bytes: &[u8]) -> String {
@@ -303,8 +334,15 @@ struct LoaderVersion {
     stable: bool,
 }
 
+/// Loader versions for a game version, newest first. Forge marks its
+/// recommended build as stable.
 #[tauri::command]
-async fn list_loader_versions(game_version: String) -> CmdResult<Vec<LoaderVersion>> {
+async fn list_loader_versions(loader: String, game_version: String) -> CmdResult<Vec<LoaderVersion>> {
+    match loader.as_str() {
+        "forge" => return forge_versions(&game_version).await,
+        "neoforge" => return neoforge_versions(&game_version).await,
+        _ => {}
+    }
     let url = format!("https://meta.fabricmc.net/v2/versions/loader/{game_version}");
     let list: Value = reqwest::get(&url).await.map_err(err)?.json().await.map_err(err)?;
     let arr = list.as_array().ok_or("no fabric loaders for this version")?;
@@ -319,6 +357,150 @@ async fn list_loader_versions(game_version: String) -> CmdResult<Vec<LoaderVersi
         .collect())
 }
 
+const FORGE_MAVEN: &str = "https://maven.minecraftforge.net/net/minecraftforge/forge";
+
+async fn forge_versions(game: &str) -> CmdResult<Vec<LoaderVersion>> {
+    let promos = send_json(
+        http().get("https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json"),
+    )
+    .await?;
+    let recommended = promos["promos"][format!("{game}-recommended")].as_str().map(String::from);
+    let xml = http()
+        .get(format!("{FORGE_MAVEN}/maven-metadata.xml"))
+        .send()
+        .await
+        .map_err(err)?
+        .text()
+        .await
+        .map_err(err)?;
+    let mut vs: Vec<String> = forge_list(&xml, game);
+    vs.sort_by_key(|v| std::cmp::Reverse(v.split('.').map(|n| n.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>()));
+    Ok(vs
+        .into_iter()
+        .map(|v| LoaderVersion { stable: recommended.as_ref() == Some(&v), version: v })
+        .collect())
+}
+
+const NEO_MAVEN: &str = "https://maven.neoforged.net/releases/net/neoforged/neoforge";
+
+async fn neoforge_versions(game: &str) -> CmdResult<Vec<LoaderVersion>> {
+    let list = send_json(
+        http().get("https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge"),
+    )
+    .await?;
+    let prefix = neoforge_prefix(game);
+    let mut vs: Vec<String> = strs(&list["versions"]).into_iter().filter(|v| v.starts_with(&prefix)).collect();
+    vs.sort_by_key(|v| {
+        std::cmp::Reverse(v.split(['.', '-']).map(|n| n.parse::<u32>().unwrap_or(0)).collect::<Vec<_>>())
+    });
+    Ok(vs
+        .into_iter()
+        .map(|v| LoaderVersion { stable: !v.contains("beta"), version: v })
+        .collect())
+}
+
+/// Forge builds for `game` out of maven-metadata.xml ("1.20.1-47.2.0" -> "47.2.0").
+fn forge_list(xml: &str, game: &str) -> Vec<String> {
+    xml.split(&format!("<version>{game}-"))
+        .skip(1)
+        .filter_map(|s| s.split('<').next())
+        .filter(|v| !v.is_empty() && v.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .map(String::from)
+        .collect()
+}
+
+/// The newest Java the Minecraft launcher downloaded for itself, else `java` on PATH.
+fn find_java() -> Option<PathBuf> {
+    let mut javas = vec![];
+    for root in [Some(mc_dir()), dirs::data_dir().map(|d| d.join("minecraft"))].into_iter().flatten() {
+        let mut files = vec![];
+        walk_files(&root.join("runtime"), &mut files);
+        javas.extend(files.into_iter().filter(|f| f.ends_with("bin/java")));
+    }
+    // each runtime's Home has a `release` file with JAVA_VERSION="21.0.3"
+    let major = |java: &PathBuf| {
+        let release = fs::read_to_string(java.parent()?.parent()?.join("release")).ok()?;
+        let v = release.lines().find_map(|l| l.strip_prefix("JAVA_VERSION=\""))?;
+        v.split(['.', '"']).next()?.parse::<u32>().ok()
+    };
+    javas
+        .into_iter()
+        .filter_map(|j| Some((major(&j)?, j)))
+        .max_by_key(|(m, _)| *m)
+        .map(|(_, j)| j)
+        .or_else(|| {
+            let ok = std::process::Command::new("java").arg("-version").output().is_ok_and(|o| o.status.success());
+            ok.then(|| "java".into())
+        })
+}
+
+/// Runs Forge's or NeoForge's own installer headless against the minecraft
+/// folder; returns the launcher version id it made, e.g. "1.20.1-forge-47.2.0".
+async fn install_forge(loader: &str, game: &str, ver: &str, p: &Progress) -> CmdResult<String> {
+    let (name, url) = if loader == "neoforge" {
+        ("NeoForge", format!("{NEO_MAVEN}/{ver}/neoforge-{ver}-installer.jar"))
+    } else {
+        let full = format!("{game}-{ver}");
+        ("Forge", format!("{FORGE_MAVEN}/{full}/forge-{full}-installer.jar"))
+    };
+    let jar = std::env::temp_dir().join(format!("mim-{loader}-{game}-{ver}-installer.jar"));
+    p.say(format!("Downloading {name} {ver}"));
+    download(&url, None, &jar).await?;
+    let id = zip_read(&jar, &|n| n == "install_profile.json")
+        .first()
+        .and_then(|(_, b)| serde_json::from_slice::<Value>(b).ok())
+        .and_then(|v| v["version"].as_str().map(String::from))
+        .ok_or(format!("This {name} version is too old for MIM to install"))?;
+    let mc = mc_dir();
+    if !mc.join("versions").join(&id).join(format!("{id}.json")).exists() {
+        let java = find_java().ok_or("Couldn't find Java — open the Minecraft launcher once so it downloads its own")?;
+        let before = read_profiles()?;
+        let (jar2, app) = (jar.clone(), p.app.clone());
+        let res = tauri::async_runtime::spawn_blocking(move || run_forge_installer(name, &java, &jar2, &mc, app))
+            .await
+            .map_err(err)?;
+        // the installer adds its own profile; MIM registers a named one instead
+        let mut after = read_profiles()?;
+        after["profiles"] = before["profiles"].clone();
+        write_profiles(&after)?;
+        res?;
+    }
+    let _ = fs::remove_file(&jar);
+    let _ = fs::remove_file(jar.with_extension("jar.log"));
+    Ok(id)
+}
+
+fn run_forge_installer(name: &str, java: &Path, jar: &Path, mc: &Path, app: Option<tauri::AppHandle>) -> CmdResult<()> {
+    use std::io::BufRead;
+    let p = Progress::new(app);
+    let mut child = std::process::Command::new(java)
+        .arg("-jar")
+        .arg(jar)
+        .arg("--installClient")
+        .arg(mc)
+        .current_dir(std::env::temp_dir())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(err)?;
+    let out = child.stdout.take().ok_or("no installer output")?;
+    let mut last = std::time::Instant::now();
+    let mut tail = String::new();
+    for line in std::io::BufReader::new(out).lines().map_while(Result::ok) {
+        // it prints thousands of lines; a few updates a second is plenty
+        if last.elapsed().as_millis() > 120 {
+            p.say(format!("{name}: {}", line.trim()));
+            last = std::time::Instant::now();
+        }
+        tail = line;
+    }
+    if child.wait().map_err(err)?.success() {
+        Ok(())
+    } else {
+        Err(format!("{name}'s installer failed: {tail}"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Install
 // ---------------------------------------------------------------------------
@@ -327,13 +509,18 @@ async fn list_loader_versions(game_version: String) -> CmdResult<Vec<LoaderVersi
 struct InstallSpec {
     name: String,
     game_version: String,
-    fabric: bool,
+    /// "vanilla", "fabric", "forge" or "neoforge"
+    loader: String,
     loader_version: Option<String>,
     standards: Vec<String>,
 }
 
 #[tauri::command]
-async fn create_installation(spec: InstallSpec) -> CmdResult<()> {
+async fn create_installation(app: tauri::AppHandle, spec: InstallSpec) -> CmdResult<()> {
+    create_in(spec, &Progress::new(Some(app))).await
+}
+
+async fn create_in(spec: InstallSpec, p: &Progress) -> CmdResult<()> {
     let name = spec.name.trim();
     if name.is_empty() || name.starts_with('.') || name.contains('/') {
         return Err("Invalid installation name".into());
@@ -346,11 +533,26 @@ async fn create_installation(spec: InstallSpec) -> CmdResult<()> {
     fs::create_dir_all(&inst).map_err(err)?;
 
     // resolve the launcher version id
-    let version_id = if spec.fabric {
+    let version_id = if spec.loader == "forge" || spec.loader == "neoforge" {
+        let ver = match spec.loader_version {
+            Some(v) => v,
+            None => {
+                let vs = list_loader_versions(spec.loader.clone(), spec.game_version.clone()).await?;
+                vs.iter().find(|l| l.stable).or(vs.first()).ok_or("no loader build for this version")?.version.clone()
+            }
+        };
+        match install_forge(&spec.loader, &spec.game_version, &ver, p).await {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = fs::remove_dir(&inst); // still empty
+                return Err(e);
+            }
+        }
+    } else if spec.loader == "fabric" {
         let loader = match spec.loader_version {
             Some(v) => v,
             None => {
-                let loaders = list_loader_versions(spec.game_version.clone()).await?;
+                let loaders = list_loader_versions("fabric".into(), spec.game_version.clone()).await?;
                 loaders
                     .iter()
                     .find(|l| l.stable)
@@ -403,7 +605,7 @@ async fn create_installation(spec: InstallSpec) -> CmdResult<()> {
     profiles["profiles"][key] = json!({
         "created": now,
         "gameDir": inst.to_string_lossy(),
-        "icon": "Grass",
+        "icon": if spec.loader.contains("forge") { "Furnace" } else { "Grass" },
         "lastUsed": now,
         "lastVersionId": version_id,
         "name": name,
@@ -840,68 +1042,211 @@ struct Pack {
     is_dir: bool,
 }
 
+/// A resource pack's pack.mcmeta and pack.png, from a zip or a folder.
 #[derive(Serialize)]
-struct LocalPacks {
-    installation: String,
-    packs: Vec<Pack>,
+struct PackInfo {
+    file: String,
+    path: String,
+    description: Option<String>,
+    icon: Option<String>,
+    format: Option<i64>,
+    is_dir: bool,
+    size_bytes: u64,
+    modified: u64,
 }
 
-#[derive(Serialize)]
-struct PacksOverview {
-    shared_path: String,
-    shared: Vec<Pack>,
-    linked_installations: Vec<String>,
-    local: Vec<LocalPacks>,
-}
-
-fn scan_packs(dir: &Path) -> Vec<Pack> {
-    let paths: Vec<PathBuf> = fs::read_dir(dir)
-        .map(|rd| {
-            rd.flatten()
-                .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
-                .map(|e| e.path())
-                .collect()
-        })
-        .unwrap_or_default();
-    let mut packs = par_map(&paths, |p| Pack {
-        name: p.file_name().unwrap_or_default().to_string_lossy().into(),
-        size_bytes: entry_size(p),
+fn read_pack(p: &Path) -> PackInfo {
+    let files: Vec<(String, Vec<u8>)> = if p.is_dir() {
+        ["pack.mcmeta", "pack.png"]
+            .iter()
+            .filter_map(|n| Some((n.to_string(), fs::read(p.join(n)).ok()?)))
+            .collect()
+    } else {
+        zip_read(p, &|n| n == "pack.mcmeta" || n == "pack.png")
+    };
+    let get = |n: &str| files.iter().find(|(f, _)| f == n).map(|(_, b)| b);
+    // some packs start pack.mcmeta with a BOM
+    let meta: Value = get("pack.mcmeta")
+        .and_then(|b| serde_json::from_slice(b.strip_prefix(b"\xef\xbb\xbf").unwrap_or(b)).ok())
+        .unwrap_or(Value::Null);
+    let description = plain_text(&meta["pack"]["description"]);
+    PackInfo {
+        file: p.file_name().unwrap_or_default().to_string_lossy().into(),
+        path: p.to_string_lossy().into(),
+        description: (!description.trim().is_empty()).then_some(description),
+        icon: get("pack.png").map(|b| data_url_from_png(b)),
+        format: meta["pack"]["pack_format"].as_i64(),
         is_dir: p.is_dir(),
-    });
-    packs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-    packs
+        size_bytes: entry_size(p),
+        modified: modified_secs(p),
+    }
+}
+
+#[derive(Serialize)]
+struct PackList {
+    dir: String,
+    /// the folder is a link to the shared one
+    linked: bool,
+    /// turned-on packs from options.txt, top (winning) one first
+    enabled: Vec<String>,
+    packs: Vec<PackInfo>,
+}
+
+/// options.txt's resourcePacks list, bottom first like Minecraft keeps it.
+fn pack_order(game: &Path) -> Vec<String> {
+    let text = fs::read_to_string(game.join("options.txt")).unwrap_or_default();
+    parse_options(&text)
+        .into_iter()
+        .find(|(k, _)| k == "resourcePacks")
+        .and_then(|(_, v)| serde_json::from_str(&v).ok())
+        .unwrap_or_default()
 }
 
 #[tauri::command(async)]
-fn list_resourcepacks() -> CmdResult<PacksOverview> {
-    let shared_dir = mc_dir().join("resourcepacks");
-    let mut linked = vec![];
-    let mut local = vec![];
-    if let Ok(entries) = fs::read_dir(installations_dir()) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if !path.is_dir() || name.starts_with('.') || name == "Shared" {
-                continue;
-            }
-            let rp = path.join("resourcepacks");
-            if rp.is_symlink() {
-                linked.push(name);
-            } else if rp.is_dir() {
-                let packs = scan_packs(&rp);
-                if !packs.is_empty() {
-                    local.push(LocalPacks { installation: name, packs });
-                }
-            }
-        }
-    }
-    linked.sort();
-    Ok(PacksOverview {
-        shared_path: shared_dir.to_string_lossy().into(),
-        shared: scan_packs(&shared_dir),
-        linked_installations: linked,
-        local,
+fn list_packs(installation: Option<String>) -> CmdResult<PackList> {
+    let game = game_dir(installation.as_deref())?;
+    let dir = game.join("resourcepacks");
+    let paths: Vec<PathBuf> = fs::read_dir(&dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    let n = p.file_name().unwrap_or_default().to_string_lossy();
+                    !n.starts_with('.') && (p.is_dir() || n.ends_with(".zip"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut packs = par_map(&paths, |p| read_pack(p));
+    packs.sort_by_key(|p| p.file.to_lowercase());
+    Ok(PackList {
+        dir: dir.to_string_lossy().into(),
+        linked: dir.is_symlink(),
+        enabled: pack_order(&game)
+            .iter()
+            .rev()
+            .filter_map(|e| e.strip_prefix("file/").map(String::from))
+            .collect(),
+        packs,
     })
+}
+
+/// Sets which packs are on, top (winning) one first. Built-in entries like
+/// "vanilla" and mod-provided ones stay underneath, as Minecraft expects.
+#[tauri::command(async)]
+fn set_packs(installation: Option<String>, enabled: Vec<String>) -> CmdResult<()> {
+    set_packs_in(&game_dir(installation.as_deref())?, &enabled)
+}
+
+fn set_packs_in(game: &Path, enabled: &[String]) -> CmdResult<()> {
+    let mut order: Vec<String> = pack_order(game).into_iter().filter(|e| !e.starts_with("file/")).collect();
+    if order.is_empty() {
+        order.push("vanilla".into());
+    }
+    order.extend(enabled.iter().rev().map(|f| format!("file/{f}")));
+    let opts = game.join("options.txt");
+    let mut entries = parse_options(&fs::read_to_string(&opts).unwrap_or_default());
+    let value = serde_json::to_string(&order).map_err(err)?;
+    match entries.iter_mut().find(|(k, _)| k == "resourcePacks") {
+        Some(e) => e.1 = value,
+        None => entries.push(("resourcePacks".into(), value)),
+    }
+    // a pack turned on here shouldn't stay in the "incompatible" list
+    if let Some(e) = entries.iter_mut().find(|(k, _)| k == "incompatibleResourcePacks") {
+        let rest: Vec<String> = serde_json::from_str::<Vec<String>>(&e.1)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|x| !order.contains(x))
+            .collect();
+        e.1 = serde_json::to_string(&rest).map_err(err)?;
+    }
+    write_options_at(&opts, &entries)
+}
+
+#[tauri::command(async)]
+fn add_packs(installation: Option<String>, files: Vec<String>) -> CmdResult<usize> {
+    copy_in(&game_dir(installation.as_deref())?.join("resourcepacks"), &files, ".zip")
+}
+
+// ---------------------------------------------------------------------------
+// Mod configs — config/ plus the folders mods drop straight into the game
+// folder (journeymap/, XaeroWaypoints/, schematics/ …)
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ConfigFile {
+    /// relative to config/, e.g. "sodium-options.json" or "fabric/indigo-renderer.properties"
+    rel: String,
+    path: String,
+    size_bytes: u64,
+    modified: u64,
+}
+
+#[derive(Serialize)]
+struct ConfigOverview {
+    dir: String,
+    files: Vec<ConfigFile>,
+    /// top-level things in the game folder that Minecraft itself doesn't make
+    loose: Vec<FolderItem>,
+}
+
+const TEXT_EXTS: [&str; 13] = [
+    "json", "json5", "jsonc", "toml", "properties", "txt", "cfg", "conf", "yml", "yaml", "ini", "snbt", "hjson",
+];
+
+fn is_text_config(p: &Path) -> bool {
+    p.extension().is_some_and(|e| TEXT_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()))
+}
+
+#[tauri::command(async)]
+fn list_config(installation: Option<String>) -> CmdResult<ConfigOverview> {
+    let game = game_dir(installation.as_deref())?;
+    let dir = game.join("config");
+    let mut paths = vec![];
+    walk_files(&dir, &mut paths);
+    let mut files: Vec<ConfigFile> = paths
+        .iter()
+        .map(|p| ConfigFile {
+            rel: p.strip_prefix(&dir).unwrap_or(p).to_string_lossy().into(),
+            path: p.to_string_lossy().into(),
+            size_bytes: fs::metadata(p).map(|m| m.len()).unwrap_or(0),
+            modified: modified_secs(p),
+        })
+        .collect();
+    files.sort_by_key(|f| f.rel.to_lowercase());
+    let loose = root_entries(&game, "other")
+        .into_iter()
+        .filter(|p| !p.file_name().unwrap_or_default().to_string_lossy().starts_with('.'))
+        .map(|p| FolderItem {
+            name: p.file_name().unwrap_or_default().to_string_lossy().into(),
+            category: "other",
+            size_bytes: entry_size(&p),
+            is_dir: p.is_dir(),
+            path: p.to_string_lossy().into(),
+        })
+        .collect();
+    Ok(ConfigOverview { dir: dir.to_string_lossy().into(), files, loose })
+}
+
+#[tauri::command(async)]
+fn read_config(path: String) -> CmdResult<String> {
+    let p = inside_mc(&path)?;
+    if !is_text_config(&p) {
+        return Err("MIM only opens text config files".into());
+    }
+    if fs::metadata(&p).map_err(err)?.len() > 2 << 20 {
+        return Err("That file is too big to edit here — reveal it instead".into());
+    }
+    fs::read_to_string(&p).map_err(|_| "That file isn't plain text".into())
+}
+
+#[tauri::command(async)]
+fn write_config(path: String, text: String) -> CmdResult<()> {
+    let p = inside_mc(&path)?;
+    if !is_text_config(&p) || !p.is_file() {
+        return Err("MIM only edits existing text config files".into());
+    }
+    fs::write(&p, text).map_err(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1516,9 +1861,12 @@ fn read_options(path: String) -> CmdResult<Vec<(String, String)>> {
 /// Rewrites options.txt, keeping the previous version as options.txt.bak.
 #[tauri::command(async)]
 fn write_options(path: String, entries: Vec<(String, String)>) -> CmdResult<()> {
-    let p = options_path(&path)?;
+    write_options_at(&options_path(&path)?, &entries)
+}
+
+fn write_options_at(p: &Path, entries: &[(String, String)]) -> CmdResult<()> {
     let mut text = String::new();
-    for (k, v) in &entries {
+    for (k, v) in entries {
         if k.is_empty() || k.contains([':', '\n']) || v.contains('\n') {
             return Err(format!("invalid option \"{k}\""));
         }
@@ -1876,8 +2224,8 @@ fn trash_item(path: String) -> CmdResult<()> {
         .and_then(|d| d.file_name())
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
-    if !["saves", "mods", "screenshots"].contains(&parent.as_str()) {
-        return Err("MIM only trashes worlds, mods and screenshots".into());
+    if !["saves", "mods", "screenshots", "resourcepacks", "shaderpacks"].contains(&parent.as_str()) {
+        return Err("MIM only trashes worlds, mods, packs and screenshots".into());
     }
     trash::delete(&p).map_err(err)
 }
@@ -1967,6 +2315,28 @@ struct Mod {
     loader: Option<&'static str>,
     icon: Option<String>,
     size_bytes: u64,
+    /// unix seconds the file was last changed — roughly when it was added
+    modified: u64,
+    /// a library other mods need rather than something you'd notice in game
+    library: bool,
+}
+
+/// Mod Menu's "library" badge, or an id that reads like one.
+// ponytail: name heuristic, Modrinth's "library" category would be exact but costs a request
+fn looks_like_library(id: &str) -> bool {
+    let id = id.to_lowercase();
+    ["api", "lib", "config", "kotlin", "architectury", "mixinextras", "fabric-language", "forgified"]
+        .iter()
+        .any(|k| id.contains(k))
+}
+
+fn modified_secs(p: &Path) -> u64 {
+    fs::metadata(p)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 const MOD_META: [&str; 4] = [
@@ -2002,6 +2372,8 @@ fn read_mod(path: &Path) -> Mod {
         authors: vec![],
         loader: None,
         icon: None,
+        modified: modified_secs(path),
+        library: false,
     };
     let metas = zip_read(path, &|n| MOD_META.contains(&n));
     let mut icon_path = None;
@@ -2017,6 +2389,7 @@ fn read_mod(path: &Path) -> Mod {
             m.name = n.into();
         }
         m.description = meta["description"].as_str().map(String::from);
+        m.library = strs(&v["custom"]["modmenu"]["badges"]).iter().any(|b| b == "library");
         let people = if quilt { &meta["contributors"] } else { &v["authors"] };
         m.authors = match people {
             Value::Array(a) => a
@@ -2047,6 +2420,7 @@ fn read_mod(path: &Path) -> Mod {
         m.authors = toml_field(&t, "authors").into_iter().collect();
         icon_path = toml_field(&t, "logoFile");
     }
+    m.library = m.library || looks_like_library(m.id.as_deref().unwrap_or(&m.file));
     if let Some(ip) = icon_path {
         let ip = ip.trim_start_matches('/').to_string();
         if let Some((_, b)) = zip_read(path, &|n| n == ip).first() {
@@ -2099,21 +2473,545 @@ fn toggle_mod(path: String) -> CmdResult<String> {
     Ok(next.to_string_lossy().into())
 }
 
-#[tauri::command(async)]
-fn add_mods(installation: Option<String>, files: Vec<String>) -> CmdResult<usize> {
-    let dir = mods_dir(installation.as_deref())?;
-    fs::create_dir_all(&dir).map_err(err)?;
+/// Copies the picked files ending in `ext` into `dir`, never overwriting.
+fn copy_in(dir: &Path, files: &[String], ext: &str) -> CmdResult<usize> {
+    fs::create_dir_all(dir).map_err(err)?;
     let mut n = 0;
     for f in files {
-        let src = PathBuf::from(&f);
+        let src = PathBuf::from(f);
         let name = src.file_name().unwrap_or_default().to_string_lossy().to_string();
-        if !name.ends_with(".jar") {
+        if !name.ends_with(ext) {
             continue;
         }
-        fs::copy(&src, free_path(&dir, &name)).map_err(err)?;
+        fs::copy(&src, free_path(dir, &name)).map_err(err)?;
         n += 1;
     }
     Ok(n)
+}
+
+#[tauri::command(async)]
+fn add_mods(installation: Option<String>, files: Vec<String>) -> CmdResult<usize> {
+    copy_in(&mods_dir(installation.as_deref())?, &files, ".jar")
+}
+
+// ---------------------------------------------------------------------------
+// Modrinth — import mods, collections and modpacks from a pasted link, and
+// update mods in place. CurseForge's API needs a private key, so CurseForge
+// links go through the same project's Modrinth page (most big mods are on both).
+// ---------------------------------------------------------------------------
+
+const MR: &str = "https://api.modrinth.com";
+
+fn http() -> &'static reqwest::Client {
+    static C: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        reqwest::Client::builder()
+            // Modrinth asks every client to identify itself
+            .user_agent(concat!("MIM/", env!("CARGO_PKG_VERSION"), " (Minecraft Installation Manager)"))
+            .build()
+            .expect("http client")
+    })
+}
+
+async fn send_json(rb: reqwest::RequestBuilder) -> CmdResult<Value> {
+    let r = rb.send().await.map_err(err)?;
+    match r.status() {
+        s if s.is_success() => r.json().await.map_err(err),
+        s if s == 404 => Err("Nothing on Modrinth at that link".into()),
+        s => Err(format!("Modrinth said {s}")),
+    }
+}
+
+/// What a pasted link points at: ("project", slug), ("collection", id) or
+/// ("curseforge", slug). A bare word counts as a Modrinth slug.
+fn parse_link(link: &str) -> CmdResult<(&'static str, String)> {
+    let s = link.trim().split(['?', '#']).next().unwrap_or("");
+    let s = s.trim_start_matches("https://").trim_start_matches("http://");
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    let host = parts.first().map(|h| h.trim_start_matches("www.")).unwrap_or("");
+    match parts.as_slice() {
+        [_, "collection", id, ..] if host == "modrinth.com" => Ok(("collection", id.to_string())),
+        [_, _kind, slug, ..] if host == "modrinth.com" => Ok(("project", slug.to_string())),
+        [_, "minecraft", _kind, slug, ..] if host.ends_with("curseforge.com") => {
+            Ok(("curseforge", slug.to_string()))
+        }
+        [slug] if !slug.contains('.') => Ok(("project", slug.to_string())),
+        _ => Err("Paste a Modrinth or CurseForge link".into()),
+    }
+}
+
+fn strs(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+        .unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct LinkInfo {
+    /// "mod", "modpack", "resourcepack", "shader", … or "collection"
+    kind: String,
+    title: String,
+    icon: Option<String>,
+    projects: Vec<String>,
+    game_versions: Vec<String>,
+    loaders: Vec<String>,
+    /// set when a CurseForge link was matched to Modrinth
+    note: Option<String>,
+}
+
+#[tauri::command]
+async fn resolve_link(link: String) -> CmdResult<LinkInfo> {
+    let (kind, id) = parse_link(&link)?;
+    if kind == "collection" {
+        let c = send_json(http().get(format!("{MR}/v3/collection/{id}"))).await?;
+        return Ok(LinkInfo {
+            kind: "collection".into(),
+            title: c["name"].as_str().unwrap_or("Collection").into(),
+            icon: c["icon_url"].as_str().map(String::from),
+            projects: strs(&c["projects"]),
+            game_versions: vec![],
+            loaders: vec![],
+            note: None,
+        });
+    }
+    let p = match send_json(http().get(format!("{MR}/v2/project/{id}"))).await {
+        Err(_) if kind == "curseforge" => {
+            return Err(format!(
+                "\"{id}\" isn't on Modrinth under the same name — MIM reads CurseForge links through Modrinth, since CurseForge's API needs a private key"
+            ))
+        }
+        r => r?,
+    };
+    Ok(LinkInfo {
+        kind: p["project_type"].as_str().unwrap_or("mod").into(),
+        title: p["title"].as_str().unwrap_or(&id).into(),
+        icon: p["icon_url"].as_str().map(String::from),
+        projects: strs(&json!([p["id"]])),
+        game_versions: strs(&p["game_versions"]),
+        loaders: strs(&p["loaders"]),
+        note: (kind == "curseforge").then(|| "found on Modrinth".into()),
+    })
+}
+
+/// An installation's folder, game version and loader ("fabric", "forge", "vanilla").
+fn inst_target(name: &str) -> CmdResult<(PathBuf, String, String)> {
+    let dir = game_dir(Some(name))?;
+    let profiles = read_profiles()?;
+    let vid = profiles["profiles"]
+        .as_object()
+        .and_then(|m| {
+            m.values()
+                .find(|p| p["gameDir"].as_str() == Some(dir.to_string_lossy().as_ref()))
+        })
+        .and_then(|p| p["lastVersionId"].as_str())
+        .ok_or(format!("\"{name}\" isn't in the launcher, so MIM can't tell its version"))?;
+    let (loader, game) = parse_version_id(vid);
+    Ok((dir, game, loader))
+}
+
+fn sha512_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha512::digest(bytes))
+}
+
+/// Downloads to `dest` (via a .part file), checking the hash when given.
+async fn download(url: &str, sha512: Option<&str>, dest: &Path) -> CmdResult<()> {
+    let r = http().get(url).send().await.map_err(err)?;
+    if !r.status().is_success() {
+        return Err(format!("download failed ({})", r.status()));
+    }
+    let bytes = r.bytes().await.map_err(err)?;
+    if sha512.is_some_and(|h| h != sha512_hex(&bytes)) {
+        return Err("download didn't match its checksum".into());
+    }
+    fs::create_dir_all(dest.parent().ok_or("bad path")?).map_err(err)?;
+    let part = dest.with_file_name(format!("{}.part", dest.file_name().ok_or("bad path")?.to_string_lossy()));
+    fs::write(&part, &bytes).map_err(err)?;
+    fs::rename(&part, dest).map_err(err)
+}
+
+/// Newest version for the game version (and loader, for mods and modpacks) —
+/// releases before betas. Nothing for that version means nothing is installed.
+async fn pick_version(project: &str, kind: &str, game: &str, loader: &str) -> CmdResult<Option<Value>> {
+    let url = format!("{MR}/v2/project/{project}/version");
+    let mut q = vec![("game_versions", json!([game]).to_string())];
+    if kind == "mod" || kind == "modpack" {
+        q.push(("loaders", json!([loader]).to_string()));
+    }
+    let vs = send_json(http().get(&url).query(&q)).await?;
+    let vs = vs.as_array().cloned().unwrap_or_default();
+    Ok(vs
+        .iter()
+        .find(|v| v["version_type"] == "release")
+        .or(vs.first())
+        .cloned())
+}
+
+/// (url, safe file name, sha512) of a version's main file.
+fn primary_file(v: &Value) -> Option<(String, String, Option<String>)> {
+    let files = v["files"].as_array()?;
+    let f = files.iter().find(|f| f["primary"] == true).or(files.first())?;
+    let name = Path::new(f["filename"].as_str()?).file_name()?.to_string_lossy().to_string();
+    Some((
+        f["url"].as_str()?.into(),
+        name,
+        f["hashes"]["sha512"].as_str().map(String::from),
+    ))
+}
+
+/// (sha512, path) of every mod jar in `dir`, disabled ones too.
+fn jar_hashes(dir: &Path, with_disabled: bool) -> Vec<(String, PathBuf)> {
+    let jars: Vec<PathBuf> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| e.path())
+                .filter(|p| {
+                    let n = p.to_string_lossy();
+                    n.ends_with(".jar") || (with_disabled && n.ends_with(".jar.disabled"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    par_map(&jars, |p| (fs::read(p).map(|b| sha512_hex(&b)).unwrap_or_default(), p.clone()))
+}
+
+#[derive(Clone, Serialize)]
+struct ProgressMsg {
+    done: usize,
+    total: usize, // 0 while the amount of work isn't known yet
+    label: String,
+}
+
+/// Reports a long job to the window as "progress" events (silent in tests).
+struct Progress {
+    app: Option<tauri::AppHandle>,
+    done: std::sync::atomic::AtomicUsize,
+    total: std::sync::atomic::AtomicUsize,
+}
+
+impl Progress {
+    fn new(app: Option<tauri::AppHandle>) -> Self {
+        Self { app, done: 0.into(), total: 0.into() }
+    }
+    fn say(&self, label: impl Into<String>) {
+        use std::sync::atomic::Ordering::Relaxed;
+        use tauri::Emitter;
+        if let Some(app) = &self.app {
+            let _ = app.emit(
+                "progress",
+                ProgressMsg { done: self.done.load(Relaxed), total: self.total.load(Relaxed), label: label.into() },
+            );
+        }
+    }
+    fn add(&self, n: usize) {
+        self.total.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    }
+    fn tick(&self, label: impl Into<String>) {
+        self.done.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.say(label)
+    }
+}
+
+/// Runs the jobs a few at a time, so big packs download in parallel without
+/// tripping Modrinth's rate limit, ticking `p` as each one lands.
+// ponytail: fixed chunks of 8, a semaphore would keep the pipe fuller
+async fn in_chunks<T: Send + 'static>(
+    jobs: Vec<impl std::future::Future<Output = T> + Send + 'static>,
+    p: &Progress,
+    label: impl Fn(&T) -> String,
+) -> CmdResult<Vec<T>> {
+    p.add(jobs.len());
+    let mut out = vec![];
+    let mut it = jobs.into_iter().peekable();
+    while it.peek().is_some() {
+        let handles: Vec<_> = it.by_ref().take(8).map(tauri::async_runtime::spawn).collect();
+        for h in handles {
+            let r = h.await.map_err(err)?;
+            p.tick(label(&r));
+            out.push(r);
+        }
+    }
+    Ok(out)
+}
+
+fn done_label(r: &Result<String, String>) -> String {
+    match r {
+        Ok(n) => n.clone(),
+        Err(e) => format!("skipped {e}"),
+    }
+}
+
+#[derive(Serialize, Default, Debug)]
+struct ImportReport {
+    title: String,
+    added: Vec<String>,
+    skipped: Vec<String>,
+}
+
+enum Fetched {
+    Added(String, Vec<String>), // title, required dependencies
+    Skipped(String),
+    Quiet, // a dependency that's already there
+}
+
+/// Puts one project (a mod, resource pack or shader) into the installation.
+async fn fetch_project(p: Value, dir: PathBuf, game: String, loader: String, have: bool, dep: bool) -> Fetched {
+    let title = p["title"].as_str().unwrap_or("?").to_string();
+    let kind = p["project_type"].as_str().unwrap_or("");
+    if have {
+        return if dep { Fetched::Quiet } else { Fetched::Skipped(format!("{title} (already installed)")) };
+    }
+    let folder = match kind {
+        "mod" if loader == "vanilla" => return Fetched::Skipped(format!("{title} (needs Fabric)")),
+        "mod" => "mods",
+        "resourcepack" => "resourcepacks",
+        "shader" => "shaderpacks",
+        other => return Fetched::Skipped(format!("{title} ({other}s import on their own)")),
+    };
+    let id = p["id"].as_str().unwrap_or("");
+    let v = match pick_version(id, kind, &game, &loader).await {
+        Ok(Some(v)) => v,
+        Ok(None) => return Fetched::Skipped(format!("{title} (no {game} {loader} version)")),
+        Err(e) => return Fetched::Skipped(format!("{title} ({e})")),
+    };
+    let Some((url, name, hash)) = primary_file(&v) else {
+        return Fetched::Skipped(format!("{title} (no file)"));
+    };
+    let dest = dir.join(folder).join(&name);
+    if dest.exists() {
+        return if dep { Fetched::Quiet } else { Fetched::Skipped(format!("{title} (already installed)")) };
+    }
+    if let Err(e) = download(&url, hash.as_deref(), &dest).await {
+        return Fetched::Skipped(format!("{title} ({e})"));
+    }
+    let deps = v["dependencies"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|d| d["dependency_type"] == "required")
+                .filter_map(|d| d["project_id"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    Fetched::Added(title, deps)
+}
+
+/// `dir/rel` if `rel` stays inside `dir` (pack paths come from strangers).
+fn safe_join(dir: &Path, rel: &str) -> CmdResult<PathBuf> {
+    let p = Path::new(rel);
+    if rel.is_empty() || !p.components().all(|c| matches!(c, std::path::Component::Normal(_))) {
+        return Err(format!("unsafe path in pack: {rel}"));
+    }
+    Ok(dir.join(p))
+}
+
+/// Hosts a .mrpack may download from, per Modrinth's pack format.
+fn allowed_host(url: &str) -> bool {
+    ["cdn.modrinth.com", "github.com", "raw.githubusercontent.com", "gitlab.com"]
+        .iter()
+        .any(|h| url.starts_with(&format!("https://{h}/")))
+}
+
+/// Downloads a .mrpack's files and unpacks its overrides into `dir`.
+async fn install_mrpack(
+    project: &str,
+    dir: &Path,
+    game: &str,
+    loader: &str,
+    report: &mut ImportReport,
+    p: &Progress,
+) -> CmdResult<()> {
+    let v = pick_version(project, "modpack", game, loader)
+        .await?
+        .ok_or(format!("This pack has no {game} {loader} version"))?;
+    let (url, name, hash) = primary_file(&v).ok_or("This pack has no file")?;
+    p.say(format!("Downloading {name}"));
+    let tmp = dir.join(".mim").join("pack.mrpack");
+    download(&url, hash.as_deref(), &tmp).await?;
+    // ponytail: zip_read skips entries over 16 MB, fine for configs, not for huge bundled packs
+    let mut entries = zip_read(&tmp, &|n| {
+        n == "modrinth.index.json" || n.starts_with("overrides/") || n.starts_with("client-overrides/")
+    });
+    let _ = fs::remove_file(&tmp);
+    let index: Value = entries
+        .iter()
+        .find(|(n, _)| n == "modrinth.index.json")
+        .and_then(|(_, b)| serde_json::from_slice(b).ok())
+        .ok_or("not a Modrinth pack")?;
+
+    // client-overrides sort after overrides, so they win
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    for (name, bytes) in &entries {
+        let rel = name
+            .strip_prefix("client-overrides/")
+            .or(name.strip_prefix("overrides/"));
+        let Some(rel) = rel.filter(|r| !r.is_empty() && !r.ends_with('/')) else { continue };
+        let p = safe_join(dir, rel)?;
+        fs::create_dir_all(p.parent().unwrap()).map_err(err)?;
+        fs::write(&p, bytes).map_err(err)?;
+    }
+
+    let mut jobs = vec![];
+    for f in index["files"].as_array().into_iter().flatten() {
+        if f["env"]["client"] == "unsupported" {
+            continue;
+        }
+        let path = f["path"].as_str().unwrap_or("");
+        let dest = safe_join(dir, path)?;
+        let name = dest.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let Some(url) = strs(&f["downloads"]).into_iter().find(|u| allowed_host(u)) else {
+            report.skipped.push(format!("{name} (download from an unknown site)"));
+            continue;
+        };
+        let hash = f["hashes"]["sha512"].as_str().map(String::from);
+        jobs.push(async move {
+            download(&url, hash.as_deref(), &dest)
+                .await
+                .map(|_| name.clone())
+                .map_err(|e| format!("{name} ({e})"))
+        });
+    }
+    for r in in_chunks(jobs, p, done_label).await? {
+        match r {
+            Ok(n) => report.added.push(n),
+            Err(e) => report.skipped.push(e),
+        }
+    }
+    Ok(())
+}
+
+/// Imports whatever the links point at into an installation, matching its
+/// game version and loader, and pulls in required dependencies.
+#[tauri::command]
+async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: String) -> CmdResult<ImportReport> {
+    import_in(&links, &installation, &Progress::new(Some(app))).await
+}
+
+async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdResult<ImportReport> {
+    let (dir, game, loader) = inst_target(installation)?;
+    let mut report = ImportReport::default();
+    let mut titles = vec![];
+    let mut queue = vec![];
+    for link in links.iter().map(|l| l.trim()).filter(|l| !l.is_empty()) {
+        p.say(format!("Looking up {link}"));
+        let info = match resolve_link(link.to_string()).await {
+            Ok(i) => i,
+            Err(e) => {
+                report.skipped.push(format!("{link} ({e})"));
+                continue;
+            }
+        };
+        titles.push(info.title.clone());
+        if info.kind == "modpack" {
+            install_mrpack(&info.projects[0], &dir, &game, &loader, &mut report, p).await?;
+        } else {
+            queue.extend(info.projects);
+        }
+    }
+    report.title = titles.join(", ");
+    if queue.is_empty() {
+        return Ok(report);
+    }
+    p.say("Checking what's already installed");
+
+    // projects already in mods/, so nothing comes in twice
+    let hashes: Vec<String> = jar_hashes(&dir.join("mods"), true).into_iter().map(|(h, _)| h).collect();
+    let installed = if hashes.is_empty() {
+        Value::Null
+    } else {
+        send_json(http().post(format!("{MR}/v2/version_files")).json(&json!({"hashes": hashes, "algorithm": "sha512"})))
+            .await
+            .unwrap_or(Value::Null)
+    };
+    let have: std::collections::HashSet<String> = installed
+        .as_object()
+        .map(|m| m.values().filter_map(|v| v["project_id"].as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let mut seen = std::collections::HashSet::new();
+    let mut dep = false;
+    while !queue.is_empty() {
+        let ids: Vec<String> = queue.drain(..).filter(|id| seen.insert(id.clone())).collect();
+        if ids.is_empty() {
+            break;
+        }
+        let projects = send_json(http().get(format!("{MR}/v2/projects")).query(&[("ids", json!(ids).to_string())])).await?;
+        let jobs: Vec<_> = projects
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| {
+                let has = p["id"].as_str().is_some_and(|id| have.contains(id));
+                fetch_project(p, dir.clone(), game.clone(), loader.clone(), has, dep)
+            })
+            .collect();
+        let label = |f: &Fetched| match f {
+            Fetched::Added(t, _) => t.clone(),
+            Fetched::Skipped(s) => format!("skipped {s}"),
+            Fetched::Quiet => String::new(),
+        };
+        for r in in_chunks(jobs, p, label).await? {
+            match r {
+                Fetched::Added(t, deps) => {
+                    report.added.push(t);
+                    queue.extend(deps.into_iter().filter(|d| !have.contains(d)));
+                }
+                Fetched::Skipped(s) => report.skipped.push(s),
+                Fetched::Quiet => {}
+            }
+        }
+        dep = true; // later rounds are dependencies
+    }
+    Ok(report)
+}
+
+/// Swaps every enabled mod Modrinth knows for its newest build for this
+/// installation's version and loader. Old jars go to the Trash.
+#[tauri::command]
+async fn update_mods(app: tauri::AppHandle, installation: String) -> CmdResult<ImportReport> {
+    update_in(&installation, &Progress::new(Some(app))).await
+}
+
+async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> {
+    let (dir, game, loader) = inst_target(installation)?;
+    p.say("Checking for updates");
+    let mods = dir.join("mods");
+    let current = jar_hashes(&mods, false);
+    let mut report = ImportReport { title: installation.into(), ..Default::default() };
+    if current.is_empty() {
+        return Ok(report);
+    }
+    let hashes: Vec<&String> = current.iter().map(|(h, _)| h).collect();
+    let latest = send_json(http().post(format!("{MR}/v2/version_files/update")).json(&json!({
+        "hashes": hashes,
+        "algorithm": "sha512",
+        "loaders": [loader],
+        "game_versions": [game],
+    })))
+    .await?;
+    let mut jobs = vec![];
+    for (hash, old) in current {
+        let Some((url, name, new_hash)) = latest.get(&hash).and_then(primary_file) else { continue };
+        if new_hash.as_deref() == Some(hash.as_str()) {
+            continue; // already newest
+        }
+        let dest = mods.join(&name);
+        jobs.push(async move {
+            download(&url, new_hash.as_deref(), &dest)
+                .await
+                .and_then(|_| if dest != old { trash::delete(&old).map_err(err) } else { Ok(()) })
+                .map(|_| name.clone())
+                .map_err(|e| format!("{name} ({e})"))
+        });
+    }
+    for r in in_chunks(jobs, p, done_label).await? {
+        match r {
+            Ok(n) => report.added.push(n),
+            Err(e) => report.skipped.push(e),
+        }
+    }
+    Ok(report)
 }
 
 // ---------------------------------------------------------------------------
@@ -2699,6 +3597,14 @@ mod tests {
         assert!(jei.icon.is_some());
         let z = read_mod(&root.join("installations/Hypixel 1.21.10/mods/zoomify-2.14.jar.disabled"));
         assert_eq!((z.name.as_str(), z.enabled), ("Zoomify", false));
+
+        let hy = root.join("installations/Hypixel 1.21.10");
+        assert!(read_mod(&hy.join("mods/fabric-api-0.130.0.jar")).library);
+        assert!(!read_mod(&hy.join("mods/sodium-fabric-0.6.0.jar")).library);
+        let faithful = read_pack(&root.join("resourcepacks/Faithful 32x.zip"));
+        assert_eq!(faithful.description.as_deref(), Some("The classic look, doubled."));
+        assert!(faithful.icon.is_some() && faithful.format == Some(64));
+        assert_eq!(pack_order(&hy), ["vanilla", "fabric", "file/Low Fire.zip", "file/Faithful 32x.zip"]);
     }
 
     #[test]
@@ -2755,6 +3661,134 @@ mod tests {
         let big = zip_read(&jar, &|n| n == "big.txt");
         assert_eq!(big[0].1.len(), 5000);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn parses_mod_links() {
+        let p = |l: &str| parse_link(l).map(|(k, id)| format!("{k}:{id}"));
+        assert_eq!(p("https://modrinth.com/mod/sodium").unwrap(), "project:sodium");
+        assert_eq!(p("modrinth.com/modpack/fabulously-optimized/versions?l=fabric").unwrap(), "project:fabulously-optimized");
+        assert_eq!(p("https://modrinth.com/collection/AbCd1234/").unwrap(), "collection:AbCd1234");
+        assert_eq!(p("https://www.curseforge.com/minecraft/mc-mods/jei").unwrap(), "curseforge:jei");
+        assert_eq!(p("sodium").unwrap(), "project:sodium");
+        assert!(p("https://example.com/mod/x").is_err());
+        assert!(safe_join(Path::new("/i"), "../x").is_err());
+        assert!(safe_join(Path::new("/i"), "/etc/x").is_err());
+        assert!(safe_join(Path::new("/i"), "mods/a.jar").is_ok());
+        assert!(allowed_host("https://cdn.modrinth.com/data/x.jar"));
+        assert!(!allowed_host("https://cdn.modrinth.com.evil.io/x.jar"));
+    }
+
+    // hits the real Modrinth API in a temp folder: cargo test modrinth_e2e -- --ignored
+    #[test]
+    #[ignore]
+    fn modrinth_e2e() {
+        let root = std::env::temp_dir().join(format!("mim-mr-{}", uuid::Uuid::new_v4()));
+        let inst = root.join("installations/Test");
+        fs::create_dir_all(&inst).unwrap();
+        let profile = json!({"profiles": {"t": {"gameDir": inst.to_string_lossy(), "lastVersionId": "fabric-loader-0.16.14-1.21.1"}}});
+        fs::write(root.join("launcher_profiles.json"), profile.to_string()).unwrap();
+        std::env::set_var(MC_DIR_ENV, &root);
+
+        // Mod Menu requires Fabric API and Placeholder API, which should come along
+        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/mod/modmenu".into()], "Test", &Progress::new(None))).unwrap();
+        assert!(r.added.iter().any(|t| t == "Fabric API"), "{:?}", r.added);
+        let again = tauri::async_runtime::block_on(import_in(&["modmenu".into()], "Test", &Progress::new(None))).unwrap();
+        assert!(again.added.is_empty() && again.skipped[0].contains("already"), "{:?}", again.skipped);
+        // already newest, so nothing to update
+        let u = tauri::async_runtime::block_on(update_in("Test", &Progress::new(None))).unwrap();
+        assert!(u.added.is_empty() && u.skipped.is_empty(), "{:?}", u.added);
+        // a CurseForge link to a mod that's on Modrinth too
+        let cf = tauri::async_runtime::block_on(import_in(&["https://www.curseforge.com/minecraft/mc-mods/sodium".into()], "Test", &Progress::new(None))).unwrap();
+        assert_eq!(cf.added, ["Sodium"]);
+        let files: Vec<_> = fs::read_dir(inst.join("mods")).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(files.len(), 4, "{files:?}");
+
+        // an old Sodium gets swapped for the newest one, the old jar goes to the Trash
+        for f in &files {
+            if f.to_string_lossy().starts_with("sodium") {
+                fs::remove_file(inst.join("mods").join(f)).unwrap();
+            }
+        }
+        let old = "https://cdn.modrinth.com/data/AANobbMI/versions/RncWhTxD/sodium-fabric-0.5.11%2Bmc1.21.jar";
+        tauri::async_runtime::block_on(download(old, None, &inst.join("mods/sodium-old.jar"))).unwrap();
+        let u = tauri::async_runtime::block_on(update_in("Test", &Progress::new(None))).unwrap();
+        assert!(u.added.iter().any(|n| n.starts_with("sodium")) && !inst.join("mods/sodium-old.jar").exists(), "{u:?}");
+
+        // a modpack: files from the index plus its overrides
+        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/modpack/fabulously-optimized".into()], "Test", &Progress::new(None))).unwrap();
+        assert!(r.added.len() > 10 && inst.join("config").is_dir(), "{:?}", r.skipped);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn pack_order_round_trip() {
+        let game = std::env::temp_dir().join(format!("mim-packs-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&game).unwrap();
+        fs::write(
+            game.join("options.txt"),
+            "fov:0.5\nresourcePacks:[\"vanilla\",\"fabric\",\"file/Old.zip\"]\nincompatibleResourcePacks:[\"file/B.zip\"]\n",
+        )
+        .unwrap();
+        // UI order is top first; Minecraft stores bottom first, built-ins underneath
+        set_packs_in(&game, &["A.zip".into(), "B.zip".into()]).unwrap();
+        assert_eq!(pack_order(&game), ["vanilla", "fabric", "file/B.zip", "file/A.zip"]);
+        let text = fs::read_to_string(game.join("options.txt")).unwrap();
+        assert!(text.contains("fov:0.5") && text.contains("incompatibleResourcePacks:[]"), "{text}");
+        fs::remove_dir_all(&game).unwrap();
+    }
+
+    #[test]
+    fn neoforge_versions_map_to_game() {
+        assert_eq!(neoforge_game("21.1.77"), "1.21.1");
+        assert_eq!(neoforge_game("21.0.167"), "1.21");
+        assert_eq!(neoforge_game("20.4.80-beta"), "1.20.4");
+        assert_eq!(neoforge_game("26.1.0.12"), "26.1");
+        assert_eq!(neoforge_game("26.1.2.3"), "26.1.2");
+        assert_eq!(neoforge_prefix("1.21.1"), "21.1.");
+        assert_eq!(neoforge_prefix("1.21"), "21.0.");
+        assert_eq!(neoforge_prefix("26.1"), "26.1.0.");
+        assert_eq!(parse_version_id("neoforge-21.1.77"), ("neoforge".into(), "1.21.1".into()));
+    }
+
+    #[test]
+    fn forge_versions_from_maven() {
+        let xml = "<version>1.20.1-47.4.5</version><version>1.20.1-47.4.29</version><version>1.20-46.0.1</version><version>1.7.10-10.13.4.1614-1.7.10</version>";
+        assert_eq!(forge_list(xml, "1.20.1"), ["47.4.5", "47.4.29"]);
+        assert_eq!(forge_list(xml, "1.20"), ["46.0.1"]);
+        assert!(forge_list(xml, "1.7.10").is_empty());
+    }
+
+    // real Forge installer into a temp folder: cargo test forge_e2e -- --ignored
+    #[test]
+    #[ignore]
+    fn forge_e2e() {
+        for (loader, game) in [("forge", "1.20.1"), ("neoforge", "1.21.1")] {
+            forge_e2e_one(loader, game);
+        }
+    }
+
+    fn forge_e2e_one(loader: &str, game: &str) {
+        let root = std::env::temp_dir().join(format!("mim-forge-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("installations")).unwrap();
+        fs::write(root.join("launcher_profiles.json"), r#"{"profiles":{}}"#).unwrap();
+        std::env::set_var(MC_DIR_ENV, &root);
+        let spec = InstallSpec {
+            name: "Forgey".into(),
+            game_version: game.into(),
+            loader: loader.into(),
+            loader_version: None,
+            standards: vec![],
+        };
+        tauri::async_runtime::block_on(create_in(spec, &Progress::new(None))).unwrap();
+        let profiles = read_profiles().unwrap();
+        let all = profiles["profiles"].as_object().unwrap();
+        assert_eq!(all.len(), 1, "installer's own profile should be gone: {all:?}");
+        let vid = all.values().next().unwrap()["lastVersionId"].as_str().unwrap().to_string();
+        assert!(vid.contains("forge-") && root.join("versions").join(&vid).is_dir(), "{vid}");
+        let (_, g, l) = inst_target("Forgey").unwrap();
+        assert_eq!((g.as_str(), l.as_str()), (game, loader));
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -2905,7 +3939,6 @@ pub fn run() {
             link_standard,
             unlink_standard,
             set_custom_icon,
-            list_resourcepacks,
             delete_installation,
             reveal_path,
             open_launcher,
@@ -2930,6 +3963,15 @@ pub fn run() {
             list_mods,
             toggle_mod,
             add_mods,
+            resolve_link,
+            import_links,
+            update_mods,
+            list_config,
+            read_config,
+            write_config,
+            list_packs,
+            set_packs,
+            add_packs,
             list_screenshots,
             purge_cache,
             list_profiles,
