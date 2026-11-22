@@ -68,7 +68,8 @@
    Give each a real dark pair if the tint ever looks off. */
 :root[data-theme="dark"] :is(
   .chip[class*="kind-"], .chip[class*="mode-"], .chip[class*="loader-"],
-  .chip[class*="flag-"], .chip.differs, .font-status, .share-note, .link-info.warn
+  .chip[class*="flag-"], .chip.differs, .font-status, .share-note, .link-info.warn,
+  .lw-badge.synced, .lw-linked, .lw-lines .keep
 ) {
   filter: invert(1) hue-rotate(180deg);
 }
@@ -4062,7 +4063,7 @@ select.sort {
   color: var(--muted);
   background: var(--chip);
 }
-.lw-badge.differ { color: var(--accent); background: #f8e7df; }
+.lw-badge.differ { color: var(--accent); background: var(--accent-soft); }
 .lw-badge.synced { color: #4c7139; background: #e4eedb; }
 .lw-badge.single { color: var(--faint); background: none; padding: 0; }
 
@@ -4095,7 +4096,7 @@ select.sort {
 }
 .lw-version.pickable { cursor: pointer; }
 .lw-version.pickable:hover { border-color: var(--faint); }
-.lw-version.kept { background: #fdf7f3; border-color: var(--accent); }
+.lw-version.kept { background: var(--accent-soft); border-color: var(--accent); }
 .lw-version-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 8px; font-size: 12.5px; }
 .lw-letter {
   display: grid;
@@ -4142,7 +4143,7 @@ select.sort {
 .lw-table th { position: sticky; top: 0; background: var(--panel); font-weight: 600; color: var(--muted); }
 .lw-table th.kept { color: var(--accent); }
 .lw-table tr:last-child td { border-bottom: none; }
-.lw-table td.kept { background: #fdf7f3; color: var(--ink); font-weight: 600; }
+.lw-table td.kept { background: var(--accent-soft); color: var(--ink); font-weight: 600; }
 .lw-table td.diff { color: var(--muted); }
 .lw-key { color: var(--muted); }
 .lw-none { color: var(--faint); }
