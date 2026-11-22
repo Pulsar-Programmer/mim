@@ -355,9 +355,6 @@ async fn create_installation(spec: InstallSpec) -> CmdResult<()> {
     }
     fs::create_dir_all(&inst).map_err(err)?;
 
-    // Essential-style shared folder symlinks
-    link_shared_dirs(&inst)?;
-
     // resolve the launcher version id
     let version_id = if spec.fabric {
         let loader = match spec.loader_version {
@@ -392,7 +389,19 @@ async fn create_installation(spec: InstallSpec) -> CmdResult<()> {
         spec.game_version.clone()
     };
 
-    apply_standards_inner(&inst, &spec.standards)?;
+    // linked from the picked standards (the built-in Shared one covers saves & co.)
+    let pairs = spec
+        .standards
+        .iter()
+        .map(|r| entry_src(r))
+        .collect::<CmdResult<Vec<_>>>()?;
+    link_entries(&inst, &pairs, true)?;
+    for rel in &spec.standards {
+        match rel.split_once('/') {
+            Some((std_name, _)) if std_name != SHARED => add_link(&standard_dir(std_name)?, name)?,
+            _ => {}
+        }
+    }
 
     // register with the official launcher
     let mut profiles = read_profiles()?;
@@ -449,59 +458,161 @@ fn link_installation(name: String) -> CmdResult<(Vec<String>, Vec<String>)> {
 #[derive(Serialize)]
 struct StandardEntry {
     name: String,
-    rel_path: String,
-    scope: String, // "global" or a game version like "1.21.10"
+    rel_path: String, // relative to standards/, starts with the standard's name
+    scope: String,    // "global" or a game version like "1.21.10"
     is_dir: bool,
 }
 
+/// One named folder in `standards/`, plus the installations linked to it.
 #[derive(Serialize)]
-struct Standards {
+struct Standard {
+    name: String,
     path: String,
-    exists: bool,
+    /// the Minecraft folder's own shared folders, always there
+    builtin: bool,
+    installations: Vec<String>,
+    /// installation -> how many of its top-level items are live links into this standard
+    live: std::collections::HashMap<String, usize>,
     entries: Vec<StandardEntry>,
+    /// pictures at the standard's top level, offered as installation images
+    images: Vec<String>,
+}
+
+fn is_image(name: &str, p: &Path) -> bool {
+    let n = name.to_lowercase();
+    p.is_file() && [".png", ".jpg", ".jpeg", ".webp"].iter().any(|x| n.ends_with(x))
+}
+
+fn images_in(dir: &Path) -> Vec<String> {
+    visible_children(dir)
+        .into_iter()
+        .filter(|(n, p)| is_image(n, p))
+        .map(|(_, p)| p.to_string_lossy().into())
+        .collect()
+}
+
+/// Hidden, so listing and applying skip it.
+const LINKS_FILE: &str = ".mim.json";
+
+/// The built-in standard: SHARED_DIRS in the Minecraft folder itself.
+const SHARED: &str = "Shared";
+
+fn valid_name(n: &str) -> bool {
+    !n.is_empty() && !n.starts_with('.') && !n.contains('/')
+}
+
+fn standard_dir(name: &str) -> CmdResult<PathBuf> {
+    let d = standards_dir().join(name);
+    if valid_name(name) && d.is_dir() {
+        Ok(d)
+    } else {
+        Err(format!("no standard named \"{name}\""))
+    }
+}
+
+fn visible_children(dir: &Path) -> Vec<(String, PathBuf)> {
+    let mut v: Vec<_> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .map(|e| (e.file_name().to_string_lossy().to_string(), e.path()))
+                .filter(|(n, _)| !n.starts_with('.'))
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+fn read_links(dir: &Path) -> Vec<String> {
+    let v: Value = fs::read_to_string(dir.join(LINKS_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or(Value::Null);
+    let existing = installation_names();
+    v["installations"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .filter(|n| existing.iter().any(|e| e == n)) // drop deleted installs
+                .map(String::from)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 #[tauri::command(async)]
-fn list_standards() -> CmdResult<Standards> {
-    let dir = standards_dir();
-    let mut entries = vec![];
-    if dir.exists() {
-        for entry in fs::read_dir(&dir).map_err(err)?.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') {
-                continue;
-            }
-            let path = entry.path();
+fn list_standards() -> CmdResult<Vec<Standard>> {
+    let names = installation_names();
+    let live_of = |std: &str| -> Vec<(String, usize)> {
+        names
+            .iter()
+            .map(|n| (n.clone(), links_of(&installations_dir().join(n), std).len()))
+            .collect()
+    };
+    let shared_live: Vec<_> = live_of(SHARED).into_iter().filter(|(_, k)| *k > 0).collect();
+    let mut out = vec![Standard {
+        name: SHARED.into(),
+        path: mc_dir().to_string_lossy().into(),
+        builtin: true,
+        installations: shared_live.iter().map(|(n, _)| n.clone()).collect(),
+        live: shared_live.into_iter().collect(),
+        entries: SHARED_DIRS
+            .iter()
+            .map(|d| StandardEntry {
+                name: d.to_string(),
+                rel_path: format!("{SHARED}/{d}"),
+                scope: "global".into(),
+                is_dir: true,
+            })
+            .collect(),
+        // loose pictures in standards/ itself belong to no standard, so they show here
+        images: images_in(&standards_dir()),
+    }];
+    // loose files at the top level aren't part of any standard and are ignored
+    for (std_name, std_path) in visible_children(&standards_dir()) {
+        if !std_path.is_dir() || std_name == SHARED {
+            continue;
+        }
+        let mut entries = vec![];
+        for (name, path) in visible_children(&std_path) {
             if path.is_dir() && is_version_name(&name) {
                 // version-scoped group: list its children
-                for child in fs::read_dir(&path).map_err(err)?.flatten() {
-                    let cname = child.file_name().to_string_lossy().to_string();
-                    if cname.starts_with('.') {
-                        continue;
-                    }
+                for (cname, cpath) in visible_children(&path) {
                     entries.push(StandardEntry {
-                        rel_path: format!("{name}/{cname}"),
+                        rel_path: format!("{std_name}/{name}/{cname}"),
                         scope: name.clone(),
-                        is_dir: child.path().is_dir(),
+                        is_dir: cpath.is_dir(),
                         name: cname,
                     });
                 }
-            } else {
+            } else if !is_image(&name, &path) {
+                // top-level pictures are the standard's images, not game files
                 entries.push(StandardEntry {
-                    rel_path: name.clone(),
+                    rel_path: format!("{std_name}/{name}"),
                     scope: "global".into(),
                     is_dir: path.is_dir(),
                     name,
                 });
             }
         }
+        entries.sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
+        let installations = read_links(&std_path);
+        let live = live_of(&std_name)
+            .into_iter()
+            .filter(|(n, _)| installations.contains(n))
+            .collect();
+        out.push(Standard {
+            images: images_in(&std_path),
+            builtin: false,
+            installations,
+            live,
+            path: std_path.to_string_lossy().into(),
+            name: std_name,
+            entries,
+        });
     }
-    entries.sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
-    Ok(Standards {
-        path: dir.to_string_lossy().into(),
-        exists: dir.exists(),
-        entries,
-    })
+    Ok(out)
 }
 
 #[tauri::command(async)]
@@ -511,33 +622,186 @@ fn ensure_standards_dir() -> CmdResult<String> {
     Ok(dir.to_string_lossy().into())
 }
 
-fn apply_standards_inner(inst: &Path, rel_paths: &[String]) -> CmdResult<()> {
-    let std_dir = standards_dir();
-    for rel in rel_paths {
-        if rel.contains("..") {
-            return Err("invalid standards path".into());
+#[tauri::command(async)]
+fn create_standard(name: String) -> CmdResult<String> {
+    let name = name.trim();
+    if !valid_name(name) {
+        return Err("Invalid standard name".into());
+    }
+    if name.eq_ignore_ascii_case(SHARED) {
+        return Err("\"Shared\" is the built-in standard".into());
+    }
+    let d = standards_dir().join(name);
+    if d.exists() {
+        return Err(format!("\"{name}\" already exists"));
+    }
+    fs::create_dir_all(&d).map_err(err)?;
+    Ok(d.to_string_lossy().into())
+}
+
+fn write_links(dir: &Path, installations: &[String]) -> CmdResult<()> {
+    let text = serde_json::to_string_pretty(&json!({ "installations": installations }))
+        .map_err(err)?;
+    fs::write(dir.join(LINKS_FILE), text).map_err(err)
+}
+
+fn add_link(dir: &Path, inst: &str) -> CmdResult<()> {
+    let mut v = read_links(dir);
+    if !v.iter().any(|n| n == inst) {
+        v.push(inst.into());
+    }
+    write_links(dir, &v)
+}
+
+fn points_into(p: &Path, dir: &Path) -> bool {
+    fs::read_link(p).is_ok_and(|t| t.starts_with(dir))
+}
+
+/// `link` is a symlink that ends up at `src` (however the link was written,
+/// e.g. Essential's relative ones).
+fn links_to(link: &Path, src: &Path) -> bool {
+    link.is_symlink() && fs::canonicalize(link).ok() == fs::canonicalize(src).ok()
+}
+
+/// "PvP/1.21.10/config" -> "config", "PvP/options.txt" -> "options.txt"
+fn standard_dest(rel: &str) -> Option<&str> {
+    let (_std, rest) = rel.split_once('/')?;
+    Some(match rest.split_once('/') {
+        Some((first, inner)) if is_version_name(first) => inner,
+        _ => rest,
+    })
+}
+
+/// Where an entry lives and its name inside an installation.
+fn entry_src(rel: &str) -> CmdResult<(PathBuf, String)> {
+    let dest = match standard_dest(rel) {
+        Some(d) if !rel.contains("..") && valid_name(d) => d.to_string(),
+        _ => return Err("invalid standards path".into()),
+    };
+    if rel.split_once('/').map(|(s, _)| s) == Some(SHARED) {
+        if !SHARED_DIRS.contains(&dest.as_str()) || rel != format!("{SHARED}/{dest}") {
+            return Err(format!("not a shared folder: {rel}"));
         }
-        let src = std_dir.join(rel);
-        if !src.exists() {
-            return Err(format!("standard not found: {rel}"));
+        let src = mc_dir().join(&dest);
+        fs::create_dir_all(&src).map_err(err)?;
+        return Ok((src, dest));
+    }
+    let src = standards_dir().join(rel);
+    if !src.exists() {
+        return Err(format!("standard not found: {rel}"));
+    }
+    Ok((src, dest))
+}
+
+/// The live links from `inst` into standard `std`.
+fn links_of(inst: &Path, std: &str) -> Vec<PathBuf> {
+    if std == SHARED {
+        let mc = mc_dir();
+        SHARED_DIRS
+            .iter()
+            .map(|d| inst.join(d))
+            .filter(|p| links_to(p, &mc.join(p.file_name().unwrap())))
+            .collect()
+    } else {
+        let dir = standards_dir().join(std);
+        visible_children(inst)
+            .into_iter()
+            .map(|(_, p)| p)
+            .filter(|p| points_into(p, &dir))
+            .collect()
+    }
+}
+
+/// Symlinks each (source, name) into `inst`, so edits on either side are live.
+/// Returns what's in the way. With anything in the way and `replace` false,
+/// nothing changes; with `replace`, those items go to the Trash first.
+fn link_entries(inst: &Path, pairs: &[(PathBuf, String)], replace: bool) -> CmdResult<Vec<String>> {
+    let mut todo = vec![];
+    let mut blocked = vec![];
+    for (src, name) in pairs {
+        let dest = inst.join(name);
+        if links_to(&dest, src) {
+            continue; // already linked
         }
-        // strip a version-folder prefix: "1.21.10/options.txt" -> "options.txt"
-        let dest_rel = match rel.split_once('/') {
-            Some((first, rest)) if is_version_name(first) => rest,
-            _ => rel.as_str(),
-        };
-        copy_recursive(&src, &inst.join(dest_rel)).map_err(err)?;
+        if dest.symlink_metadata().is_ok() {
+            blocked.push(name.clone());
+        }
+        todo.push((src, dest));
+    }
+    if !blocked.is_empty() && !replace {
+        return Ok(blocked);
+    }
+    for (src, dest) in todo {
+        if dest.is_symlink() {
+            fs::remove_file(&dest).map_err(err)?; // just a link, nothing lost
+        } else if dest.exists() {
+            trash::delete(&dest).map_err(err)?;
+        }
+        std::os::unix::fs::symlink(src, &dest).map_err(err)?;
+    }
+    Ok(blocked)
+}
+
+/// Removes links; with `keep`, each becomes a real copy of what it pointed at.
+/// The originals are never touched.
+fn detach(links: &[PathBuf], keep: bool) -> CmdResult<()> {
+    for p in links {
+        let target = fs::canonicalize(p).map_err(err)?;
+        fs::remove_file(p).map_err(err)?;
+        if keep {
+            copy_recursive(&target, p).map_err(err)?;
+        }
     }
     Ok(())
 }
 
+/// Returns the items in the way (see `link_entries`); when non-empty and
+/// `replace` is false, nothing was linked.
 #[tauri::command(async)]
-fn apply_standards(name: String, rel_paths: Vec<String>) -> CmdResult<()> {
-    let inst = installations_dir().join(&name);
-    if !inst.is_dir() {
-        return Err(format!("no installation named \"{name}\""));
+fn link_standard(
+    name: String,
+    installation: String,
+    rel_paths: Vec<String>,
+    replace: bool,
+) -> CmdResult<Vec<String>> {
+    let std = if name == SHARED { None } else { Some(standard_dir(&name)?) };
+    let inst = game_dir(Some(&installation))?;
+    let pairs = rel_paths
+        .iter()
+        .map(|r| match r.split_once('/') {
+            Some((s, _)) if s == name => entry_src(r),
+            _ => Err(format!("{r} isn't part of \"{name}\"")),
+        })
+        .collect::<CmdResult<Vec<_>>>()?;
+    let blocked = link_entries(&inst, &pairs, replace)?;
+    if let Some(std) = std.filter(|_| blocked.is_empty() || replace) {
+        add_link(&std, &installation)?;
     }
-    apply_standards_inner(&inst, &rel_paths)
+    Ok(blocked)
+}
+
+#[tauri::command(async)]
+fn unlink_standard(name: String, installation: String, keep: bool) -> CmdResult<()> {
+    let inst = game_dir(Some(&installation))?;
+    if name != SHARED {
+        let std = standard_dir(&name)?;
+        let v: Vec<String> = read_links(&std).into_iter().filter(|n| *n != installation).collect();
+        write_links(&std, &v)?;
+    }
+    detach(&links_of(&inst, &name), keep)
+}
+
+#[tauri::command(async)]
+fn delete_standard(name: String) -> CmdResult<()> {
+    if name == SHARED {
+        return Err("The Shared standard is the Minecraft folder itself".into());
+    }
+    let std = standard_dir(&name)?;
+    for inst in read_links(&std) {
+        // installations keep a copy of what they used
+        detach(&links_of(&installations_dir().join(inst), &name), true)?;
+    }
+    trash::delete(std).map_err(err)
 }
 
 // ---------------------------------------------------------------------------
@@ -1883,6 +2147,59 @@ fn list_screenshots() -> Vec<Screenshot> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn standard_dest_strips_name_and_version() {
+        assert_eq!(standard_dest("PvP/options.txt"), Some("options.txt"));
+        assert_eq!(standard_dest("PvP/1.21.10/config"), Some("config"));
+        assert_eq!(standard_dest("PvP/config/sodium.json"), Some("config/sodium.json"));
+        assert_eq!(standard_dest("options.txt"), None); // loose, not in a standard
+    }
+
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
+    fn link_warns_then_detach_copies_back() {
+        let root = std::env::temp_dir().join(format!("mim-std-{}", uuid::Uuid::new_v4()));
+        let (std, inst) = (root.join("standards/PvP"), root.join("inst"));
+        fs::create_dir_all(std.join("1.21.10")).unwrap();
+        fs::create_dir_all(&inst).unwrap();
+        fs::write(std.join("options.txt"), "fov:90").unwrap();
+        fs::write(std.join("1.21.10/servers.dat"), "x").unwrap();
+        fs::write(inst.join("options.txt"), "mine").unwrap();
+        let pairs = vec![
+            (std.join("options.txt"), "options.txt".to_string()),
+            (std.join("1.21.10/servers.dat"), "servers.dat".to_string()),
+        ];
+
+        // something in the way: reported, nothing touched
+        assert_eq!(link_entries(&inst, &pairs, false).unwrap(), ["options.txt"]);
+        assert_eq!(fs::read_to_string(inst.join("options.txt")).unwrap(), "mine");
+        assert!(!inst.join("servers.dat").exists());
+
+        // clear the way (a symlink, so replace just removes it — no Trash in tests)
+        fs::remove_file(inst.join("options.txt")).unwrap();
+        std::os::unix::fs::symlink("/nowhere", inst.join("options.txt")).unwrap();
+        link_entries(&inst, &pairs, true).unwrap();
+        fs::write(std.join("options.txt"), "fov:70").unwrap(); // live edit
+        assert_eq!(fs::read_to_string(inst.join("options.txt")).unwrap(), "fov:70");
+        assert!(points_into(&inst.join("servers.dat"), &std));
+        assert!(link_entries(&inst, &pairs, false).unwrap().is_empty()); // idempotent
+
+        // a relative link (how Essential writes them) still counts as linked
+        fs::remove_file(inst.join("servers.dat")).unwrap();
+        std::os::unix::fs::symlink("../standards/PvP/1.21.10/servers.dat", inst.join("servers.dat"))
+            .unwrap();
+        assert!(link_entries(&inst, &pairs, false).unwrap().is_empty());
+
+        // keep: real copy; remove: gone. Originals untouched either way.
+        detach(&[inst.join("options.txt")], true).unwrap();
+        assert!(!inst.join("options.txt").is_symlink());
+        assert_eq!(fs::read_to_string(inst.join("options.txt")).unwrap(), "fov:70");
+        detach(&[inst.join("servers.dat")], false).unwrap();
+        assert!(inst.join("servers.dat").symlink_metadata().is_err());
+        assert!(std.join("1.21.10/servers.dat").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     // runs against a throwaway sample folder, never the real minecraft dir
     #[test]
     fn cleanup_on_sample_folder() {
@@ -2160,7 +2477,10 @@ pub fn run() {
             link_installation,
             list_standards,
             ensure_standards_dir,
-            apply_standards,
+            create_standard,
+            delete_standard,
+            link_standard,
+            unlink_standard,
             set_custom_icon,
             list_resourcepacks,
             delete_installation,

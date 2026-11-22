@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, formatBytes, Installation, Mod } from "./api";
 import { useCached, useConfirm } from "./hooks";
+import { PlacePicker } from "./Places";
 
 export function ModsView({
   notify,
@@ -18,7 +19,7 @@ export function ModsView({
       ...[...installations]
         .sort((a, b) => b.mods_count - a.mods_count)
         .map((i) => ({ key: i.name, label: i.name, count: i.mods_count, loader: i.loader })),
-      { key: null, label: "Main folder", count: null, loader: null },
+      { key: null, label: "Minecraft folder", count: null, loader: null },
     ],
     [installations]
   );
@@ -102,28 +103,23 @@ export function ModsView({
         </div>
       </header>
 
-      <div className="options-layout">
-        <aside className="sources">
-          {scopes.map((s) => (
-            <button
-              key={s.label}
-              className={`source ${s.key === current ? "active" : ""}`}
-              onClick={() => setScope(s.key)}
-            >
-              <span className="source-label">
-                {s.label}
-                {s.loader === "fabric" && <span className="chip">fabric</span>}
-              </span>
-              <span className="source-sub">
-                {s.count == null ? "root mods folder" : `${s.count} mod${s.count === 1 ? "" : "s"}`}
-              </span>
-            </button>
-          ))}
-          <p className="hint sources-hint">
+      <p className="hint wide">
             Disabling renames a mod to <code>.jar.disabled</code>, the same trick the
             launcher and mod managers use — the game skips it.
           </p>
-        </aside>
+
+      <PlacePicker
+        places={scopes.map((s) => ({
+          key: s.key ?? "",
+          label: s.label,
+          kind: s.key == null ? ("root" as const) : undefined,
+          inst: installations.find((i) => i.name === s.key),
+          sub: s.count == null ? "root mods folder" : `${s.count} mod${s.count === 1 ? "" : "s"}`,
+        }))}
+        value={current ?? ""}
+        onChange={(k) => setScope(k || null)}
+      />
+      <div className="options-layout">
 
         <section className="options-editor">
           <div className="options-toolbar">

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   api,
   formatBytes,
@@ -7,7 +8,8 @@ import {
   Installation,
   GameVersion,
   LoaderVersion,
-  Standards,
+  Standard,
+  entriesFor,
   PacksOverview,
   LogEntry,
   FolderItem,
@@ -20,6 +22,7 @@ import { ServersView } from "./ServersView";
 import { ModsView } from "./ModsView";
 import { ScreenshotsView } from "./ScreenshotsView";
 import { SettingsView } from "./SettingsView";
+import { PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
 import { Settings, applySettings, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
@@ -37,36 +40,31 @@ type View =
   | "logs"
   | "settings";
 
+// Library: things you own and control. Minecraft Folder: housekeeping.
 const NAV: [string, [View, string][]][] = [
   [
     "Library",
     [
       ["installations", "Installations"],
-      ["new", "New Install"],
       ["standards", "Standards"],
+      ["saves", "Saves"],
       ["mods", "Mods"],
       ["packs", "Resource Packs"],
+      ["options", "Options"],
+      ["servers", "Servers"],
+      ["screenshots", "Screenshots"],
     ],
   ],
   [
     "Minecraft Folder",
     [
       ["folder", "Overview"],
-      ["saves", "Saves"],
-      ["servers", "Servers"],
-      ["screenshots", "Screenshots"],
-      ["options", "Options"],
       ["logs", "Logs"],
     ],
   ],
 ];
 
-// deterministic soft gradient for cards without a custom image
-function nameGradient(name: string): string {
-  let h = 0;
-  for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
-  return `linear-gradient(135deg, hsl(${h} 32% 88%), hsl(${(h + 40) % 360} 38% 78%))`;
-}
+const COLLAPSED_KEY = "mim.sidebarCollapsed";
 
 function App() {
   const [view, setView] = useState<View>("installations");
@@ -75,6 +73,30 @@ function App() {
   const [mcDir, setMcDir] = useState<{ path: string; sample: boolean } | null>(null);
   const toastTimer = useRef<number>(undefined);
   const [settings, setSettings] = useState<Settings>(loadSettings);
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      return localStorage.getItem(COLLAPSED_KEY) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const toggleSidebar = useCallback(() => {
+    setCollapsed((c) => {
+      try {
+        localStorage.setItem(COLLAPSED_KEY, c ? "0" : "1");
+      } catch {
+        // storage off — just won't be remembered
+      }
+      return !c;
+    });
+  }, []);
+  useEffect(() => {
+    const key = (e: KeyboardEvent) => {
+      if (e.metaKey && e.key === "\\") toggleSidebar();
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  }, [toggleSidebar]);
   useEffect(() => applySettings(settings), [settings]);
   const changeSettings = (s: Settings) => {
     setSettings(s);
@@ -98,11 +120,28 @@ function App() {
   useEffect(refresh, [refresh]);
 
   return (
-    <div className="app">
+    <div className={`app ${collapsed ? "collapsed" : ""}`}>
+      <button
+        className="sidebar-toggle"
+        onClick={toggleSidebar}
+        title={collapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)"}
+        aria-label={collapsed ? "Show sidebar" : "Hide sidebar"}
+      >
+        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
+          <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+          <path d="M6 2.5v11" stroke="currentColor" strokeWidth="1.3" />
+        </svg>
+      </button>
       <aside className="sidebar">
         <div className="titlebar" data-tauri-drag-region />
         <div className="wordmark" data-tauri-drag-region>MIM</div>
         <div className="tagline">installation manager</div>
+        <button
+          className={`nav-new ${view === "new" ? "active" : ""}`}
+          onClick={() => setView("new")}
+        >
+          <span className="plus">+</span> New Install
+        </button>
         <nav>
           {NAV.map(([section, items]) => (
             <div key={section} className="nav-section">
@@ -150,13 +189,16 @@ function App() {
         {view === "new" && (
           <NewInstallView
             notify={notify}
+            installations={installations}
             onDone={() => {
               refresh();
               setView("installations");
             }}
           />
         )}
-        {view === "standards" && <StandardsView notify={notify} />}
+        {view === "standards" && (
+          <StandardsView notify={notify} installations={installations} />
+        )}
         {view === "packs" && <PacksView notify={notify} />}
         {view === "folder" && (
           <FolderView
@@ -165,11 +207,13 @@ function App() {
             go={(v: View) => setView(v)}
           />
         )}
-        {view === "saves" && <SavesView notify={notify} />}
-        {view === "options" && <OptionsView notify={notify} />}
+        {view === "saves" && <SavesView notify={notify} installations={installations} />}
+        {view === "options" && <OptionsView notify={notify} installations={installations} />}
         {view === "logs" && <LogsView notify={notify} installations={installations} />}
-        {view === "servers" && <ServersView notify={notify} />}
-        {view === "screenshots" && <ScreenshotsView notify={notify} />}
+        {view === "servers" && <ServersView notify={notify} installations={installations} />}
+        {view === "screenshots" && (
+          <ScreenshotsView notify={notify} installations={installations} />
+        )}
         {view === "mods" && (
           <ModsView notify={notify} installations={installations} onChanged={refresh} />
         )}
@@ -320,9 +364,11 @@ function InstallationsView({
 
 function NewInstallView({
   notify,
+  installations,
   onDone,
 }: {
   notify: (m: string) => void;
+  installations: Installation[];
   onDone: () => void;
 }) {
   const [name, setName] = useState("");
@@ -336,10 +382,37 @@ function NewInstallView({
   const [fabric, setFabric] = useState(true);
   const [loaders, setLoaders] = useState<LoaderVersion[]>([]);
   const [loaderVersion, setLoaderVersion] = useState("");
-  const [standards] = useCached<Standards>("standards", api.listStandards, notify);
-  const [picked, setPicked] = useState<Set<string>>(new Set());
+  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  // null until the user touches it: then the built-in Shared folders are on by default
+  const [touched, setPicked] = useState<Set<string> | null>(null);
+  const picked = useMemo(
+    () =>
+      touched ??
+      new Set(standards.filter((s) => s.builtin).flatMap((s) => s.entries.map((e) => e.rel_path))),
+    [touched, standards]
+  );
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  // standards show as one checkbox each; expanding one lets you pick single files
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // pictures already in use on installations, plus any dropped into a standard
+  const images = useMemo(
+    () => [
+      ...installations
+        .filter((i) => i.icon?.startsWith("data:"))
+        .map((i) => ({ path: `${i.path}/.mim/icon.png`, src: i.icon!, label: `from ${i.name}` })),
+      ...standards.flatMap((s) =>
+        s.images.map((p) => ({
+          path: p,
+          src: convertFileSrc(p),
+          label: `${p.split("/").pop()} · ${s.builtin ? "standards folder" : s.name}`,
+        }))
+      ),
+    ],
+    [installations, standards]
+  );
+  const external = imagePath && !images.some((i) => i.path === imagePath) ? imagePath : null;
 
   useEffect(() => {
     if (gameVersion) return;
@@ -368,16 +441,16 @@ function NewInstallView({
 
   const relevantStandards = useMemo(
     () =>
-      standards?.entries.filter(
-        (e) => e.scope === "global" || e.scope === gameVersion
-      ) ?? [],
+      standards
+        .map((s) => ({ s, entries: entriesFor(s, gameVersion) }))
+        .filter((g) => g.entries.length > 0),
     [standards, gameVersion]
   );
 
-  function toggle(rel: string) {
-    setPicked((prev) => {
-      const next = new Set(prev);
-      next.has(rel) ? next.delete(rel) : next.add(rel);
+  function toggle(rels: string[], on: boolean) {
+    setPicked(() => {
+      const next = new Set(picked);
+      for (const r of rels) on ? next.add(r) : next.delete(r);
       return next;
     });
   }
@@ -392,7 +465,9 @@ function NewInstallView({
         game_version: gameVersion,
         fabric,
         loader_version: fabric && loaderVersion ? loaderVersion : null,
-        standards: [...picked],
+        standards: [...picked].filter((r) =>
+          relevantStandards.some((g) => g.entries.some((e) => e.rel_path === r))
+        ),
       });
       if (imagePath) {
         await api.setCustomIcon(name.trim(), imagePath).catch(() => {});
@@ -415,121 +490,194 @@ function NewInstallView({
         </div>
       </header>
 
-      <div className="form">
-        <label>
-          <span>Name</span>
-          <input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Hypixel 1.21.10"
-            autoFocus
-          />
-        </label>
-
-        <label>
-          <span>
-            Version
-            <label className="inline-check">
-              <input
-                type="checkbox"
-                checked={showSnapshots}
-                onChange={(e) => setShowSnapshots(e.target.checked)}
-              />
-              snapshots
-            </label>
-          </span>
-          <select value={gameVersion} onChange={(e) => setGameVersion(e.target.value)}>
-            {visibleVersions.map((v) => (
-              <option key={v.id} value={v.id}>
-                {v.id}
-              </option>
-            ))}
-          </select>
-        </label>
-
-        <label>
-          <span>Loader</span>
-          <div className="segmented">
-            <button className={!fabric ? "active" : ""} onClick={() => setFabric(false)}>
-              Vanilla
-            </button>
-            <button className={fabric ? "active" : ""} onClick={() => setFabric(true)}>
-              Fabric
-            </button>
-          </div>
-        </label>
-
-        {fabric && (
+      <div className="install-layout">
+        <div className="form">
           <label>
-            <span>Fabric loader</span>
-            <select
-              value={loaderVersion}
-              onChange={(e) => setLoaderVersion(e.target.value)}
-              disabled={loaders.length === 0}
-            >
-              {loaders.length === 0 && <option>no loader for this version</option>}
-              {loaders.map((l) => (
-                <option key={l.version} value={l.version}>
-                  {l.version}
-                  {l.stable ? "" : " (beta)"}
+            <span>Name</span>
+            <input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="e.g. Hypixel 1.21.10"
+              autoFocus
+            />
+          </label>
+
+          <label>
+            <span>
+              Version
+              <span className="inline-check">
+                <input
+                  type="checkbox"
+                  checked={showSnapshots}
+                  onChange={(e) => setShowSnapshots(e.target.checked)}
+                />
+                snapshots
+              </span>
+            </span>
+            <select value={gameVersion} onChange={(e) => setGameVersion(e.target.value)}>
+              {visibleVersions.map((v) => (
+                <option key={v.id} value={v.id}>
+                  {v.id}
                 </option>
               ))}
             </select>
           </label>
-        )}
 
-        <label>
-          <span>Image</span>
-          <div className="row-inline">
-            <button
-              className="btn"
-              onClick={async () => {
-                const p = await openDialog({
-                  multiple: false,
-                  filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp"] }],
-                });
-                if (typeof p === "string") setImagePath(p);
-              }}
-            >
-              {imagePath ? imagePath.split("/").pop() : "Choose image…"}
-            </button>
-            {imagePath && (
-              <button className="linklike" onClick={() => setImagePath(null)}>
-                clear
+          <div className="field">
+            <span>Loader</span>
+            <div className="segmented">
+              <button className={!fabric ? "active" : ""} onClick={() => setFabric(false)}>
+                Vanilla
               </button>
+              <button className={fabric ? "active" : ""} onClick={() => setFabric(true)}>
+                Fabric
+              </button>
+            </div>
+          </div>
+
+          {fabric && (
+            <label>
+              <span>Fabric loader</span>
+              <select
+                value={loaderVersion}
+                onChange={(e) => setLoaderVersion(e.target.value)}
+                disabled={loaders.length === 0}
+              >
+                {loaders.length === 0 && <option>no loader for this version</option>}
+                {loaders.map((l) => (
+                  <option key={l.version} value={l.version}>
+                    {l.version}
+                    {l.stable ? "" : " (beta)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+
+          <div className="field">
+            <span>Image</span>
+            <div className="image-picks">
+              <button
+                className={`image-pick none ${imagePath ? "" : "active"}`}
+                onClick={() => setImagePath(null)}
+                title="No image — a soft gradient with the first letter"
+                style={{ background: nameGradient(name.trim() || "?") }}
+              >
+                {(name.trim() || "?")[0]}
+              </button>
+              {images.map((im) => (
+                <button
+                  key={im.path}
+                  className={`image-pick ${imagePath === im.path ? "active" : ""}`}
+                  onClick={() => setImagePath(im.path)}
+                  title={im.label}
+                  style={{ backgroundImage: `url(${im.src})` }}
+                />
+              ))}
+              {external && (
+                <button className="image-pick file active" title={external}>
+                  {external.split("/").pop()}
+                </button>
+              )}
+              <button
+                className="image-pick add"
+                title="Choose an image file…"
+                onClick={async () => {
+                  const p = await openDialog({
+                    multiple: false,
+                    filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp"] }],
+                  });
+                  if (typeof p === "string") setImagePath(p);
+                }}
+              >
+                +
+              </button>
+            </div>
+            <p className="hint">
+              Reuse a picture from another installation, or drop images into a standard's
+              folder to share them here.
+            </p>
+          </div>
+        </div>
+
+        <div className="form">
+          <div className="field">
+            <span>Based on · linked, so changes stay in sync</span>
+            {relevantStandards.length > 0 ? (
+              <div className="based-list">
+                {relevantStandards.map(({ s, entries }) => {
+                  const rels = entries.map((e) => e.rel_path);
+                  const n = rels.filter((r) => picked.has(r)).length;
+                  const open = expanded.has(s.name);
+                  return (
+                    <div key={s.name} className={`based ${n ? "on" : ""}`}>
+                      <div className="based-head">
+                        <label className="based-main">
+                          <input
+                            type="checkbox"
+                            checked={n === rels.length}
+                            ref={(el) => {
+                              if (el) el.indeterminate = n > 0 && n < rels.length;
+                            }}
+                            onChange={() => toggle(rels, n < rels.length)}
+                          />
+                          <StandardAvatar s={s} />
+                          <span className="place-text">
+                            <span className="place-label">{s.name}</span>
+                            <span className="place-sub">
+                              {n > 0 && n < rels.length
+                                ? `${n} of ${rels.length} · `
+                                : ""}
+                              {entries.map((e) => e.name + (e.is_dir ? "/" : "")).join(" · ")}
+                            </span>
+                          </span>
+                        </label>
+                        <button
+                          className="linklike based-more"
+                          onClick={() =>
+                            setExpanded((prev) => {
+                              const next = new Set(prev);
+                              open ? next.delete(s.name) : next.add(s.name);
+                              return next;
+                            })
+                          }
+                        >
+                          {open ? "Done" : "Customize"}
+                        </button>
+                      </div>
+                      {open && (
+                        <div className="based-files">
+                          {entries.map((e) => (
+                            <label
+                              key={e.rel_path}
+                              className={`file-chip ${picked.has(e.rel_path) ? "on" : ""}`}
+                            >
+                              <input
+                                type="checkbox"
+                                checked={picked.has(e.rel_path)}
+                                onChange={() => toggle([e.rel_path], !picked.has(e.rel_path))}
+                              />
+                              {e.name}
+                              {e.is_dir ? "/" : ""}
+                              {e.scope !== "global" && <span className="chip">{e.scope}</span>}
+                            </label>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <p className="hint">
+                No standard has files for this version — create one under Standards and drop
+                an options.txt, resource packs, or mod configs in it.
+              </p>
             )}
           </div>
-        </label>
+        </div>
 
-        <label>
-          <span>Standards</span>
-          {relevantStandards.length > 0 ? (
-            <div className="standards-list">
-              {relevantStandards.map((e) => (
-                <label className="check-row" key={e.rel_path}>
-                  <input
-                    type="checkbox"
-                    checked={picked.has(e.rel_path)}
-                    onChange={() => toggle(e.rel_path)}
-                  />
-                  <span className="check-name">
-                    {e.name}
-                    {e.is_dir ? "/" : ""}
-                  </span>
-                  <span className="chip">{e.scope}</span>
-                </label>
-              ))}
-            </div>
-          ) : (
-            <p className="hint">
-              Nothing in <code>minecraft/standards</code> for this version — drop an
-              options.txt, resource packs, or mod configs there and they'll show up
-              here on install.
-            </p>
-          )}
-        </label>
-
-        <button className="btn primary big" onClick={install} disabled={!!busy}>
+        <button className="btn primary big install-go" onClick={install} disabled={!!busy}>
           {busy ?? "Install"}
         </button>
       </div>
@@ -539,20 +687,70 @@ function NewInstallView({
 
 // ---------------------------------------------------------------------------
 
-function StandardsView({ notify }: { notify: (m: string) => void }) {
-  const [standards, load] = useCached<Standards>("standards", api.listStandards, notify);
+function StandardsView({
+  notify,
+  installations,
+}: {
+  notify: (m: string) => void;
+  installations: Installation[];
+}) {
+  const [standards = [], load] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [newName, setNewName] = useState("");
+  const { armed, confirm } = useConfirm(notify, load);
+  // a link or unlink waiting on the user's answer
+  const [ask, setAsk] = useState<
+    | { kind: "blocked"; std: string; inst: string; items: string[] }
+    | { kind: "unlink"; std: string; inst: string }
+    | null
+  >(null);
 
-  const groups = useMemo(() => {
-    const entries = standards?.entries ?? [];
-    const map = new Map<string, typeof entries>();
-    for (const e of entries) {
-      if (!map.has(e.scope)) map.set(e.scope, []);
-      map.get(e.scope)!.push(e);
+  async function create() {
+    if (!newName.trim()) return;
+    try {
+      await api.createStandard(newName);
+      setNewName("");
+      load();
+    } catch (e) {
+      notify(String(e));
     }
-    return [...map.entries()].sort(([a], [b]) =>
-      a === "global" ? -1 : b === "global" ? 1 : a.localeCompare(b)
-    );
-  }, [standards]);
+  }
+
+  async function link(s: Standard, inst: string, replace = false) {
+    const v = installations.find((i) => i.name === inst)?.game_version ?? null;
+    const rels = entriesFor(s, v).map((e) => e.rel_path);
+    try {
+      const inWay = await api.linkStandard(s.name, inst, rels, replace);
+      if (inWay.length && !replace) {
+        setAsk({ kind: "blocked", std: s.name, inst, items: inWay });
+        return;
+      }
+      setAsk(null);
+      notify(
+        `Linked "${s.name}" into ${inst}` +
+          (inWay.length ? ` · moved ${inWay.join(", ")} to Trash` : "")
+      );
+      load();
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
+  async function unlink(s: Standard, inst: string, keep: boolean) {
+    try {
+      await api.unlinkStandard(s.name, inst, keep);
+      setAsk(null);
+      notify(keep ? `Unlinked ${inst} — it keeps a copy` : `Unlinked ${inst} and removed its links`);
+      load();
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
+  const remove = (s: Standard) =>
+    confirm(`del:${s.name}`, async () => {
+      await api.deleteStandard(s.name);
+      return `Moved "${s.name}" to Trash — linked installations keep copies`;
+    });
 
   async function openFolder() {
     const path = await api.ensureStandardsDir();
@@ -560,14 +758,20 @@ function StandardsView({ notify }: { notify: (m: string) => void }) {
     load();
   }
 
+  const list = (items: string[]) =>
+    items.map((n, k) => (
+      <span key={n}>
+        {k > 0 && ", "}
+        <code>{n}</code>
+      </span>
+    ));
+
   return (
     <>
       <header className="page-head">
         <div>
           <h1>Standards</h1>
-          <p className="sub">
-            your defaults — imported by checkbox on every install
-          </p>
+          <p className="sub">folders you link into installations</p>
         </div>
         <button className="btn" onClick={openFolder}>
           Open Folder
@@ -575,36 +779,136 @@ function StandardsView({ notify }: { notify: (m: string) => void }) {
       </header>
 
       <p className="hint wide">
-        Top-level files and folders in <code>minecraft/standards</code> apply to every
-        version. A subfolder named like a version (<code>1.21.10/</code>) only shows up
-        when installing that version. Put an <code>options.txt</code>, resource packs,
-        or mod <code>config/</code> folders in there.
+        A standard's files are symlinked into each linked installation, so a change on either
+        side shows up everywhere. <b>Shared</b> is built in: the Minecraft folder's own
+        resource packs, saves and screenshots. Your own standards live in{" "}
+        <code>minecraft/standards</code> — top-level files apply to every version, a subfolder
+        named like a version (<code>1.21.10/</code>) only to that version.
       </p>
 
-      {groups.map(([scope, entries]) => (
-        <section key={scope} className="std-group">
-          <h2>{scope}</h2>
-          <ul className="std-list">
-            {entries.map((e) => (
-              <li key={e.rel_path}>
-                <span className="std-name">
+      <div className="row-inline std-new">
+        <input
+          value={newName}
+          onChange={(e) => setNewName(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && create()}
+          placeholder="New standard, e.g. PvP"
+        />
+        <button className="btn" onClick={create} disabled={!newName.trim()}>
+          Create
+        </button>
+      </div>
+
+      {standards.map((s) => (
+        <section key={s.name} className="std-card">
+          <div className="std-head">
+            <StandardAvatar s={s} />
+            <div className="std-title">
+              <h2>{s.name}</h2>
+              <span className="place-sub">
+                {s.builtin ? "built in · the Minecraft folder" : `minecraft/standards/${s.name}`}
+              </span>
+            </div>
+            <div className="row-inline std-actions">
+              <button className="btn small" onClick={() => api.revealPath(s.path, false)}>
+                Open
+              </button>
+              {!s.builtin && (
+                <button className="btn small danger" onClick={() => remove(s)}>
+                  {armed === `del:${s.name}` ? "Sure?" : "Delete"}
+                </button>
+              )}
+            </div>
+          </div>
+
+          {s.entries.length > 0 ? (
+            <div className="std-files">
+              {s.entries.map((e) => (
+                <span key={e.rel_path} className="std-file">
                   {e.name}
                   {e.is_dir ? "/" : ""}
+                  {e.scope !== "global" && <span className="chip">{e.scope}</span>}
                 </span>
-              </li>
-            ))}
-          </ul>
+              ))}
+            </div>
+          ) : (
+            <p className="hint">
+              Empty —{" "}
+              <button className="linklike" onClick={() => api.revealPath(s.path, false)}>
+                open it
+              </button>{" "}
+              and drop an options.txt, resource packs or mod configs in.
+            </p>
+          )}
+
+          <div className="std-label">Linked installations</div>
+          <div className="places">
+            {installations.map((i) => {
+              const on = s.installations.includes(i.name);
+              const want = entriesFor(s, i.game_version).length;
+              // a new file in the standard, or something replaced a link with a real file
+              const stale = on && (s.live[i.name] ?? 0) < want;
+              return (
+                <PlaceChip
+                  key={i.name}
+                  className="toggle"
+                  place={{
+                    key: i.name,
+                    label: i.name,
+                    inst: i,
+                    sub: stale ? `↻ ${s.live[i.name] ?? 0} of ${want} linked` : on ? "linked" : "not linked",
+                  }}
+                  active={on}
+                  title={stale ? "Some files aren't linked — click to relink" : on ? "Unlink…" : "Link"}
+                  onClick={() =>
+                    stale || !on
+                      ? link(s, i.name)
+                      : setAsk({ kind: "unlink", std: s.name, inst: i.name })
+                  }
+                />
+              );
+            })}
+            {installations.length === 0 && <span className="hint">No installations yet.</span>}
+          </div>
+
+          {ask?.std === s.name && ask.kind === "blocked" && (
+            <div className="std-ask warn">
+              <p>
+                <b>{ask.inst}</b> already has {list(ask.items)}. To link "{s.name}",{" "}
+                {ask.items.length === 1 ? "it has" : "they have"} to be removed — MIM moves{" "}
+                {ask.items.length === 1 ? "it" : "them"} to the Trash.
+              </p>
+              <div className="row-inline">
+                <button className="btn small danger" onClick={() => link(s, ask.inst, true)}>
+                  Move to Trash &amp; link
+                </button>
+                <button className="btn small" onClick={() => setAsk(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+          {ask?.std === s.name && ask.kind === "unlink" && (
+            <div className="std-ask">
+              <p>
+                Unlink <b>{ask.inst}</b> from "{s.name}"? Do you want to remove the files from{" "}
+                {ask.inst}, or keep a copy of them there? Nothing in "{s.name}" is deleted either
+                way.
+              </p>
+              <div className="row-inline">
+                <button className="btn small" onClick={() => unlink(s, ask.inst, true)}>
+                  Keep a copy
+                </button>
+                <button className="btn small danger" onClick={() => unlink(s, ask.inst, false)}>
+                  Remove the files
+                </button>
+                <button className="btn small ghost" onClick={() => setAsk(null)}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
         </section>
       ))}
-      {(standards?.entries.length ?? 0) === 0 && (
-        <div className="empty">
-          The standards folder is empty{standards?.exists ? "" : " (doesn't exist yet)"}.{" "}
-          <button className="linklike" onClick={openFolder}>
-            Open it
-          </button>{" "}
-          and drop files in.
-        </div>
-      )}
     </>
   );
 }
@@ -970,24 +1274,21 @@ function LogsView({
         </div>
       </header>
 
-      <div className="scope-tabs">
-        {[null, ...installations.map((i) => i.name)].map((name) => (
-          <button
-            key={name ?? "main"}
-            className={scope === name ? "active" : ""}
-            onClick={() => {
-              setScope(name);
-              setKind("all");
-            }}
-          >
-            {name ?? "Main folder"}
-          </button>
-        ))}
-      </div>
+      <PlacePicker
+        places={[
+          { key: "", label: "Minecraft folder", kind: "root", sub: "game & launcher logs" },
+          ...installations.map((i) => ({ key: i.name, label: i.name, inst: i, sub: "game logs" })),
+        ]}
+        value={scope ?? ""}
+        onChange={(k) => {
+          setScope(k || null);
+          setKind("all");
+        }}
+      />
 
       <p className="hint wide">
         Each installation is its own game folder, so the game writes its logs and crash
-        reports there; the launcher's own logs only live in the main folder.{" "}
+        reports there; the launcher's own logs only live in the Minecraft folder.{" "}
         From <code>logs/</code>, <code>crash-reports/</code>, <code>debug/</code> and stray
         files in the folder root. Sorting moves <code>hs_err_pid</code> crash dumps to{" "}
         <code>logs/old</code>, launcher logs to <code>logs/launcher</code>, and updater logs

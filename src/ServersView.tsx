@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, Ping, Server, ServerList } from "./api";
+import { api, Installation, Ping, Server, ServerList } from "./api";
+import { PlacePicker } from "./Places";
 import { useCached } from "./hooks";
 
 // pings survive view switches; refresh re-pings
@@ -23,7 +24,13 @@ function Bars({ ms }: { ms: number }) {
 
 const same = (a: Server, b: Server) => a.ip.trim().toLowerCase() === b.ip.trim().toLowerCase();
 
-export function ServersView({ notify }: { notify: (m: string) => void }) {
+export function ServersView({
+  notify,
+  installations,
+}: {
+  notify: (m: string) => void;
+  installations: Installation[];
+}) {
   const [lists = [], reload] = useCached<ServerList[]>("servers", api.listServers, notify);
   const [selected, setSelected] = useState<string | null>(null);
   const [, bump] = useState(0);
@@ -110,33 +117,28 @@ export function ServersView({ notify }: { notify: (m: string) => void }) {
         </div>
       </header>
 
-      <div className="options-layout">
-        <aside className="sources">
-          {lists.map((l) => (
-            <button
-              key={l.path}
-              className={`source ${l.path === list?.path ? "active" : ""}`}
-              onClick={() => {
-                setSelected(l.label);
-                setForm(null);
-              }}
-            >
-              <span className="source-label">
-                {l.installation == null && <span className="chip">base</span>}
-                {l.label}
-              </span>
-              <span className="source-sub">
-                {l.exists
-                  ? `${l.servers.length} server${l.servers.length === 1 ? "" : "s"}`
-                  : "no servers.dat yet"}
-              </span>
-            </button>
-          ))}
-          <p className="hint sources-hint">
+      <p className="hint wide">
             Each game folder has its own server list. Every time Minecraft saves it, the
             previous list is kept as <code>servers.dat_old</code>.
           </p>
-        </aside>
+
+      <PlacePicker
+        places={lists.map((l) => ({
+          key: l.label,
+          label: l.installation == null ? "Minecraft folder" : l.label,
+          kind: l.installation == null ? ("root" as const) : undefined,
+          inst: installations.find((i) => i.name === l.installation),
+          sub: l.exists
+            ? `${l.servers.length} server${l.servers.length === 1 ? "" : "s"}`
+            : "no servers.dat yet",
+        }))}
+        value={list?.label ?? ""}
+        onChange={(k) => {
+          setSelected(k);
+          setForm(null);
+        }}
+      />
+      <div className="options-layout">
 
         <section className="options-editor">
           {form && (

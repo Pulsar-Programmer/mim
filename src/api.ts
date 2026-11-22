@@ -32,11 +32,22 @@ export interface StandardEntry {
   is_dir: boolean;
 }
 
-export interface Standards {
+export interface Standard {
+  name: string;
   path: string;
-  exists: boolean;
+  /** the Minecraft folder's own shared folders (saves, packs, screenshots) */
+  builtin: boolean;
+  installations: string[];
+  /** installation -> number of its items that are live links into this standard */
+  live: Record<string, number>;
   entries: StandardEntry[];
+  /** image files at the standard's top level */
+  images: string[];
 }
+
+/** Entries that apply to a game version: global ones plus that version's folder. */
+export const entriesFor = (s: Standard, gameVersion: string | null) =>
+  s.entries.filter((e) => e.scope === "global" || e.scope === gameVersion);
 
 export interface Pack {
   name: string;
@@ -166,10 +177,16 @@ export const api = {
     invoke<void>("create_installation", { spec }),
   linkInstallation: (name: string) =>
     invoke<[string[], string[]]>("link_installation", { name }),
-  listStandards: () => invoke<Standards>("list_standards"),
+  listStandards: () => invoke<Standard[]>("list_standards"),
   ensureStandardsDir: () => invoke<string>("ensure_standards_dir"),
-  applyStandards: (name: string, relPaths: string[]) =>
-    invoke<void>("apply_standards", { name, relPaths }),
+  createStandard: (name: string) => invoke<string>("create_standard", { name }),
+  deleteStandard: (name: string) => invoke<void>("delete_standard", { name }),
+  /** Returns what's in the way; when non-empty and !replace, nothing was linked. */
+  linkStandard: (name: string, installation: string, relPaths: string[], replace: boolean) =>
+    invoke<string[]>("link_standard", { name, installation, relPaths, replace }),
+  /** keep: leave the installation a real copy instead of removing the files */
+  unlinkStandard: (name: string, installation: string, keep: boolean) =>
+    invoke<void>("unlink_standard", { name, installation, keep }),
   setCustomIcon: (name: string, imagePath: string) =>
     invoke<string>("set_custom_icon", { name, imagePath }),
   listResourcepacks: () => invoke<PacksOverview>("list_resourcepacks"),

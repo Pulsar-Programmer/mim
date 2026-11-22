@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { api, formatBytes, Screenshot } from "./api";
+import { api, formatBytes, Installation, Screenshot } from "./api";
+import { PlacePicker, sharedPlaces } from "./Places";
 import { useCached, useConfirm } from "./hooks";
 
 const month = (iso: string | null) =>
@@ -8,7 +9,13 @@ const month = (iso: string | null) =>
     ? new Date(iso).toLocaleDateString(undefined, { month: "long", year: "numeric" })
     : "Undated";
 
-export function ScreenshotsView({ notify }: { notify: (m: string) => void }) {
+export function ScreenshotsView({
+  notify,
+  installations,
+}: {
+  notify: (m: string) => void;
+  installations: Installation[];
+}) {
   const [shots = [], reload] = useCached<Screenshot[]>(
     "screenshots",
     api.listScreenshots,
@@ -58,22 +65,16 @@ export function ScreenshotsView({ notify }: { notify: (m: string) => void }) {
         </div>
       </header>
 
-      {locations.length > 1 && (
-        <div className="segmented kinds">
-          {["all", ...locations].map((l) => (
-            <button
-              key={l}
-              className={location === l ? "active" : ""}
-              onClick={() => setLocation(l)}
-            >
-              {l}{" "}
-              <span className="count">
-                {l === "all" ? shots.length : shots.filter((s) => s.location === l).length}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
+      <PlacePicker
+        places={sharedPlaces("screenshots", locations, installations, (l) =>
+          shots.filter((s) => s.location === l).length
+        )}
+        value={location}
+        onChange={(l) => {
+          setLocation(l);
+          setOpen(null);
+        }}
+      />
 
       {groups.map(([m, items]) => (
         <section key={m}>

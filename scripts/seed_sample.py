@@ -459,8 +459,11 @@ def seed():
     write("launcher_profiles.json", json.dumps({"profiles": profiles, "version": 3}, indent=2), 0.1)
 
     # standards
-    write("standards/options.txt", options(renderDistance="10"), 30)
-    write("standards/1.21.10/config/sodium-options.json", "{}", 30)
+    write("standards/Everyday/options.txt", options(renderDistance="10"), 30)
+    write("standards/Everyday/1.21.10/config/sodium-options.json", "{}", 30)
+    write("standards/PvP/options.txt", options(renderDistance="6"), 30)
+    write("standards/PvP/icon.png", png(64, 64, (200, 70, 60), (60, 20, 30)), 30)
+    write("standards/Everyday/icon.png", png(64, 64, (120, 190, 90), (40, 90, 50)), 30)
 
     print(f"seeded {ROOT}  (installations dir: {survival.parent})")
 

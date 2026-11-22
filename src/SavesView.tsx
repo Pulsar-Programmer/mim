@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, formatBytes, timeAgo, World, WorldDetails } from "./api";
+import { api, formatBytes, timeAgo, Installation, World, WorldDetails } from "./api";
+import { PlacePicker, sharedPlaces } from "./Places";
 import { useCached, useConfirm } from "./hooks";
 
 const MODES = ["Survival", "Creative", "Adventure", "Spectator"];
@@ -27,7 +28,13 @@ const PART_NOTES: Record<string, string> = {
   "session.lock": "Open-world lock",
 };
 
-export function SavesView({ notify }: { notify: (m: string) => void }) {
+export function SavesView({
+  notify,
+  installations,
+}: {
+  notify: (m: string) => void;
+  installations: Installation[];
+}) {
   const [worlds = [], reload] = useCached<World[]>("saves", api.listSaves, notify);
   const [location, setLocation] = useState("all");
   const [open, setOpen] = useState<World | null>(null);
@@ -79,22 +86,13 @@ export function SavesView({ notify }: { notify: (m: string) => void }) {
         linked installation. Installations that aren't linked keep their own saves.
       </p>
 
-      {locations.length > 1 && (
-        <div className="segmented kinds">
-          {["all", ...locations].map((l) => (
-            <button
-              key={l}
-              className={location === l ? "active" : ""}
-              onClick={() => setLocation(l)}
-            >
-              {l}{" "}
-              <span className="count">
-                {l === "all" ? worlds.length : worlds.filter((w) => w.location === l).length}
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
+      <PlacePicker
+        places={sharedPlaces("saves", locations, installations, (l) =>
+          worlds.filter((w) => w.location === l).length
+        )}
+        value={location}
+        onChange={setLocation}
+      />
 
       <div className="grid worlds">
         {shown.map((w) => (

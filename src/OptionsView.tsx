@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, OptionEntry, OptionsSource } from "./api";
+import { api, Installation, OptionEntry, OptionsSource } from "./api";
+import { PlacePicker } from "./Places";
 import { useCached } from "./hooks";
 
 // ---- grouping & labels ----------------------------------------------------
@@ -213,7 +214,13 @@ function Editor({ k, value, onChange }: { k: string; value: string; onChange: (v
 
 // ---- view -----------------------------------------------------------------
 
-export function OptionsView({ notify }: { notify: (m: string) => void }) {
+export function OptionsView({
+  notify,
+  installations,
+}: {
+  notify: (m: string) => void;
+  installations: Installation[];
+}) {
   const [sources = [], reloadSources] = useCached<OptionsSource[]>(
     "options-sources",
     api.optionsSources,
@@ -288,7 +295,7 @@ export function OptionsView({ notify }: { notify: (m: string) => void }) {
     if (!source || !baseEntries?.length) return;
     try {
       await api.writeOptions(source.path, baseEntries);
-      notify(`Copied base options into ${source.label}`);
+      notify(`Copied Minecraft folder options into ${source.label}`);
       reloadSources();
       reload();
     } catch (e) {
@@ -305,40 +312,35 @@ export function OptionsView({ notify }: { notify: (m: string) => void }) {
         </div>
       </header>
 
-      <div className="options-layout">
-        <aside className="sources">
-          {sources.map((s) => (
-            <button
-              key={s.path}
-              className={`source ${s.path === source?.path ? "active" : ""}`}
-              onClick={() => setSelected(s.path)}
-            >
-              <span className="source-label">
-                {s.kind === "base" && <span className="chip">base</span>}
-                {s.label}
-              </span>
-              <span className="source-sub">
-                {s.exists ? "own options.txt" : "no options.txt · game defaults"}
-              </span>
-            </button>
-          ))}
-          <p className="hint sources-hint">
-            The <b>base game</b> options are used when playing from the main{" "}
+      <p className="hint wide">
+            The <b>Minecraft folder</b> options are used when playing from the main{" "}
             <code>minecraft</code> folder. Every installation has its own{" "}
             <code>options.txt</code> — changes never carry over between them.
           </p>
-        </aside>
+
+      <PlacePicker
+        places={sources.map((s) => ({
+          key: s.path,
+          label: s.kind === "base" ? "Minecraft folder" : s.label,
+          kind: s.kind === "base" ? ("root" as const) : undefined,
+          inst: installations.find((i) => i.name === s.label),
+          sub: s.exists ? "own options.txt" : "no options.txt · game defaults",
+        }))}
+        value={source?.path ?? ""}
+        onChange={setSelected}
+      />
+      <div className="options-layout">
 
         <section className="options-editor">
           {source && !source.exists ? (
             <div className="empty options-empty">
               <p>
                 <b>{source.label}</b> has no <code>options.txt</code> yet, so Minecraft uses its
-                built-in defaults here, <i>not</i> your base options.
+                built-in defaults here, <i>not</i> your Minecraft folder options.
               </p>
               {baseEntries && baseEntries.length > 0 && (
                 <button className="btn primary" onClick={copyBase}>
-                  Copy base options here
+                  Copy Minecraft folder options here
                 </button>
               )}
             </div>
@@ -366,6 +368,7 @@ export function OptionsView({ notify }: { notify: (m: string) => void }) {
                 </button>
               </div>
 
+              <div className="opt-groups">
               {grouped.map(([g, rows]) => (
                 <div key={g} className="opt-group">
                   <h3>{g}</h3>
@@ -402,6 +405,7 @@ export function OptionsView({ notify }: { notify: (m: string) => void }) {
                   </ul>
                 </div>
               ))}
+              </div>
               {entries && grouped.length === 0 && (
                 <div className="empty">Nothing matches.</div>
               )}
