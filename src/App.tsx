@@ -29,7 +29,7 @@ import { PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
 import { ProgressBar, useProgress } from "./Progress";
 import { PacksView } from "./PacksView";
 import { ConfigView } from "./ConfigView";
-import { Settings, applySettings, loadSettings, saveSettings } from "./settings";
+import { Settings, applySettings, brief, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
 type View =
@@ -82,7 +82,12 @@ function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [mcDir, setMcDir] = useState<{ path: string; sample: boolean } | null>(null);
   const toastTimer = useRef<number>(undefined);
-  const [settings, setSettings] = useState<Settings>(loadSettings);
+  // applied before render (not in an effect) so brief() text matches on that render
+  const [settings, setSettings] = useState<Settings>(() => {
+    const s = loadSettings();
+    applySettings(s);
+    return s;
+  });
   const [collapsed, setCollapsed] = useState(() => {
     try {
       return localStorage.getItem(COLLAPSED_KEY) === "1";
@@ -107,8 +112,8 @@ function App() {
     window.addEventListener("keydown", key);
     return () => window.removeEventListener("keydown", key);
   }, [toggleSidebar]);
-  useEffect(() => applySettings(settings), [settings]);
   const changeSettings = (s: Settings) => {
+    applySettings(s);
     setSettings(s);
     saveSettings(s);
   };
@@ -291,7 +296,7 @@ function InstallationsView({
       notify(
         linked.length
           ? `Linked ${linked.join(", ")}${skipped.length ? ` · kept local: ${skipped.join(", ")}` : ""}`
-          : "Nothing to link — folders already exist"
+          : brief("Nothing to link — folders already exist")
       );
       refresh();
     } catch (e) {
@@ -533,7 +538,7 @@ function NewInstallView({
         }
         return onDone();
       }
-      notify(`Installed "${name.trim()}" — it's in your launcher`);
+      notify(brief(`Installed "${name.trim()}" — it's in your launcher`));
       onDone();
     } catch (e) {
       notify(String(e));
@@ -658,8 +663,9 @@ function NewInstallView({
                   </label>
                 </div>
                 <p className="hint">
-                  A mod, collection or modpack — CurseForge links work when the mod is on
-                  Modrinth too. Only builds for this version and loader are installed.
+                  A mod, collection or modpack
+                  <span className="more"> — CurseForge links work when the mod is on Modrinth too. Only builds
+                  for this version and loader are installed.</span>
                 </p>
               </div>
             </details>
@@ -671,7 +677,7 @@ function NewInstallView({
               <button
                 className={`image-pick none ${imagePath ? "" : "active"}`}
                 onClick={() => setImagePath(null)}
-                title="No image — a soft gradient with the first letter"
+                title={brief("No image — a soft gradient with the first letter")}
                 style={{ background: nameGradient(name.trim() || "?") }}
               >
                 {(name.trim() || "?")[0]}
@@ -704,7 +710,7 @@ function NewInstallView({
                 +
               </button>
             </div>
-            <p className="hint">
+            <p className="hint more">
               Reuse a picture from another installation, or drop images into a standard's
               folder to share them here.
             </p>
@@ -713,7 +719,7 @@ function NewInstallView({
 
         <div className="form">
           <div className="field">
-            <span>Based on · linked, so changes stay in sync</span>
+            <span>{brief("Linked standards — changes stay in sync")}</span>
             {relevantStandards.length > 0 ? (
               <div className="based-list">
                 {relevantStandards.map(({ s, entries }) => {
@@ -781,8 +787,9 @@ function NewInstallView({
               </div>
             ) : (
               <p className="hint">
-                No standard has files for this version — create one under Standards and drop
-                an options.txt, resource packs, or mod configs in it.
+                No standard has files for this version
+                <span className="more"> — create one under Standards and drop an options.txt, resource packs,
+                or mod configs in it.</span>
               </p>
             )}
           </div>
@@ -855,7 +862,7 @@ function StandardsView({
     try {
       await api.unlinkStandard(s.name, inst, keep);
       setAsk(null);
-      notify(keep ? `Unlinked ${inst} — it keeps a copy` : `Unlinked ${inst} and removed its links`);
+      notify(keep ? brief(`Unlinked ${inst} — it keeps a copy`) : `Unlinked ${inst} and removed its links`);
       load();
     } catch (e) {
       notify(String(e));
@@ -865,7 +872,7 @@ function StandardsView({
   const remove = (s: Standard) =>
     confirm(`del:${s.name}`, async () => {
       await api.deleteStandard(s.name);
-      return `Moved "${s.name}" to Trash — linked installations keep copies`;
+      return brief(`Moved "${s.name}" to Trash — linked installations keep copies`);
     });
 
   async function openFolder() {
@@ -896,12 +903,12 @@ function StandardsView({
 
       <p className="hint wide">
         A standard's files are symlinked into each linked installation, so a change on either
-        side shows up everywhere. <b>Shared</b> is built in: the Minecraft folder's own
+        side shows up everywhere.<span className="more"> <b>Shared</b> is built in: the Minecraft folder's own
         resource packs, saves and screenshots. Your own standards live in{" "}
         <code>minecraft/standards</code> — top-level files apply to every version, a subfolder
         named like a version (<code>1.21.10/</code>) only to that version. A <code>config/</code>{" "}
         folder is linked file by file, so installations keep their other mod configs — use{" "}
-        <b>Share</b> on the Config page to put one there.
+        <b>Share</b> on the Config page to put one there.</span>
       </p>
 
       <div className="row-inline std-new">
@@ -954,7 +961,7 @@ function StandardsView({
               <button className="linklike" onClick={() => api.revealPath(s.path, false)}>
                 open it
               </button>{" "}
-              and drop an options.txt, resource packs or mod configs in.
+              <span className="more">and drop an options.txt, resource packs or mod configs in</span>.
             </p>
           )}
 
@@ -976,7 +983,7 @@ function StandardsView({
                     sub: stale ? `↻ ${s.live[i.name] ?? 0} of ${want} linked` : on ? "linked" : "not linked",
                   }}
                   active={on}
-                  title={stale ? "Some files aren't linked — click to relink" : on ? "Unlink…" : "Link"}
+                  title={stale ? brief("Some files aren't linked — click to relink") : on ? "Unlink…" : "Link"}
                   onClick={() =>
                     stale || !on
                       ? link(s, i.name)
@@ -1169,8 +1176,8 @@ const NOTES: Record<string, string> = {
 
 function noteFor(item: FolderItem): string {
   if (NOTES[item.name]) return NOTES[item.name];
-  if (item.name.startsWith("hs_err_pid")) return "Java crash dump — Sort Logs moves it";
-  if (item.category === "logs") return "stray log — Sort Logs moves it";
+  if (item.name.startsWith("hs_err_pid")) return brief("Java crash dump — Sort Logs moves it");
+  if (item.category === "logs") return brief("stray log — Sort Logs moves it");
   return "";
 }
 
@@ -1269,7 +1276,7 @@ function FolderView({
                     {group.length} item{group.length === 1 ? "" : "s"}
                   </span>
                 </h2>
-                <p className="hint">{blurb}</p>
+                <p className="hint">{brief(blurb)}</p>
               </div>
               <span className="pack-size">{formatBytes(size)}</span>
               {cat === "logs" && (
@@ -1432,7 +1439,7 @@ function LogsView({
         }}
       />
 
-      <p className="hint wide">
+      <p className="hint wide more">
         Each installation is its own game folder, so the game writes its logs and crash
         reports there; the launcher's own logs only live in the Minecraft folder.{" "}
         From <code>logs/</code>, <code>crash-reports/</code>, <code>debug/</code> and stray

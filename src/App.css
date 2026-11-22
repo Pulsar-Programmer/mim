@@ -3178,6 +3178,8 @@ select.sort {
 .link-info span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .link-info.warn { color: #8a6d1f; }
 .link-info.bad,
+:root.reduced .more { display: none; }
+
 .hint.bad { color: var(--danger); }
 
 /* ---- resource packs ---- */

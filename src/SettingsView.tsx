@@ -61,8 +61,13 @@ export function SettingsView({
 
         {settings.font === "minecraft" && (
           <p className="hint wide settings-note">
-            Headings in <b>Minecrafter</b>, text in <b>Minecraftia</b> (© Andrew Tyler,{" "}
-            CC BY-SA 3.0) — both ship with MIM.
+            Headings in <b>Minecrafter</b>
+            {settings.fontScope === "everything" && (
+              <>
+                , text in <b>Minecraftia</b> (© Andrew Tyler, CC BY-SA 3.0)
+              </>
+            )}
+            <span className="more"> — {settings.fontScope === "everything" ? "both ship" : "ships"} with MIM</span>.
           </p>
         )}
 
@@ -107,6 +112,22 @@ export function SettingsView({
           <h1>Survival Base</h1>
           <p>The quick brown fox jumps over 13 lazy creepers.</p>
         </div>
+      </section>
+
+      <section className="settings-block">
+        <h2>Reduced text</h2>
+        <div className="segmented">
+          {[true, false].map((on) => (
+            <button
+              key={String(on)}
+              className={settings.reducedText === on ? "active" : ""}
+              onClick={() => set({ reducedText: on })}
+            >
+              {on ? "On" : "Off"}
+            </button>
+          ))}
+        </div>
+        <p className="hint wide settings-note more">Hides the longer explanations around the app.</p>
       </section>
 
       <section className="settings-block">

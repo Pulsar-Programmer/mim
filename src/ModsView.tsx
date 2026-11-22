@@ -11,6 +11,7 @@ import {
   timeAgo,
 } from "./api";
 import { ProgressBar, useProgress } from "./Progress";
+import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
 import { PlacePicker } from "./Places";
 
@@ -142,7 +143,7 @@ export function ModsView({
               className="btn"
               onClick={() => fromModrinth("update")}
               disabled={!!busy}
-              title="Swap every mod Modrinth knows for its newest build for this version — old jars go to the Trash"
+              title={brief("Swap every mod Modrinth knows for its newest build for this version — old jars go to the Trash")}
             >
               {busy === "update" ? "Updating…" : "Update All"}
             </button>
@@ -153,7 +154,7 @@ export function ModsView({
         </div>
       </header>
 
-      <p className="hint wide">
+      <p className="hint wide more">
             Disabling renames a mod to <code>.jar.disabled</code>, the same trick the
             launcher and mod managers use — the game skips it.
           </p>
@@ -182,7 +183,7 @@ export function ModsView({
             >
               <input
                 className="search"
-                placeholder="Paste Modrinth or CurseForge links — mods, collections or modpacks"
+                placeholder={brief("Paste Modrinth or CurseForge links — mods, collections or modpacks")}
                 value={link}
                 onChange={(e) => setLink(e.target.value)}
               />
@@ -192,8 +193,8 @@ export function ModsView({
             </form>
           ) : (
             <p className="hint">
-              Pick an installation to import from Modrinth — the Minecraft folder has no fixed
-              version to match mods to.
+              Pick an installation to import from Modrinth
+              <span className="more"> — the Minecraft folder has no fixed version to match mods to.</span>
             </p>
           )}
           {busy && (
@@ -228,7 +229,7 @@ export function ModsView({
             {libs > 0 && (
               <label
                 className="inline-check"
-                title="Libraries are mods other mods need — Fabric API, Cloth Config and the like"
+                title={brief("Libraries are mods other mods need — Fabric API, Cloth Config and the like")}
               >
                 <input
                   type="checkbox"

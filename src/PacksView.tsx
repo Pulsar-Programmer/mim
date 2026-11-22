@@ -10,6 +10,7 @@ import {
   reportSummary,
   splitLinks,
 } from "./api";
+import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
 import { PlacePicker } from "./Places";
 import { ProgressBar, useProgress } from "./Progress";
@@ -163,7 +164,7 @@ export function PacksView({
                 className="linklike"
                 disabled={i === 0}
                 onClick={() => move(i, -1)}
-                title="Higher — wins over the packs below"
+                title="Higher wins over the packs below"
               >
                 ▲
               </button>
@@ -181,7 +182,7 @@ export function PacksView({
             className={`switch ${on ? "on" : ""}`}
             role="switch"
             aria-checked={on}
-            title={on ? "Turn off" : "Turn on — goes on top"}
+            title={on ? "Turn off" : brief("Turn on — goes on top")}
             onClick={() =>
               save(on ? enabled.filter((f) => f !== p.file) : [p.file, ...enabled])
             }
@@ -230,8 +231,9 @@ export function PacksView({
 
       <p className="hint wide">
         Which packs are on, and their order, lives in each game folder's{" "}
-        <code>options.txt</code> — installations linked to the shared folder see the same packs but
-        can turn on different ones. Close Minecraft first, or it saves its own list over yours.
+        <code>options.txt</code>
+        <span className="more"> — installations linked to the shared folder see the same packs but can turn on
+        different ones</span>. Close Minecraft first, or it saves its own list over yours.
       </p>
 
       <PlacePicker
@@ -260,7 +262,7 @@ export function PacksView({
             >
               <input
                 className="search"
-                placeholder={`Paste Modrinth resource pack links — matched to ${inst?.game_version ?? "this version"}`}
+                placeholder={brief(`Paste Modrinth resource pack links — matched to ${inst?.game_version ?? "this version"}`)}
                 value={link}
                 onChange={(e) => setLink(e.target.value)}
               />
@@ -279,11 +281,11 @@ export function PacksView({
             </p>
           )}
 
-          <h3 className="pack-heading">On · top wins</h3>
+          <h3 className="pack-heading">Active</h3>
           {enabled.length > 0 ? (
             <ul className="mod-list">{enabled.map((f, i) => row(byFile.get(f)!, i))}</ul>
           ) : (
-            <div className="empty">No packs on — Minecraft's default look.</div>
+            <div className="empty">{brief("No packs on — Minecraft's default look.")}</div>
           )}
           {missing.length > 0 && (
             <p className="hint">

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, Installation, Ping, Server, ServerList } from "./api";
 import { PlacePicker } from "./Places";
+import { brief } from "./settings";
 import { useCached } from "./hooks";
 
 // pings survive view switches; refresh re-pings
@@ -118,8 +119,8 @@ export function ServersView({
       </header>
 
       <p className="hint wide">
-            Each game folder has its own server list. Every time Minecraft saves it, the
-            previous list is kept as <code>servers.dat_old</code>.
+            Each game folder has its own server list.<span className="more"> Every time Minecraft saves it, the
+            previous list is kept as <code>servers.dat_old</code>.</span>
           </p>
 
       <PlacePicker
@@ -241,7 +242,7 @@ export function ServersView({
                       onClick={() =>
                         save(
                           list.servers.filter((_, j) => j !== i),
-                          `Removed ${s.name} — it's still in the backup`
+                          brief(`Removed ${s.name} — it's still in the backup`)
                         )
                       }
                     >
@@ -295,7 +296,7 @@ export function ServersView({
                     onClick={async () => {
                       try {
                         await api.restoreServersBackup(list.installation);
-                        notify("Swapped in the backup — the current list is now the backup");
+                        notify(brief("Swapped in the backup — the current list is now the backup"));
                         reload();
                       } catch (e) {
                         notify(String(e));

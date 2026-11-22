@@ -313,9 +313,10 @@ export function OptionsView({
       </header>
 
       <p className="hint wide">
-            The <b>Minecraft folder</b> options are used when playing from the main{" "}
-            <code>minecraft</code> folder. Every installation has its own{" "}
-            <code>options.txt</code> — changes never carry over between them.
+            <span className="more">The <b>Minecraft folder</b> options are used when playing from the main 
+            <code>minecraft</code> folder. </span>Every installation has its own 
+            <code>options.txt</code>
+            <span className="more"> — changes never carry over between them</span>.
           </p>
 
       <PlacePicker

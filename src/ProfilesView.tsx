@@ -62,9 +62,9 @@ export function ProfilesView({
           <strong>The Minecraft Launcher is open. Quit it before editing, or it will overwrite your changes.</strong>
         ) : (
           <>
-            Every edit backs up <code>launcher_profiles.json</code> first. Archiving moves the
+            Every edit backs up <code>launcher_profiles.json</code> first.<span className="more"> Archiving moves the
             profile, its own folder and its unused version files into <code>.mim/archive</code>,
-            and Restore puts them back. Folders other profiles share stay where they are.
+            and Restore puts them back. Folders other profiles share stay where they are.</span>
           </>
         )}
       </p>

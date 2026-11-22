@@ -3,6 +3,7 @@ import { flushSync } from "react-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { api, formatBytes, Installation, Screenshot } from "./api";
 import { PlacePicker, sharedPlaces } from "./Places";
+import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
 
 // ---------------------------------------------------------------------------
@@ -395,7 +396,7 @@ export function ScreenshotsView({
         </div>
       )}
       {shots.length > 0 && shown.length === 0 && (
-        <div className="empty">{onlyFavs ? "No favorites here yet — tap ★ on any shot." : "Nothing here."}</div>
+        <div className="empty">{onlyFavs ? brief("No favorites here yet — tap ★ on any shot.") : "Nothing here."}</div>
       )}
 
       {selecting && (
@@ -621,7 +622,7 @@ function Viewer(props: {
       await navigator.clipboard.write([
         new ClipboardItem({ "image/png": fetch(full(shot.path)).then((r) => r.blob()) }),
       ]);
-      notify("Copied image — paste it anywhere");
+      notify(brief("Copied image — paste it anywhere"));
     } catch (e) {
       notify(`Couldn't copy: ${e}`);
     }

@@ -10,13 +10,15 @@ export interface Settings {
   customFont: string;
   fontScope: "headings" | "everything";
   scale: number; // 0.9 – 1.2
+  reducedText: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  font: "default",
+  font: "minecraft",
   customFont: "",
-  fontScope: "everything",
+  fontScope: "headings",
   scale: 1,
+  reducedText: true,
 };
 
 /** Bundled with the app (src/assets/fonts), so no install needed. */
@@ -65,8 +67,18 @@ const STACKS: Record<Exclude<FontChoice, "minecraft" | "custom">, string | null>
   mono: 'ui-monospace, "SF Mono", Menlo, monospace',
 };
 
+let reduced = DEFAULT_SETTINGS.reducedText;
+
+/** With Reduced text on, drops the " — explanation" tail of a UI string. */
+export function brief(text: string): string {
+  return reduced ? text.split(" — ")[0] : text;
+}
+
 /** Pushes settings onto the CSS variables the stylesheet reads. */
 export function applySettings(s: Settings) {
+  reduced = s.reducedText;
+  // .more spans (long explanations) hide under :root.reduced
+  document.documentElement.classList.toggle("reduced", s.reducedText);
   const root = document.documentElement.style;
   let headings: string | null;
   let body: string | null;
