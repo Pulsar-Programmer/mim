@@ -30,6 +30,7 @@ import { ProgressBar, useProgress } from "./Progress";
 import { PacksView } from "./PacksView";
 import { ConfigView } from "./ConfigView";
 import { LinkEditor } from "./LinkEditor";
+import { LinksDrawer } from "./LinksDrawer";
 import { Settings, applySettings, brief, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
@@ -200,6 +201,7 @@ function App() {
             refresh={refresh}
             notify={notify}
             onNew={() => setView("new")}
+            onStandards={() => setView("standards")}
           />
         )}
         {view === "new" && (
@@ -252,13 +254,18 @@ function InstallationsView({
   refresh,
   notify,
   onNew,
+  onStandards,
 }: {
   installations: Installation[];
   refresh: () => void;
   notify: (m: string) => void;
   onNew: () => void;
+  onStandards: () => void;
 }) {
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [standards = [], loadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [linking, setLinking] = useState<string | null>(null);
+  const linkingInst = installations.find((i) => i.name === linking);
 
   async function pickImage(inst: Installation) {
     const path = await openDialog({
@@ -285,20 +292,6 @@ function InstallationsView({
     try {
       await api.deleteInstallation(inst.name, true);
       notify(`Moved "${inst.name}" to Trash`);
-      refresh();
-    } catch (e) {
-      notify(String(e));
-    }
-  }
-
-  async function link(inst: Installation) {
-    try {
-      const [linked, skipped] = await api.linkInstallation(inst.name);
-      notify(
-        linked.length
-          ? `Linked ${linked.join(", ")}${skipped.length ? ` · kept local: ${skipped.join(", ")}` : ""}`
-          : brief("Nothing to link — folders already exist")
-      );
       refresh();
     } catch (e) {
       notify(String(e));
@@ -347,7 +340,7 @@ function InstallationsView({
                 {inst.mods_count > 0 && <span>{inst.mods_count} mods</span>}
                 <span>{timeAgo(inst.last_used)}</span>
               </div>
-              <div className="card-links" title="shared folders symlinked">
+              <button className="card-links" title="Links…" onClick={() => setLinking(inst.name)}>
                 {["resourcepacks", "saves", "screenshots"].map((d) => (
                   <span
                     key={d}
@@ -356,13 +349,19 @@ function InstallationsView({
                     {d.replace("resourcepacks", "packs")}
                   </span>
                 ))}
-              </div>
+                {(() => {
+                  const own = standards.filter((s) => !s.builtin && s.installations.includes(inst.name));
+                  return own.length > 0 && (
+                    <span className="dot linked std" title={own.map((s) => s.name).join(", ")}>
+                      {own.length === 1 ? own[0].name : `${own.length} standards`}
+                    </span>
+                  );
+                })()}
+              </button>
               <div className="card-actions">
                 <button onClick={() => api.revealPath(inst.path, false)}>Open</button>
                 <button onClick={() => pickImage(inst)}>Image</button>
-                {inst.linked.length < 3 && (
-                  <button onClick={() => link(inst)}>Link</button>
-                )}
+                <button onClick={() => setLinking(inst.name)}>Links</button>
                 <button className="danger" onClick={() => remove(inst)}>
                   {confirming === inst.name ? "Sure?" : "Delete"}
                 </button>
@@ -376,6 +375,20 @@ function InstallationsView({
           </div>
         )}
       </div>
+
+      {linkingInst && (
+        <LinksDrawer
+          inst={linkingInst}
+          standards={standards}
+          notify={notify}
+          onChanged={() => {
+            loadStandards();
+            refresh();
+          }}
+          onClose={() => setLinking(null)}
+          onManage={onStandards}
+        />
+      )}
     </>
   );
 }
@@ -926,8 +939,9 @@ function StandardsView({
           <div className="std-label">Linked installations</div>
           <div className="places">
             {installations.map((i) => {
-              const want = entriesFor(s, i.game_version).length;
-              const n = Math.min(s.live[i.name] ?? 0, want);
+              const rels = entriesFor(s, i.game_version).map((e) => e.rel_path);
+              const want = rels.length;
+              const n = rels.filter((r) => s.linked[i.name]?.includes(r)).length;
               return (
                 <PlaceChip
                   key={i.name}

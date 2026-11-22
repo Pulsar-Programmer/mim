@@ -95,7 +95,10 @@ export function LinkEditor({
 
   const toLink = rels.filter((r) => want.has(r) && st(r) !== "linked");
   const toUnlink = linkedNow.filter((r) => !want.has(r));
-  const trash = toLink.filter((r) => st(r) === "own");
+  // Shared folders the installation has its own of get merged in, not trashed
+  const own = toLink.filter((r) => st(r) === "own");
+  const trash = std.builtin ? [] : own;
+  const merge = std.builtin ? own : [];
   const swap = toLink.filter((r) => st(r) === "other");
   const changed = toLink.length + toUnlink.length > 0;
   const risky = trash.length > 0 || (toUnlink.length > 0 && !keep);
@@ -128,14 +131,21 @@ export function LinkEditor({
     if (busy) return;
     setBusy(true);
     try {
-      // the whole wanted set, so already-linked items stay put (and old whole-folder links split up)
-      if (want.size) await api.linkStandard(std.name, inst.name, rels.filter((r) => want.has(r)), true);
-      if (toUnlink.length) await api.unlinkStandard(std.name, inst.name, toUnlink, keep);
+      let renamed: string[] = [];
+      if (std.builtin) {
+        if (toLink.length) renamed = await api.mergeShared(inst.name, toLink.map((r) => r.split("/")[1]));
+      } else if (want.size) {
+        // the whole wanted set, so already-linked items stay put (and old whole-folder links split up)
+        await api.linkStandard(std.name, inst.name, rels.filter((r) => want.has(r)), true);
+      }
+      if (toUnlink.length) await api.unlinkStandard(std.name, inst.name, keep, toUnlink);
       notify(
         [
           toLink.length && `Linked ${plural(toLink.length, "item")} from "${std.name}" into ${inst.name}`,
           toUnlink.length && `unlinked ${toUnlink.length}${keep ? ", kept copies" : ""}`,
           trash.length && `${trash.length} moved to Trash`,
+          merge.length && `${inst.name}'s own merged into Shared`,
+          renamed.length && `kept both of ${renamed.join(", ")}`,
         ]
           .filter(Boolean)
           .join(" · ")
@@ -156,7 +166,9 @@ export function LinkEditor({
     if (s.state === "linked") return on ? ["linked", "Linked"] : ["drop", "Will unlink"];
     if (on)
       return s.state === "own"
-        ? ["trash", "Replaces its own"]
+        ? std.builtin
+          ? ["add", "Merges its own in"]
+          : ["trash", "Replaces its own"]
         : s.state === "other"
           ? ["add", s.from ? `Will link · was ${s.from}` : "Will link · replaces a link"]
           : ["add", "Will link"];
@@ -332,6 +344,16 @@ export function LinkEditor({
                   {inst.name} has its own {trash.length === 1 ? "copy" : "copies"}. To link{" "}
                   {std.name}'s, MIM moves {trash.length === 1 ? "it" : "them"} to the Trash — you
                   can put {trash.length === 1 ? "it" : "them"} back from there.
+                </p>
+              </section>
+            )}
+            {merge.length > 0 && (
+              <section className="le-sec add">
+                <h3>Merge {plural(merge.length, "folder")} into Shared</h3>
+                {list(merge)}
+                <p>
+                  {inst.name}'s own move into the Shared {merge.length === 1 ? "one" : "ones"} and get
+                  linked back. Where both have the same name, both are kept.
                 </p>
               </section>
             )}

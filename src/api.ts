@@ -38,8 +38,8 @@ export interface Standard {
   /** the Minecraft folder's own shared folders (saves, packs, screenshots) */
   builtin: boolean;
   installations: string[];
-  /** installation -> number of its items that are live links into this standard */
-  live: Record<string, number>;
+  /** installation -> the entries (rel_path) that are live links in it */
+  linked: Record<string, string[]>;
   entries: StandardEntry[];
   /** image files at the standard's top level */
   images: string[];
@@ -273,8 +273,10 @@ export const api = {
     invoke<LoaderVersion[]>("list_loader_versions", { loader, gameVersion }),
   createInstallation: (spec: InstallSpec) =>
     invoke<void>("create_installation", { spec }),
-  linkInstallation: (name: string) =>
-    invoke<[string[], string[]]>("link_installation", { name }),
+  /** Moves an installation's own saves/packs/screenshots into the Shared ones and
+   * links them. Returns what was renamed to keep both. */
+  mergeShared: (installation: string, folders: string[]) =>
+    invoke<string[]>("merge_shared", { installation, folders }),
   listStandards: () => invoke<Standard[]>("list_standards"),
   ensureStandardsDir: () => invoke<string>("ensure_standards_dir"),
   createStandard: (name: string) => invoke<string>("create_standard", { name }),
@@ -282,9 +284,10 @@ export const api = {
   /** Returns what's in the way; when non-empty and !replace, nothing was linked. */
   linkStandard: (name: string, installation: string, relPaths: string[], replace: boolean) =>
     invoke<string[]>("link_standard", { name, installation, relPaths, replace }),
-  /** keep: leave the installation a real copy instead of removing the files */
-  unlinkStandard: (name: string, installation: string, relPaths: string[], keep: boolean) =>
-    invoke<void>("unlink_standard", { name, installation, relPaths, keep }),
+  /** keep: leave the installation a real copy instead of removing the files.
+   * relPaths: just those entries, otherwise all of it */
+  unlinkStandard: (name: string, installation: string, keep: boolean, relPaths?: string[]) =>
+    invoke<void>("unlink_standard", { name, installation, keep, relPaths }),
   /** how each entry stands in the installation, in the order asked */
   linkStates: (name: string, installation: string, relPaths: string[]) =>
     invoke<LinkState[]>("link_states", { name, installation, relPaths }),

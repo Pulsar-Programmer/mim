@@ -372,8 +372,27 @@ code {
 
 .card-links {
   display: flex;
-  gap: 6px;
-  margin-top: 8px;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin: 8px -5px 0;
+  padding: 2px 5px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.card-links:hover {
+  background: var(--chip);
+}
+
+.dot.std {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dot {
@@ -3134,6 +3153,57 @@ kbd {
 .file-chip.on {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+/* ---- links drawer: one installation, everything it can link ---- */
+
+.links-title {
+  min-width: 0;
+}
+
+.links-title .drawer-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.links-intro {
+  margin: 18px 0 14px;
+}
+
+.links-drawer .based-list.busy {
+  opacity: 0.6;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+.links-drawer .based-files {
+  padding-left: 12px;
+}
+
+.links-drawer .file-chip {
+  color: var(--ink);
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.links-drawer .file-chip:not(.on):hover {
+  border-color: var(--muted);
+}
+
+.link-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line);
+  flex-shrink: 0;
+}
+
+.link-dot.on {
+  background: #7fa650;
+}
+
+.links-ask {
+  margin: 0 12px 12px;
 }
 
 /* ---- options: groups flow into columns on wide windows ---- */
