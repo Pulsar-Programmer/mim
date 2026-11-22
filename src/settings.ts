@@ -17,7 +17,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  font: "minecraft",
+  font: "minecraftia",
   customFont: "",
   fontScope: "headings",
   scale: 1,

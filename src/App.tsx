@@ -337,6 +337,21 @@ function InstallationsView({
     }
   }
 
+  async function duplicate(inst: Installation) {
+    const taken = new Set(installations.map((i) => i.name.toLowerCase()));
+    let to = `${inst.name} copy`;
+    for (let n = 2; taken.has(to.toLowerCase()); n++) to = `${inst.name} copy ${n}`;
+    notify(`Duplicating "${inst.name}"…`);
+    try {
+      await api.duplicateInstallation(inst.name, to);
+      notify(brief(`Made "${to}" — click its name to rename it`));
+      refresh();
+      loadStandards();
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
   async function pickImage(inst: Installation) {
     const path = await openDialog({
       title: `Image for ${inst.name}`,
@@ -457,6 +472,9 @@ function InstallationsView({
               <div className="card-actions">
                 <button onClick={() => api.revealPath(inst.path, false)}>Open</button>
                 <button onClick={() => setRenaming(inst.name)}>Rename</button>
+                <button title="Copy it, its mods and settings under a new name" onClick={() => duplicate(inst)}>
+                  Duplicate
+                </button>
                 <button onClick={() => pickImage(inst)}>Image</button>
                 <button onClick={() => setLinking(inst.name)}>Links</button>
                 {inst.registered && (

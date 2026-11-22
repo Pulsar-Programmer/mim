@@ -364,6 +364,9 @@ export const api = {
   /** moves its folder and updates its launcher profile and standards */
   renameInstallation: (name: string, newName: string) =>
     invoke<void>("rename_installation", { name, newName }),
+  /** copies its folder (links stay links), launcher profile and standards */
+  duplicateInstallation: (name: string, newName: string) =>
+    invoke<void>("duplicate_installation", { name, newName }),
   revealPath: (path: string, select = true) =>
     invoke<void>("reveal_path", { path, select }),
   openLauncher: () => invoke<void>("open_launcher"),

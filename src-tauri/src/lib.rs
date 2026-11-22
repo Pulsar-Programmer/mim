@@ -1692,15 +1692,88 @@ fn delete_installation(name: String, remove_profile: bool) -> CmdResult<()> {
     Ok(())
 }
 
+fn new_inst_name(n: &str) -> CmdResult<&str> {
+    let n = n.trim();
+    if n.is_empty() || n.starts_with('.') || n.contains(['/', '\\']) || n == SHARED {
+        return Err("That name can't be a folder name".into());
+    }
+    Ok(n)
+}
+
+/// Copies a folder tree, recreating symlinks as symlinks so shared folders
+/// and standards stay linked instead of being copied in.
+fn copy_keep_links(src: &Path, dst: &Path) -> std::io::Result<()> {
+    let ft = src.symlink_metadata()?.file_type();
+    if ft.is_symlink() || (cfg!(windows) && fs::read_link(src).is_ok()) {
+        symlink(fs::read_link(src)?, dst)
+    } else if ft.is_dir() {
+        fs::create_dir(dst)?;
+        for e in fs::read_dir(src)? {
+            let e = e?;
+            copy_keep_links(&e.path(), &dst.join(e.file_name()))?;
+        }
+        Ok(())
+    } else {
+        fs::copy(src, dst).map(|_| ())
+    }
+}
+
+/// Copies an installation under a new name: its folder (links stay links),
+/// a launcher profile of its own and the same standards.
+#[tauri::command(async)]
+fn duplicate_installation(name: String, new_name: String) -> CmdResult<()> {
+    launcher_closed()?;
+    let new = new_inst_name(&new_name)?;
+    let old = game_dir(Some(&name))?;
+    let dest = installations_dir().join(new);
+    if dest.symlink_metadata().is_ok() {
+        return Err(format!("\"{new}\" already exists"));
+    }
+    let mc = mc_dir();
+    let mut profiles = read_profiles()?;
+    let here = canon(&old);
+    let copies: Vec<Value> = profiles["profiles"]
+        .as_object()
+        .into_iter()
+        .flat_map(|m| m.values())
+        .filter(|p| profile_dir(&mc, p) == here)
+        .map(|p| {
+            let mut p = p.clone();
+            let now = now_iso();
+            p["gameDir"] = json!(dest.to_string_lossy());
+            p["name"] = json!(new);
+            p["created"] = json!(now);
+            p["lastUsed"] = json!(now);
+            p
+        })
+        .collect();
+    if let Err(e) = copy_keep_links(&old, &dest) {
+        let _ = fs::remove_dir_all(&dest); // only ever our half-made copy; doesn't follow links
+        return Err(err(e));
+    }
+    if !copies.is_empty() {
+        for p in copies {
+            profiles["profiles"][uuid::Uuid::new_v4().simple().to_string()] = p;
+        }
+        if let Err(e) = write_profiles(&profiles) {
+            let _ = fs::remove_dir_all(&dest);
+            return Err(e);
+        }
+    }
+    for (_, std) in visible_children(&standards_dir()) {
+        if read_links(&std).contains(&name) {
+            add_link(&std, new)?;
+        }
+    }
+    Ok(())
+}
+
 /// Renames an installation everywhere it's known: its folder, its launcher
 /// profile (name and game folder) and the standards linked into it.
 #[tauri::command(async)]
 fn rename_installation(name: String, new_name: String) -> CmdResult<()> {
     launcher_closed()?;
-    let new = new_name.trim();
-    if new.is_empty() || new.starts_with('.') || new.contains(['/', '\\']) || new == SHARED {
-        return Err("That name can't be a folder name".into());
-    }
+    let new = new_inst_name(&new_name)?;
     if new == name {
         return Ok(());
     }
@@ -4661,6 +4734,18 @@ mod tests {
         assert_eq!(p["profiles"]["t"]["gameDir"], json!(moved.to_string_lossy()));
         let links: Value = serde_json::from_str(&fs::read_to_string(std.join(LINKS_FILE)).unwrap()).unwrap();
         assert_eq!(links["installations"], json!(["New", "Other"]));
+
+        // duplicate: links stay links, own profile, same standards
+        fs::write(moved.join(".mim/own.txt"), "x").unwrap();
+        assert!(duplicate_installation("New".into(), "New".into()).is_err());
+        duplicate_installation("New".into(), "Copy".into()).unwrap();
+        let copy = root.join("installations").join("Copy");
+        assert!(copy.join("options.txt").symlink_metadata().unwrap().file_type().is_symlink());
+        assert!(copy.join(".mim/own.txt").exists() && moved.join(".mim/own.txt").exists());
+        let p = read_profiles().unwrap();
+        let names: Vec<_> = p["profiles"].as_object().unwrap().values().map(|v| v["name"].as_str().unwrap()).collect();
+        assert!(names.len() == 2 && names.contains(&"Copy"), "{names:?}");
+        assert!(read_links(&std).contains(&"Copy".to_string()));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -4890,6 +4975,7 @@ pub fn run() {
             set_custom_icon,
             delete_installation,
             rename_installation,
+            duplicate_installation,
             reveal_path,
             open_launcher,
             minecraft_dir,
