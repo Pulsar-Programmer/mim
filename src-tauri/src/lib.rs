@@ -857,6 +857,35 @@ fn list_logs_in(root: &Path) -> Vec<LogEntry> {
     out
 }
 
+/// `thumb://localhost/<path>` → a 720px JPEG of a screenshot, cached on disk
+/// so the gallery never decodes full-size PNGs.
+fn screenshot_thumb(uri_path: &str) -> CmdResult<Vec<u8>> {
+    let raw = percent_encoding::percent_decode(uri_path.trim_start_matches('/').as_bytes())
+        .decode_utf8_lossy()
+        .to_string();
+    let cache = dirs::cache_dir().ok_or("no cache dir")?.join("mim/thumbs");
+    make_thumb(&inside_mc(&raw)?, &cache)
+}
+
+fn make_thumb(src: &Path, cache_dir: &Path) -> CmdResult<Vec<u8>> {
+    use std::hash::{Hash, Hasher};
+    let meta = fs::metadata(src).map_err(err)?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (src, meta.len(), meta.modified().ok()).hash(&mut h);
+    let cache = cache_dir.join(format!("{:016x}.jpg", h.finish()));
+    if let Ok(bytes) = fs::read(&cache) {
+        return Ok(bytes);
+    }
+    let img = image::open(src).map_err(err)?;
+    let thumb = img.resize(720, 720, image::imageops::FilterType::Triangle).to_rgb8();
+    let mut buf = vec![];
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, 84)
+        .encode_image(&thumb)
+        .map_err(err)?;
+    let _ = fs::create_dir_all(cache_dir).and_then(|_| fs::write(&cache, &buf));
+    Ok(buf)
+}
+
 /// `dir/name`, or `dir/stem-N.ext` if that's taken.
 fn free_path(dir: &Path, name: &str) -> PathBuf {
     let p = dir.join(name);
@@ -1844,6 +1873,8 @@ struct Screenshot {
     location: String,
     modified: Option<String>,
     size_bytes: u64,
+    width: u32,
+    height: u32,
 }
 
 #[tauri::command(async)]
@@ -1863,7 +1894,11 @@ fn list_screenshots() -> Vec<Screenshot> {
                 continue;
             }
             let meta = e.metadata().ok();
+            // header-only read, so listing stays cheap
+            let (width, height) = image::image_dimensions(e.path()).unwrap_or((16, 9));
             out.push(Screenshot {
+                width,
+                height,
                 path: e.path().to_string_lossy().into(),
                 location: loc.clone(),
                 size_bytes: meta.as_ref().map(|m| m.len()).unwrap_or(0),
@@ -1882,6 +1917,22 @@ fn list_screenshots() -> Vec<Screenshot> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thumbnails_shrink_and_cache() {
+        let root = std::env::temp_dir().join(format!("mim-thumb-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let src = root.join("2026-11-18_21.04.11.png");
+        image::RgbImage::from_pixel(1920, 1080, image::Rgb([90, 160, 80])).save(&src).unwrap();
+        let cache = root.join("thumbs");
+        let a = make_thumb(&src, &cache).unwrap();
+        let img = image::load_from_memory(&a).unwrap();
+        assert_eq!((img.width(), img.height()), (720, 405));
+        assert_eq!(fs::read_dir(&cache).unwrap().count(), 1);
+        assert_eq!(make_thumb(&src, &cache).unwrap(), a); // served from cache
+        assert_eq!(image::image_dimensions(&src).unwrap(), (1920, 1080));
+        fs::remove_dir_all(&root).unwrap();
+    }
 
     // runs against a throwaway sample folder, never the real minecraft dir
     #[test]
@@ -2146,6 +2197,19 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .register_asynchronous_uri_scheme_protocol("thumb", |_ctx, req, responder| {
+            let path = req.uri().path().to_string();
+            std::thread::spawn(move || {
+                let res = tauri::http::Response::builder()
+                    .header("Access-Control-Allow-Origin", "*") // lets the viewer read pixels for its palette
+                    .header("Cache-Control", "max-age=31536000");
+                responder.respond(match screenshot_thumb(&path) {
+                    Ok(bytes) => res.header("Content-Type", "image/jpeg").body(bytes),
+                    Err(e) => res.status(404).body(e.into_bytes()),
+                }
+                .unwrap());
+            });
+        })
         .setup(|app| {
             // screenshots load straight from disk, but only from the minecraft folder
             use tauri::Manager;
