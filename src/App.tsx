@@ -223,6 +223,7 @@ function App() {
             notify={notify}
             root={mcDir?.path ?? ""}
             go={(v: View) => setView(v)}
+            installations={installations}
           />
         )}
         {view === "saves" && <SavesView notify={notify} installations={installations} />}
@@ -1068,7 +1069,8 @@ const LOADER_NAMES: Record<Loader, string> = {
 
 const purgeLogs = async (installation: string | null = null) =>
   `Moved ${await api.purgeLogs(installation)} log items to Trash`;
-const purgeCache = async () => `Moved ${await api.purgeCache()} cache items to Trash`;
+const purgeCache = async (installation: string | null = null) =>
+  `Moved ${await api.purgeCache(installation)} cache items to Trash`;
 
 const CATEGORIES: [FolderCategory, string, string][] = [
   ["logs", "Logs", "Text records of what the game and launcher did. Useful for debugging crashes, safe to delete."],
@@ -1124,12 +1126,20 @@ function FolderView({
   notify,
   root,
   go,
+  installations,
 }: {
   notify: (m: string) => void;
   root: string;
   go: (v: View) => void;
+  installations: Installation[];
 }) {
-  const [items, load] = useCached<FolderItem[]>("folder", api.folderOverview, notify);
+  const [scope, setScope] = useState<string | null>(null);
+  const [items, load] = useCached<FolderItem[]>(
+    `folder:${scope}`,
+    () => api.folderOverview(scope),
+    notify
+  );
+  const dir = installations.find((i) => i.name === scope)?.path ?? root;
   const { armed, confirm } = useConfirm(notify, load);
   const [open, setOpen] = useState<Set<FolderCategory>>(new Set());
 
@@ -1165,10 +1175,19 @@ function FolderView({
             {items ? `${items.length} items · ${formatBytes(total)}` : "measuring…"}
           </p>
         </div>
-        <button className="btn" onClick={() => api.revealPath(root, false)} disabled={!root}>
+        <button className="btn" onClick={() => api.revealPath(dir, false)} disabled={!dir}>
           Open Folder
         </button>
       </header>
+
+      <PlacePicker
+        places={[
+          { key: "", label: "Minecraft folder", kind: "root", sub: "launcher & shared files" },
+          ...installations.map((i) => ({ key: i.name, label: i.name, inst: i, sub: "game folder" })),
+        ]}
+        value={scope ?? ""}
+        onChange={(k) => setScope(k || null)}
+      />
 
       {total > 0 && (
         <div className="size-map">
@@ -1225,18 +1244,18 @@ function FolderView({
                   </button>
                   <button
                     className="btn small danger"
-                    onClick={act(() => confirm("logs", () => purgeLogs()))}
+                    onClick={act(() => confirm(`logs:${scope}`, () => purgeLogs(scope)))}
                   >
-                    {armed === "logs" ? "Sure?" : "Purge"}
+                    {armed === `logs:${scope}` ? "Sure?" : "Purge"}
                   </button>
                 </div>
               )}
               {cat === "cache" && (
                 <button
                   className="btn small danger"
-                  onClick={act(() => confirm("cache", purgeCache))}
+                  onClick={act(() => confirm(`cache:${scope}`, () => purgeCache(scope)))}
                 >
-                  {armed === "cache" ? "Sure?" : "Purge"}
+                  {armed === `cache:${scope}` ? "Sure?" : "Purge"}
                 </button>
               )}
               {cat === "yours" && (
