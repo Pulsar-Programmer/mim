@@ -9,6 +9,7 @@ import {
   Standard,
   timeAgo,
 } from "./api";
+import { brief } from "./settings";
 import { useCached } from "./hooks";
 import { PlacePicker, StandardAvatar } from "./Places";
 
@@ -176,7 +177,7 @@ export function ConfigView({
         )}
       </header>
 
-      <p className="hint wide">
+      <p className="hint wide more">
         Mods keep their settings in <code>config/</code>, and MIM matches each file to the mod it
         came from where it can — names don't always line up, so some land in "Other".{" "}
         <b>Share</b> moves a mod's config into a standard and links it back, so every installation
@@ -222,7 +223,7 @@ export function ConfigView({
                     <span className="cfg-mod">
                       <span className="cfg-icon other">?</span>
                       <span className="cfg-mod-name">Other configs</span>
-                      <span className="hint">no matching mod — a library, or a leftover</span>
+                      <span className="hint">{brief("no matching mod — a library, or a leftover")}</span>
                     </span>
                   )}
                   <span className="cfg-head-end">
@@ -280,7 +281,7 @@ export function ConfigView({
             );
           })}
           {overview && total === 0 && (
-            <div className="empty">No config/ folder here yet — mods make one the first time the game runs.</div>
+            <div className="empty">{brief("No config/ folder here yet — mods make one the first time the game runs.")}</div>
           )}
 
           {loose.length > 0 && (
@@ -298,10 +299,10 @@ export function ConfigView({
                         {l.is_dir ? "/" : ""}
                       </code>
                       <p className="hint">
-                        {known?.note ??
-                          (mod
-                            ? `Made by ${mod.name}.`
-                            : "Not something Minecraft makes — probably a mod's.")}
+                        {brief(
+                          known?.note ??
+                            (mod ? `Made by ${mod.name}.` : "Not something Minecraft makes — probably a mod's.")
+                        )}
                       </p>
                       <span className="cfg-size">{formatBytes(l.size_bytes)}</span>
                       <button className="linklike" onClick={() => api.revealPath(l.path)}>
@@ -427,7 +428,7 @@ function ConfigEditor({
         </span>
       </div>
       {!editable ? (
-        <div className="empty">Not a text file — reveal it to open it elsewhere.</div>
+        <div className="empty">{brief("Not a text file — reveal it to open it elsewhere.")}</div>
       ) : error ? (
         <div className="empty">{error}</div>
       ) : text === null ? null : (
@@ -568,8 +569,9 @@ function ShareDialog({
           <div>
             <h2>Share {mod ? `${mod.name} settings` : "configs"}</h2>
             <p className="hint">
-              Installations linked to a standard all use one copy — change it in one, it changes
-              in all of them. Their other configs stay their own.
+              Installations linked to a standard all use one copy
+              <span className="more"> — change it in one, it changes in all of them. Their other configs stay
+              their own.</span>
             </p>
           </div>
         </header>

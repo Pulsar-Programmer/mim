@@ -83,7 +83,7 @@ export function SavesView({
 
       <p className="hint wide">
         <b>Shared</b> worlds live in <code>minecraft/saves</code> and show up in every
-        linked installation. Installations that aren't linked keep their own saves.
+        linked installation.<span className="more"> Installations that aren't linked keep their own saves.</span>
       </p>
 
       <PlacePicker
