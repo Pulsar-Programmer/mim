@@ -663,33 +663,65 @@ async fn create_in(spec: InstallSpec, p: &Progress) -> CmdResult<()> {
     write_profiles(&profiles)
 }
 
-fn link_shared_dirs(inst: &Path) -> CmdResult<(Vec<String>, Vec<String>)> {
-    let mc = mc_dir();
-    let mut linked = vec![];
-    let mut skipped = vec![];
-    for d in SHARED_DIRS {
-        let target = mc.join(d);
-        fs::create_dir_all(&target).map_err(err)?;
-        let link = inst.join(d);
-        if link.exists() || link.is_symlink() {
-            skipped.push(d.to_string());
-            continue;
+/// Moves everything in `own` into `shared`, then removes `own`. A name both
+/// have keeps both: the moved one becomes "name (tag)". Returns those names.
+fn merge_into(own: &Path, shared: &Path, tag: &str) -> CmdResult<Vec<String>> {
+    fs::create_dir_all(shared).map_err(err)?;
+    let mut renamed = vec![];
+    for (name, p) in visible_children(own) {
+        let (stem, ext) = match name.rsplit_once('.') {
+            Some((s, e)) if p.is_file() && !s.is_empty() => (s.to_string(), format!(".{e}")),
+            _ => (name.clone(), String::new()),
+        };
+        let mut dst = shared.join(&name);
+        for k in 1.. {
+            if dst.symlink_metadata().is_err() {
+                break;
+            }
+            let n = if k == 1 { tag.to_string() } else { format!("{tag} {k}") };
+            dst = shared.join(format!("{stem} ({n}){ext}"));
         }
-        symlink(&target, &link).map_err(err)?;
-        linked.push(d.to_string());
+        if dst.file_name() != Some(name.as_ref()) {
+            renamed.push(dst.file_name().unwrap().to_string_lossy().into());
+        }
+        fs::rename(&p, &dst).map_err(err)?; // same disk, so a plain move
     }
-    Ok((linked, skipped))
+    // only hidden leftovers like .DS_Store can remain
+    if fs::remove_dir(own).is_err() {
+        trash::delete(own).map_err(err)?;
+    }
+    Ok(renamed)
 }
 
-/// Symlink shared folders into an existing installation. Never touches
-/// folders that already exist (a real local folder stays local).
+/// Moves an installation's own saves, packs or screenshots into the Shared
+/// ones and links them, so nothing is lost. Returns what had to be renamed.
 #[tauri::command(async)]
-fn link_installation(name: String) -> CmdResult<(Vec<String>, Vec<String>)> {
-    let inst = installations_dir().join(&name);
-    if !inst.is_dir() {
-        return Err(format!("no installation named \"{name}\""));
+fn merge_shared(installation: String, folders: Vec<String>) -> CmdResult<Vec<String>> {
+    let inst = game_dir(Some(&installation))?;
+    let mut renamed = vec![];
+    for d in &folders {
+        if !SHARED_DIRS.contains(&d.as_str()) {
+            return Err(format!("not a shared folder: {d}"));
+        }
+        let (own, shared) = (inst.join(d), mc_dir().join(d));
+        if own.is_symlink() {
+            if links_to(&own, &shared) {
+                continue;
+            }
+            return Err(format!("{d} is linked from somewhere else — unlink it first"));
+        }
+        if own.is_dir() {
+            renamed.extend(merge_into(&own, &shared, &installation)?);
+        } else if own.exists() {
+            return Err(format!("{d} is a file, not a folder"));
+        }
     }
-    link_shared_dirs(&inst)
+    let pairs = folders
+        .iter()
+        .map(|d| entry_src(&format!("{SHARED}/{d}")))
+        .collect::<CmdResult<Vec<_>>>()?;
+    link_entries(&inst, &pairs, false)?;
+    Ok(renamed)
 }
 
 // ---------------------------------------------------------------------------
@@ -712,8 +744,8 @@ struct Standard {
     /// the Minecraft folder's own shared folders, always there
     builtin: bool,
     installations: Vec<String>,
-    /// installation -> how many of its top-level items are live links into this standard
-    live: std::collections::HashMap<String, usize>,
+    /// installation -> the entries (rel_path) that are live links in it
+    linked: std::collections::HashMap<String, Vec<String>>,
     entries: Vec<StandardEntry>,
     /// pictures at the standard's top level, offered as installation images
     images: Vec<String>,
@@ -844,28 +876,31 @@ fn linked_ancestor(inst: &Path, dest: &Path) -> Option<PathBuf> {
 #[tauri::command(async)]
 fn list_standards() -> CmdResult<Vec<Standard>> {
     let names = installation_names();
-    let live_of = |std: &str| -> Vec<(String, usize)> {
+    // installation -> its live entries, for those with any
+    let linked_of = |entries: &[StandardEntry]| -> std::collections::HashMap<String, Vec<String>> {
         names
             .iter()
-            .map(|n| (n.clone(), links_of(&installations_dir().join(n), std).len()))
+            .map(|n| (n.clone(), linked_entries(&installations_dir().join(n), entries)))
+            .filter(|(_, v)| !v.is_empty())
             .collect()
     };
-    let shared_live: Vec<_> = live_of(SHARED).into_iter().filter(|(_, k)| *k > 0).collect();
+    let shared_entries: Vec<_> = SHARED_DIRS
+        .iter()
+        .map(|d| StandardEntry {
+            name: d.to_string(),
+            rel_path: format!("{SHARED}/{d}"),
+            scope: "global".into(),
+            is_dir: true,
+        })
+        .collect();
+    let shared_linked = linked_of(&shared_entries);
     let mut out = vec![Standard {
         name: SHARED.into(),
         path: mc_dir().to_string_lossy().into(),
         builtin: true,
-        installations: shared_live.iter().map(|(n, _)| n.clone()).collect(),
-        live: shared_live.into_iter().collect(),
-        entries: SHARED_DIRS
-            .iter()
-            .map(|d| StandardEntry {
-                name: d.to_string(),
-                rel_path: format!("{SHARED}/{d}"),
-                scope: "global".into(),
-                is_dir: true,
-            })
-            .collect(),
+        installations: names.iter().filter(|n| shared_linked.contains_key(*n)).cloned().collect(),
+        linked: shared_linked,
+        entries: shared_entries,
         // loose pictures in standards/ itself belong to no standard, so they show here
         images: images_in(&standards_dir()),
     }];
@@ -888,15 +923,13 @@ fn list_standards() -> CmdResult<Vec<Standard>> {
         }
         entries.sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
         let installations = read_links(&std_path);
-        let live = live_of(&std_name)
-            .into_iter()
-            .filter(|(n, _)| installations.contains(n))
-            .collect();
+        let mut linked = linked_of(&entries);
+        linked.retain(|n, _| installations.contains(n));
         out.push(Standard {
             images: images_in(&std_path),
             builtin: false,
             installations,
-            live,
+            linked,
             path: std_path.to_string_lossy().into(),
             name: std_name,
             entries,
@@ -985,6 +1018,15 @@ fn entry_src(rel: &str) -> CmdResult<(PathBuf, String)> {
         return Err(format!("standard not found: {rel}"));
     }
     Ok((src, dest))
+}
+
+/// The entries that are live links in `inst`.
+fn linked_entries(inst: &Path, entries: &[StandardEntry]) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|e| entry_src(&e.rel_path).is_ok_and(|(src, dest)| links_to(&inst.join(dest), &src)))
+        .map(|e| e.rel_path.clone())
+        .collect()
 }
 
 /// The live links from `inst` into standard `std`.
@@ -1090,15 +1132,27 @@ fn link_standard(
     Ok(blocked)
 }
 
+/// Unlinks all of standard `name`, or with `rel_paths` just those entries.
 #[tauri::command(async)]
-fn unlink_standard(name: String, installation: String, keep: bool) -> CmdResult<()> {
+fn unlink_standard(
+    name: String,
+    installation: String,
+    keep: bool,
+    rel_paths: Option<Vec<String>>,
+) -> CmdResult<()> {
     let inst = game_dir(Some(&installation))?;
-    if name != SHARED {
+    let mut links = links_of(&inst, &name);
+    let all = links.len();
+    if let Some(rels) = &rel_paths {
+        let picked: Vec<_> = rels.iter().filter_map(|r| standard_dest(r)).map(|d| inst.join(d)).collect();
+        links.retain(|p| picked.contains(p));
+    }
+    if name != SHARED && links.len() == all {
         let std = standard_dir(&name)?;
         let v: Vec<String> = read_links(&std).into_iter().filter(|n| *n != installation).collect();
         write_links(&std, &v)?;
     }
-    detach(&links_of(&inst, &name), keep)
+    detach(&links, keep)
 }
 
 /// Moves files from an installation's config/ (`names` relative to it, like
@@ -3680,6 +3734,30 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
+    fn merge_keeps_both_on_clash() {
+        let root = std::env::temp_dir().join(format!("mim-merge-{}", uuid::Uuid::new_v4()));
+        let (own, shared) = (root.join("inst/saves"), root.join("saves"));
+        fs::create_dir_all(own.join("World")).unwrap();
+        fs::create_dir_all(shared.join("World")).unwrap();
+        fs::write(own.join("World/level.dat"), "mine").unwrap();
+        fs::write(own.join("pack.zip"), "a").unwrap();
+        fs::write(shared.join("pack.zip"), "b").unwrap();
+        fs::write(shared.join("pack (PvP).zip"), "c").unwrap();
+        fs::write(own.join("Solo.txt"), "s").unwrap();
+
+        let mut renamed = merge_into(&own, &shared, "PvP").unwrap();
+        renamed.sort();
+        assert_eq!(renamed, ["World (PvP)", "pack (PvP 2).zip"]);
+        assert!(!own.exists());
+        assert_eq!(fs::read_to_string(shared.join("World (PvP)/level.dat")).unwrap(), "mine");
+        assert_eq!(fs::read_to_string(shared.join("pack (PvP 2).zip")).unwrap(), "a");
+        assert_eq!(fs::read_to_string(shared.join("pack.zip")).unwrap(), "b");
+        assert!(shared.join("Solo.txt").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn thumbnails_shrink_and_cache() {
         let root = std::env::temp_dir().join(format!("mim-thumb-{}", uuid::Uuid::new_v4()));
@@ -4193,7 +4271,7 @@ pub fn run() {
             list_game_versions,
             list_loader_versions,
             create_installation,
-            link_installation,
+            merge_shared,
             list_standards,
             ensure_standards_dir,
             create_standard,

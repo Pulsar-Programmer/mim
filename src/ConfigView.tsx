@@ -627,7 +627,7 @@ function ShareDialog({
                 : "not linked yet"
             )
           )}
-          {fresh && card({ name: fresh, path: "", builtin: false, installations: [], live: {}, entries: [], images: [] }, "new")}
+          {fresh && card({ name: fresh, path: "", builtin: false, installations: [], linked: {}, entries: [], images: [] }, "new")}
           {naming === null ? (
             <button className="place toggle share-new" onClick={() => setNaming("")}>
               <span className="ava">+</span>
