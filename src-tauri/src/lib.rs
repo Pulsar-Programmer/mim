@@ -1004,16 +1004,23 @@ fn log_kind(rel: &Path) -> &'static str {
 
 const LOG_DIRS: [&str; 3] = ["logs", "crash-reports", "debug"];
 
+/// Known rebuildable caches. Game-level ones also live in every installation
+/// folder; launcher web state (webcache*) holds sign-ins, so it's not here.
+const CACHE_ROOT: [&str; 2] = ["downloads", "updateSourceCache.json"];
+const CACHE_GAME: [&str; 3] = [".fabric", "server-resource-packs", "usercache.json"];
+
+/// Where Cleanup Review's Archive puts things.
+const ARCHIVE: &str = "archive";
+
 /// What a top-level entry of the minecraft folder is. Purges act on exactly
 /// the "logs" and "cache" buckets, so the overview and the purge agree.
 fn category(name: &str) -> &'static str {
     match name {
         _ if LOG_DIRS.contains(&name) || log_home(name).is_some() => "logs",
-        "webcache" | "webcache2" | "downloads" | "server-resource-packs" | ".fabric"
-        | "updateSourceCache.json" | "usercache.json" => "cache",
+        _ if CACHE_ROOT.contains(&name) || CACHE_GAME.contains(&name) => "cache",
         "assets" | "libraries" | "versions" | "runtime" | "bin" => "game",
         "saves" | "resourcepacks" | "shaderpacks" | "screenshots" | "mods" | "config"
-        | "installations" | "standards" | "servers.dat" | "servers.dat_old" | "hotbar.nbt"
+        | "installations" | "standards" | ARCHIVE | "servers.dat" | "servers.dat_old" | "hotbar.nbt"
         | "command_history.txt" | "options.txt" | "options.txt.bak" | "optionsof.txt" | "optionsshaders.txt" => {
             "yours"
         }
@@ -1021,6 +1028,7 @@ fn category(name: &str) -> &'static str {
             || matches!(
                 name,
                 "clientId_v2.txt" | "treatment_tags.json" | "realms_persistence.json" | "quickPlay"
+                    | "webcache" | "webcache2"
             ) =>
         {
             "launcher"
@@ -1049,6 +1057,84 @@ fn entry_size(p: &Path) -> u64 {
     } else {
         fs::metadata(p).map(|m| m.len()).unwrap_or(0)
     }
+}
+
+/// (files, bytes) under `p`; symlinks count as one file of their own size.
+fn tally(p: &Path) -> (usize, u64) {
+    match fs::symlink_metadata(p) {
+        Ok(m) if m.is_dir() => fs::read_dir(p)
+            .map(|rd| {
+                rd.flatten().fold((0, 0), |(f, b), e| {
+                    let (f2, b2) = tally(&e.path());
+                    (f + f2, b + b2)
+                })
+            })
+            .unwrap_or((0, 0)),
+        Ok(m) => (1, m.len()),
+        Err(_) => (0, 0),
+    }
+}
+
+/// Every path some process has open (via lsof). Empty if lsof isn't there,
+/// in which case nothing gets skipped.
+fn open_files() -> Vec<PathBuf> {
+    std::process::Command::new("lsof")
+        .args(["-n", "-P", "-Fn", "-w"]) // -n -P: no DNS/port lookups (17s → 0.1s)
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|l| l.strip_prefix("n/"))
+                .map(|l| PathBuf::from(format!("/{l}")))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Splits targets into (safe to move, skipped because open). A folder holding
+/// an open file is opened up, so everything else in it still goes.
+fn split_open(targets: Vec<PathBuf>, open: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let (mut go, mut skipped) = (vec![], vec![]);
+    for t in targets {
+        let c = fs::canonicalize(&t).unwrap_or_else(|_| t.clone());
+        if !open.iter().any(|o| o.starts_with(&c)) {
+            go.push(t);
+        } else if t.is_dir() && !t.is_symlink() {
+            let kids = fs::read_dir(&t)
+                .map(|rd| rd.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default();
+            let (g, s) = split_open(kids, open);
+            go.extend(g);
+            skipped.extend(s);
+        } else {
+            skipped.push(t);
+        }
+    }
+    (go, skipped)
+}
+
+#[derive(Serialize)]
+struct Moved {
+    moved: usize,
+    /// paths relative to the minecraft folder, left alone because they were open
+    skipped: Vec<String>,
+}
+
+fn rel_to_mc(paths: &[PathBuf]) -> Vec<String> {
+    let root = mc_dir();
+    paths
+        .iter()
+        .map(|p| p.strip_prefix(&root).unwrap_or(p).to_string_lossy().into())
+        .collect()
+}
+
+/// Trashes `targets`, skipping open files.
+fn trash_closed(targets: Vec<PathBuf>) -> CmdResult<Moved> {
+    let (go, skipped) = split_open(targets, &open_files());
+    if !go.is_empty() {
+        trash::delete_all(&go).map_err(err)?;
+    }
+    Ok(Moved { moved: go.len(), skipped: rel_to_mc(&skipped) })
 }
 
 fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -1166,15 +1252,22 @@ fn free_path(dir: &Path, name: &str) -> PathBuf {
         .unwrap()
 }
 
-fn sort_logs_in(root: &Path) -> std::io::Result<usize> {
-    let strays = stray_logs(root);
-    for (path, home) in &strays {
+/// Moves stray logs home; returns (moved, skipped because open).
+fn sort_logs_in(root: &Path, open: &[PathBuf]) -> std::io::Result<(usize, Vec<PathBuf>)> {
+    let mut skipped = vec![];
+    let mut moved = 0;
+    for (path, home) in stray_logs(root) {
+        if !split_open(vec![path.clone()], open).1.is_empty() {
+            skipped.push(path);
+            continue;
+        }
         let dir = root.join("logs").join(home);
         fs::create_dir_all(&dir)?;
         let name = path.file_name().unwrap_or_default().to_string_lossy();
-        fs::rename(path, free_path(&dir, &name))?;
+        fs::rename(&path, free_path(&dir, &name))?;
+        moved += 1;
     }
-    Ok(strays.len())
+    Ok((moved, skipped))
 }
 
 #[tauri::command(async)]
@@ -1183,8 +1276,10 @@ fn list_logs(installation: Option<String>) -> CmdResult<Vec<LogEntry>> {
 }
 
 #[tauri::command(async)]
-fn sort_logs(installation: Option<String>) -> CmdResult<usize> {
-    sort_logs_in(&game_dir(installation.as_deref())?).map_err(err)
+fn sort_logs(installation: Option<String>) -> CmdResult<Moved> {
+    let (moved, skipped) =
+        sort_logs_in(&game_dir(installation.as_deref())?, &open_files()).map_err(err)?;
+    Ok(Moved { moved, skipped: rel_to_mc(&skipped) })
 }
 
 /// Reads a log (gunzipping .gz) — last 2 MB only, logs can be huge.
@@ -1207,12 +1302,8 @@ fn read_log(path: String) -> CmdResult<String> {
 }
 
 #[tauri::command(async)]
-fn purge_logs(installation: Option<String>) -> CmdResult<usize> {
-    let t = root_entries(&game_dir(installation.as_deref())?, "logs");
-    if !t.is_empty() {
-        trash::delete_all(&t).map_err(err)?;
-    }
-    Ok(t.len())
+fn purge_logs(installation: Option<String>) -> CmdResult<Moved> {
+    trash_closed(root_entries(&game_dir(installation.as_deref())?, "logs"))
 }
 
 #[derive(Serialize)]
@@ -1221,40 +1312,95 @@ struct FolderItem {
     path: String,
     category: &'static str,
     size_bytes: u64,
+    files: usize,
     is_dir: bool,
 }
 
-/// Every top-level entry of the minecraft folder, categorized. async so the
-/// size walk (assets/libraries can be GBs) runs off the main thread.
+fn folder_item(p: &Path, name: String) -> FolderItem {
+    let (files, size_bytes) = tally(p);
+    FolderItem {
+        category: category(&name),
+        size_bytes,
+        files,
+        is_dir: p.is_dir(),
+        path: p.to_string_lossy().into(),
+        name,
+    }
+}
+
+/// Every top-level entry of the minecraft folder (hidden ones too),
+/// categorized. async so the size walk (assets/libraries can be GBs) runs off
+/// the main thread.
 #[tauri::command]
 async fn folder_overview() -> CmdResult<Vec<FolderItem>> {
     let paths: Vec<PathBuf> = fs::read_dir(mc_dir())
         .map_err(err)?
         .flatten()
-        .filter(|e| e.file_name() != ".DS_Store")
         .map(|e| e.path())
         .collect();
     let mut out = par_map(&paths, |p| {
-        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
-        FolderItem {
-            category: category(&name),
-            size_bytes: entry_size(p),
-            is_dir: p.is_dir(),
-            path: p.to_string_lossy().into(),
-            name,
-        }
+        folder_item(p, p.file_name().unwrap_or_default().to_string_lossy().into())
     });
     out.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
     Ok(out)
 }
 
-#[tauri::command(async)]
-fn purge_cache() -> CmdResult<usize> {
-    let t = root_entries(&mc_dir(), "cache");
-    if !t.is_empty() {
-        trash::delete_all(&t).map_err(err)?;
+/// Cache paths in the root and in every installation folder.
+fn cache_targets(root: &Path) -> Vec<PathBuf> {
+    let mut out = root_entries(root, "cache");
+    if let Ok(rd) = fs::read_dir(root.join("installations")) {
+        for inst in rd.flatten().filter(|e| e.path().is_dir()) {
+            out.extend(CACHE_GAME.iter().map(|n| inst.path().join(n)).filter(|p| p.exists()));
+        }
     }
-    Ok(t.len())
+    out
+}
+
+/// What Purge Cache would move: path relative to the minecraft folder, with
+/// file count and size.
+#[tauri::command]
+async fn cache_preview() -> CmdResult<Vec<FolderItem>> {
+    let root = mc_dir();
+    let paths = cache_targets(&root);
+    Ok(par_map(&paths, |p| {
+        folder_item(p, p.strip_prefix(&root).unwrap_or(p).to_string_lossy().into())
+    }))
+}
+
+#[tauri::command(async)]
+fn purge_cache() -> CmdResult<Moved> {
+    trash_closed(cache_targets(&mc_dir()))
+}
+
+/// Cleanup Review: Archive or Trash top-level entries MIM doesn't recognize.
+/// Anything MIM does recognize is refused — those have their own tools.
+#[tauri::command(async)]
+fn resolve_items(paths: Vec<String>, action: String) -> CmdResult<Moved> {
+    let root = fs::canonicalize(mc_dir()).map_err(err)?;
+    let mut targets = vec![];
+    for p in &paths {
+        let p = PathBuf::from(p);
+        let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let parent = p.parent().and_then(|d| fs::canonicalize(d).ok());
+        if parent.as_deref() != Some(root.as_path()) || category(&name) != "other" {
+            return Err(format!("\"{name}\" isn't an undecided item"));
+        }
+        targets.push(root.join(&name));
+    }
+    match action.as_str() {
+        "trash" => trash_closed(targets),
+        "archive" => {
+            let (go, skipped) = split_open(targets, &open_files());
+            let dir = root.join(ARCHIVE);
+            fs::create_dir_all(&dir).map_err(err)?;
+            for p in &go {
+                let name = p.file_name().unwrap_or_default().to_string_lossy();
+                fs::rename(p, free_path(&dir, &name)).map_err(err)?;
+            }
+            Ok(Moved { moved: go.len(), skipped: rel_to_mc(&skipped) })
+        }
+        _ => Err("action must be archive or trash".into()),
+    }
 }
 
 
@@ -2274,12 +2420,19 @@ mod tests {
             "downloads/log.json",
             "webcache2/blob",
             "usercache.json",
+            "installations/a/.fabric/x.jar",
+            "installations/a/usercache.json",
+            "installations/a/options.txt",
         ] {
             touch(f);
         }
 
         assert_eq!(list_logs_in(&root).iter().filter(|l| !l.sorted).count(), 4);
-        assert_eq!(sort_logs_in(&root).unwrap(), 4);
+        // an open stray is skipped, then sorted on retry
+        let open = [fs::canonicalize(root.join("nativeUpdaterLog3.txt")).unwrap()];
+        let (n, skipped) = sort_logs_in(&root, &open).unwrap();
+        assert_eq!((n, skipped.len()), (3, 1));
+        assert_eq!(sort_logs_in(&root, &[]).unwrap().0, 1);
         for f in [
             "logs/old/hs_err_pid42452.log",
             "logs/launcher/launcher_log-1.txt",
@@ -2309,9 +2462,25 @@ mod tests {
                 .collect()
         };
         assert_eq!(names("logs"), ["crash-reports", "debug", "logs"]);
-        assert_eq!(names("cache"), ["downloads", "usercache.json", "webcache2"]);
-        assert_eq!(names("launcher"), ["launcher_profiles.json"]);
-        assert_eq!(names("yours"), ["options.txt"]);
+        assert_eq!(names("cache"), ["downloads", "usercache.json"]);
+        assert_eq!(names("launcher"), ["launcher_profiles.json", "webcache2"]);
+
+        let caches: Vec<String> = cache_targets(&root)
+            .iter()
+            .map(|p| p.strip_prefix(&root).unwrap().to_string_lossy().into())
+            .collect();
+        assert_eq!(
+            caches,
+            ["downloads", "usercache.json", "installations/a/.fabric", "installations/a/usercache.json"]
+        );
+        assert_eq!(tally(&root.join("installations")), (3, 86));
+
+        // a folder with one open file: the rest of it still goes
+        let open = [fs::canonicalize(root.join("logs/latest.log")).unwrap()];
+        let (go, skipped) = split_open(vec![root.join("logs"), root.join("debug")], &open);
+        assert_eq!(skipped, [root.join("logs/latest.log")]);
+        assert!(go.contains(&root.join("debug")) && go.contains(&root.join("logs/launcher")));
+        assert_eq!(names("yours"), ["installations", "options.txt"]);
 
         fs::remove_dir_all(&root).unwrap();
     }
@@ -2572,7 +2741,9 @@ pub fn run() {
             toggle_mod,
             add_mods,
             list_screenshots,
-            purge_cache
+            purge_cache,
+            cache_preview,
+            resolve_items
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

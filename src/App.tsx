@@ -14,6 +14,7 @@ import {
   LogEntry,
   FolderItem,
   FolderCategory,
+  Moved,
 } from "./api";
 import { useCached, useConfirm } from "./hooks";
 import { SavesView } from "./SavesView";
@@ -29,6 +30,7 @@ import "./App.css";
 type View =
   | "installations"
   | "new"
+  | "cleanup"
   | "standards"
   | "packs"
   | "folder"
@@ -142,6 +144,12 @@ function App() {
         >
           <span className="plus">+</span> New Install
         </button>
+        <button
+          className={`nav-new ${view === "cleanup" ? "active" : ""}`}
+          onClick={() => setView("cleanup")}
+        >
+          <span className="plus">✓</span> Cleanup Review
+        </button>
         <nav>
           {NAV.map(([section, items]) => (
             <div key={section} className="nav-section">
@@ -207,6 +215,7 @@ function App() {
             go={(v: View) => setView(v)}
           />
         )}
+        {view === "cleanup" && <CleanupView notify={notify} />}
         {view === "saves" && <SavesView notify={notify} installations={installations} />}
         {view === "options" && <OptionsView notify={notify} installations={installations} />}
         {view === "logs" && <LogsView notify={notify} installations={installations} />}
@@ -974,9 +983,13 @@ function PacksView({ notify }: { notify: (m: string) => void }) {
 
 // ---------------------------------------------------------------------------
 
+/** "Moved 3 items to Trash · skipped 1 open: logs/latest.log" */
+const report = (m: Moved, done: string) =>
+  `${done.replace("#", `${m.moved} item${m.moved === 1 ? "" : "s"}`)}` +
+  (m.skipped.length ? ` · skipped ${m.skipped.length} open: ${m.skipped.join(", ")}` : "");
 const purgeLogs = async (installation: string | null = null) =>
-  `Moved ${await api.purgeLogs(installation)} log items to Trash`;
-const purgeCache = async () => `Moved ${await api.purgeCache()} cache items to Trash`;
+  report(await api.purgeLogs(installation), "Moved # to Trash");
+const purgeCache = async () => report(await api.purgeCache(), "Moved # to Trash");
 
 const CATEGORIES: [FolderCategory, string, string][] = [
   ["logs", "Logs", "Text records of what the game and launcher did. Useful for debugging crashes, safe to delete."],
@@ -998,6 +1011,7 @@ const NOTES: Record<string, string> = {
   ".fabric": "Fabric's remapped jar cache",
   "updateSourceCache.json": "launcher update cache",
   "usercache.json": "player name lookups",
+  archive: "archived in Cleanup Review",
   assets: "sounds, textures, languages",
   libraries: "Java libraries the game needs",
   versions: "game & loader versions",
@@ -1177,9 +1191,254 @@ function FolderView({
       })}
       {items && (
         <p className="hint wide folder-foot">
-          Close the launcher and game before purging. Purged items go to the Trash.
+          Purged items go to the Trash. Files the game or launcher has open are skipped and
+          listed — purge again once they're closed.
         </p>
       )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+
+const KEPT_KEY = "mim.cleanupKept";
+const CAT_TITLE = Object.fromEntries(CATEGORIES.map(([c, t]) => [c, t]));
+const count = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+
+/** Every root entry; undecided ones (unrecognized, not kept) get resolved in batches. */
+function CleanupView({ notify }: { notify: (m: string) => void }) {
+  const [items, load] = useCached<FolderItem[]>("folder", api.folderOverview, notify);
+  const [caches, loadCaches] = useCached<FolderItem[]>("cachePreview", api.cachePreview, notify);
+  const [kept, setKept] = useState<string[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem(KEPT_KEY) ?? "[]");
+    } catch {
+      return [];
+    }
+  });
+  const [picked, setPicked] = useState<Set<string>>(new Set());
+  // the last run that skipped open files, so it can be retried
+  const [retry, setRetry] = useState<{ skipped: string[]; run: () => Promise<string> } | null>(
+    null
+  );
+  const reload = () => {
+    load();
+    loadCaches();
+  };
+  const { armed, confirm } = useConfirm(notify, reload);
+
+  const saveKept = (k: string[]) => {
+    setKept(k);
+    try {
+      localStorage.setItem(KEPT_KEY, JSON.stringify(k));
+    } catch {
+      // storage off — kept items just come back undecided next time
+    }
+  };
+
+  const all = items ?? [];
+  const undecided = all.filter((i) => i.category === "other" && !kept.includes(i.path));
+  const sel = undecided.filter((i) => picked.has(i.path));
+  const selBytes = sel.reduce((n, i) => n + i.size_bytes, 0);
+  const cacheBytes = (caches ?? []).reduce((n, i) => n + i.size_bytes, 0);
+  const cacheFiles = (caches ?? []).reduce((n, i) => n + i.files, 0);
+
+  const pick = (path: string) =>
+    setPicked((prev) => {
+      const next = new Set(prev);
+      next.has(path) ? next.delete(path) : next.add(path);
+      return next;
+    });
+
+  // runs a move, remembers what it skipped, returns the toast text
+  const track = (go: () => Promise<Moved>, done: string) => {
+    const run = async (): Promise<string> => {
+      const m = await go();
+      setRetry(m.skipped.length ? { skipped: m.skipped, run } : null);
+      setPicked(new Set());
+      return report(m, done);
+    };
+    return run;
+  };
+
+  async function now(run: () => Promise<string>) {
+    try {
+      notify(await run());
+    } catch (e) {
+      notify(String(e));
+    }
+    reload();
+  }
+
+  const paths = sel.map((i) => i.path);
+  const keep = () => {
+    saveKept([...kept, ...paths]);
+    setPicked(new Set());
+    notify(`Keeping ${count(paths.length, "item")}`);
+  };
+  const archive = () =>
+    now(track(() => api.resolveItems(paths, "archive"), "Moved # to archive/"));
+  const trashSel = () =>
+    confirm("trash", track(() => api.resolveItems(paths, "trash"), "Moved # to Trash"));
+  const purge = () => confirm("cache", track(api.purgeCache, "Moved # to Trash"));
+
+  return (
+    <>
+      <header className="page-head">
+        <div>
+          <h1>Cleanup Review</h1>
+          <p className="sub">
+            {items
+              ? `${count(all.length, "item")} · ${undecided.length} undecided`
+              : "measuring…"}
+          </p>
+        </div>
+      </header>
+
+      {retry && (
+        <section className="cleanup-skipped">
+          <div className="row-inline">
+            <strong>Skipped {count(retry.skipped.length, "open file")}</strong>
+            <span className="hint">Close the game and launcher, then retry.</span>
+            <button className="btn small" onClick={() => now(retry.run)}>
+              Retry
+            </button>
+          </div>
+          <ul className="pack-list folder-list">
+            {retry.skipped.map((p) => (
+              <li key={p}>
+                <span className="folder-name wide">{p}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
+
+      <section className="cleanup-section">
+        <div className="cleanup-head">
+          <h2>Undecided</h2>
+          <p className="hint">
+            Things MIM doesn't recognize. Keep leaves them be, Archive moves them to{" "}
+            <code>archive/</code>, Trash moves them to the Trash.
+          </p>
+        </div>
+        {undecided.length > 0 ? (
+          <>
+            <div className="row-inline cleanup-bar">
+              <label className="cleanup-check">
+                <input
+                  type="checkbox"
+                  checked={sel.length === undecided.length}
+                  onChange={(e) =>
+                    setPicked(new Set(e.target.checked ? undecided.map((i) => i.path) : []))
+                  }
+                />
+                {sel.length ? `${sel.length} selected · ${formatBytes(selBytes)}` : "Select all"}
+              </label>
+              <button className="btn small" disabled={!sel.length} onClick={keep}>
+                Keep
+              </button>
+              <button className="btn small" disabled={!sel.length} onClick={archive}>
+                Archive
+              </button>
+              <button className="btn small danger" disabled={!sel.length} onClick={trashSel}>
+                {armed === "trash" ? "Sure?" : "Trash"}
+              </button>
+            </div>
+            <ul className="pack-list folder-list">
+              {undecided.map((i) => (
+                <li key={i.path}>
+                  <label className="cleanup-check">
+                    <input
+                      type="checkbox"
+                      checked={picked.has(i.path)}
+                      onChange={() => pick(i.path)}
+                    />
+                    <span className="folder-name">
+                      {i.name}
+                      {i.is_dir ? "/" : ""}
+                    </span>
+                  </label>
+                  <span className="folder-note">{count(i.files, "file")}</span>
+                  <span className="pack-size">{formatBytes(i.size_bytes)}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : (
+          items && <div className="empty">Nothing undecided.</div>
+        )}
+      </section>
+
+      <section className="cleanup-section">
+        <div className="cleanup-head">
+          <h2>Cache</h2>
+          <p className="hint">
+            Only known rebuildable caches, in the Minecraft folder and every installation.
+            Launcher web state (sign-ins) is left alone.
+          </p>
+          <button
+            className="btn small danger"
+            disabled={!caches?.length}
+            onClick={purge}
+          >
+            {armed === "cache" ? "Sure?" : `Purge ${formatBytes(cacheBytes)}`}
+          </button>
+        </div>
+        {caches?.length ? (
+          <ul className="pack-list folder-list">
+            {caches.map((i) => (
+              <li key={i.path} className="log-row" onClick={() => api.revealPath(i.path)}>
+                <span className="folder-name wide">{i.name}</span>
+                <span className="folder-note">{count(i.files, "file")}</span>
+                <span className="pack-size">{formatBytes(i.size_bytes)}</span>
+              </li>
+            ))}
+            <li>
+              <span className="folder-name wide">Total</span>
+              <span className="folder-note">{count(cacheFiles, "file")}</span>
+              <span className="pack-size">{formatBytes(cacheBytes)}</span>
+            </li>
+          </ul>
+        ) : (
+          caches && <div className="empty">No cache to purge.</div>
+        )}
+      </section>
+
+      <section className="cleanup-section">
+        <div className="cleanup-head">
+          <h2>Everything</h2>
+          <p className="hint">Every entry in the folder root, hidden ones included.</p>
+        </div>
+        <ul className="pack-list folder-list">
+          {all.map((i) => (
+            <li key={i.path} className="log-row" onClick={() => api.revealPath(i.path)}>
+              <span className="folder-name">
+                <span className={`swatch cat-${i.category}`} /> {i.name}
+                {i.is_dir ? "/" : ""}
+              </span>
+              <span className="folder-note">
+                {kept.includes(i.path) ? (
+                  <button
+                    className="linklike"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      saveKept(kept.filter((k) => k !== i.path));
+                    }}
+                  >
+                    kept · undo
+                  </button>
+                ) : (
+                  CAT_TITLE[i.category]
+                )}
+                {" · "}
+                {count(i.files, "file")}
+              </span>
+              <span className="pack-size">{formatBytes(i.size_bytes)}</span>
+            </li>
+          ))}
+        </ul>
+      </section>
     </>
   );
 }
@@ -1208,8 +1467,8 @@ function LogsView({
 
   async function sort() {
     try {
-      const n = await api.sortLogs(scope);
-      notify(n ? `Sorted ${n} stray log${n === 1 ? "" : "s"} into logs/` : "Already tidy");
+      const m = await api.sortLogs(scope);
+      notify(m.moved || m.skipped.length ? report(m, "Sorted # into logs/") : "Already tidy");
     } catch (e) {
       notify(String(e));
     }

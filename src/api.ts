@@ -79,7 +79,14 @@ export interface FolderItem {
   path: string;
   category: FolderCategory;
   size_bytes: number;
+  files: number;
   is_dir: boolean;
+}
+
+/** What a move/trash did; `skipped` were open (relative to the minecraft folder). */
+export interface Moved {
+  moved: number;
+  skipped: string[];
 }
 
 export interface World {
@@ -222,12 +229,16 @@ export const api = {
   listLogs: (installation: string | null = null) =>
     invoke<LogEntry[]>("list_logs", { installation }),
   sortLogs: (installation: string | null = null) =>
-    invoke<number>("sort_logs", { installation }),
+    invoke<Moved>("sort_logs", { installation }),
   readLog: (path: string) => invoke<string>("read_log", { path }),
   purgeLogs: (installation: string | null = null) =>
-    invoke<number>("purge_logs", { installation }),
+    invoke<Moved>("purge_logs", { installation }),
   folderOverview: () => invoke<FolderItem[]>("folder_overview"),
-  purgeCache: () => invoke<number>("purge_cache"),
+  /** every cache path Purge Cache would move, root and installations; name is the relative path */
+  cachePreview: () => invoke<FolderItem[]>("cache_preview"),
+  purgeCache: () => invoke<Moved>("purge_cache"),
+  resolveItems: (paths: string[], action: "archive" | "trash") =>
+    invoke<Moved>("resolve_items", { paths, action }),
 };
 
 export function formatBytes(n: number): string {

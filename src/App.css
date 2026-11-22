@@ -2998,3 +2998,53 @@ kbd {
 .opt-group {
   break-inside: avoid;
 }
+
+/* ---- cleanup review ---- */
+
+.nav-new + .nav-new {
+  margin-top: -12px;
+}
+
+.cleanup-section {
+  margin-bottom: 28px;
+}
+
+.cleanup-head {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.cleanup-head .hint {
+  flex: 1;
+}
+
+.cleanup-bar {
+  margin-bottom: 8px;
+}
+
+.cleanup-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.folder-name.wide {
+  width: auto;
+  flex: 1;
+}
+
+.cleanup-skipped {
+  margin-bottom: 24px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--accent-soft);
+}
+
+.cleanup-skipped .pack-list {
+  margin-top: 10px;
+}
