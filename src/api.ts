@@ -51,6 +51,104 @@ export interface PacksOverview {
   local: { installation: string; packs: Pack[] }[];
 }
 
+export interface LogEntry {
+  path: string;
+  rel: string;
+  name: string;
+  kind: "game" | "crash" | "launcher" | "updater" | "debug";
+  modified: string | null;
+  size_bytes: number;
+  sorted: boolean;
+}
+
+export type FolderCategory = "logs" | "cache" | "yours" | "game" | "launcher" | "other";
+
+export interface FolderItem {
+  name: string;
+  path: string;
+  category: FolderCategory;
+  size_bytes: number;
+  is_dir: boolean;
+}
+
+export interface World {
+  folder: string;
+  path: string;
+  location: string;
+  name: string;
+  icon: string | null;
+  last_played: number | null;
+  game_mode: number | null;
+  hardcore: boolean;
+  cheats: boolean;
+  version: string | null;
+  seed: string | null;
+  size_bytes: number;
+}
+
+export interface WorldDetails {
+  parts: Pack[];
+  datapacks: string[];
+  players: number;
+}
+
+export interface OptionsSource {
+  label: string;
+  kind: "base" | "installation";
+  path: string;
+  exists: boolean;
+}
+
+export type OptionEntry = [string, string];
+
+export interface Server {
+  name: string;
+  ip: string;
+  icon: string | null;
+  accept_textures: number | null;
+  hidden: boolean;
+}
+
+export interface ServerList {
+  installation: string | null;
+  label: string;
+  path: string;
+  exists: boolean;
+  servers: Server[];
+  backup: Server[];
+}
+
+export interface Ping {
+  online: number;
+  max: number;
+  version: string;
+  motd: string;
+  latency_ms: number;
+  favicon: string | null;
+}
+
+export interface Mod {
+  file: string;
+  path: string;
+  enabled: boolean;
+  id: string | null;
+  name: string;
+  version: string | null;
+  description: string | null;
+  authors: string[];
+  loader: string | null;
+  icon: string | null;
+  size_bytes: number;
+}
+
+export interface Screenshot {
+  path: string;
+  name: string;
+  location: string;
+  modified: string | null;
+  size_bytes: number;
+}
+
 export interface InstallSpec {
   name: string;
   game_version: string;
@@ -80,7 +178,37 @@ export const api = {
   revealPath: (path: string, select = true) =>
     invoke<void>("reveal_path", { path, select }),
   openLauncher: () => invoke<void>("open_launcher"),
-  minecraftDir: () => invoke<string>("minecraft_dir"),
+  minecraftDir: () => invoke<{ path: string; sample: boolean }>("minecraft_dir"),
+  listSaves: () => invoke<World[]>("list_saves"),
+  worldDetails: (path: string) => invoke<WorldDetails>("world_details", { path }),
+  optionsSources: () => invoke<OptionsSource[]>("options_sources"),
+  readOptions: (path: string) => invoke<OptionEntry[]>("read_options", { path }),
+  writeOptions: (path: string, entries: OptionEntry[]) =>
+    invoke<void>("write_options", { path, entries }),
+  listServers: () => invoke<ServerList[]>("list_servers"),
+  writeServers: (installation: string | null, servers: Server[]) =>
+    invoke<void>("write_servers", { installation, servers }),
+  restoreServersBackup: (installation: string | null) =>
+    invoke<void>("restore_servers_backup", { installation }),
+  pingServer: (address: string) => invoke<Ping>("ping_server", { address }),
+  importWorld: (source: string, installation: string | null) =>
+    invoke<string>("import_world", { source, installation }),
+  backupWorld: (path: string, dest: string) => invoke<void>("backup_world", { path, dest }),
+  trashItem: (path: string) => invoke<void>("trash_item", { path }),
+  listMods: (installation: string | null) => invoke<Mod[]>("list_mods", { installation }),
+  toggleMod: (path: string) => invoke<string>("toggle_mod", { path }),
+  addMods: (installation: string | null, files: string[]) =>
+    invoke<number>("add_mods", { installation, files }),
+  listScreenshots: () => invoke<Screenshot[]>("list_screenshots"),
+  listLogs: (installation: string | null = null) =>
+    invoke<LogEntry[]>("list_logs", { installation }),
+  sortLogs: (installation: string | null = null) =>
+    invoke<number>("sort_logs", { installation }),
+  readLog: (path: string) => invoke<string>("read_log", { path }),
+  purgeLogs: (installation: string | null = null) =>
+    invoke<number>("purge_logs", { installation }),
+  folderOverview: () => invoke<FolderItem[]>("folder_overview"),
+  purgeCache: () => invoke<number>("purge_cache"),
 };
 
 export function formatBytes(n: number): string {
