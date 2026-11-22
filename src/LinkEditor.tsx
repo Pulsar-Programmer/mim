@@ -161,8 +161,9 @@ export function LinkEditor({
 
   // what a row will be after Confirm, in a word or two
   function pill(r: string): [string, string] {
-    const s = states![r];
+    const s = states?.[r];
     const on = want.has(r);
+    if (!s) return ["idle", "…"];
     if (s.state === "linked") return on ? ["linked", "Linked"] : ["drop", "Will unlink"];
     if (on)
       return s.state === "own"

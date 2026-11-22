@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Component, ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
@@ -31,12 +31,14 @@ import { PacksView } from "./PacksView";
 import { ConfigView } from "./ConfigView";
 import { LinkEditor } from "./LinkEditor";
 import { LinksDrawer } from "./LinksDrawer";
+import { LinkWizard } from "./LinkWizard";
 import { Settings, applySettings, brief, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
 type View =
   | "installations"
   | "new"
+  | "link"
   | "standards"
   | "packs"
   | "folder"
@@ -159,6 +161,13 @@ function App() {
         >
           <span className="plus">+</span> New Install
         </button>
+        <button
+          className={`nav-new nav-link ${view === "link" ? "active" : ""}`}
+          onClick={() => setView("link")}
+          title="Compare installations you already have and link them"
+        >
+          <span className="plus">⇄</span> Link Existing
+        </button>
         <nav>
           {NAV.map(([section, items]) => (
             <div key={section} className="nav-section">
@@ -195,12 +204,14 @@ function App() {
 
       <main className="content" key={view}>
         <div className="topbar" data-tauri-drag-region />
+        <Crashed onBack={() => setView("installations")}>
         {view === "installations" && (
           <InstallationsView
             installations={installations}
             refresh={refresh}
             notify={notify}
             onNew={() => setView("new")}
+            onLink={() => setView("link")}
             onStandards={() => setView("standards")}
           />
         )}
@@ -212,6 +223,14 @@ function App() {
               refresh();
               setView("installations");
             }}
+          />
+        )}
+        {view === "link" && (
+          <LinkWizard
+            installations={installations}
+            notify={notify}
+            onDone={refresh}
+            onStandards={() => setView("standards")}
           />
         )}
         {view === "standards" && (
@@ -240,11 +259,37 @@ function App() {
         {view === "settings" && (
           <SettingsView settings={settings} onChange={changeSettings} mcDir={mcDir} />
         )}
+        </Crashed>
       </main>
 
       {toast && <div className="toast">{toast}</div>}
     </div>
   );
+}
+
+/** A view that throws while rendering shows this instead of a blank window. */
+class Crashed extends Component<{ children: ReactNode; onBack: () => void }, { error: Error | null }> {
+  state = { error: null as Error | null };
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <div className="empty crashed">
+        <p>Something went wrong on this page.</p>
+        <code>{this.state.error.message}</code>
+        <div className="row-inline">
+          <button className="btn" onClick={() => this.setState({ error: null })}>
+            Try again
+          </button>
+          <button className="btn primary" onClick={this.props.onBack}>
+            Back to Installations
+          </button>
+        </div>
+      </div>
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -254,12 +299,14 @@ function InstallationsView({
   refresh,
   notify,
   onNew,
+  onLink,
   onStandards,
 }: {
   installations: Installation[];
   refresh: () => void;
   notify: (m: string) => void;
   onNew: () => void;
+  onLink: () => void;
   onStandards: () => void;
 }) {
   const [confirming, setConfirming] = useState<string | null>(null);
@@ -308,9 +355,16 @@ function InstallationsView({
             <code>minecraft/installations</code>
           </p>
         </div>
-        <button className="btn primary" onClick={onNew}>
-          + New Install
-        </button>
+        <div className="row-inline head-actions">
+          {installations.length > 1 && (
+            <button className="btn" onClick={onLink}>
+              ⇄ Link Existing
+            </button>
+          )}
+          <button className="btn primary" onClick={onNew}>
+            + New Install
+          </button>
+        </div>
       </header>
 
       <div className="grid">

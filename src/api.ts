@@ -57,6 +57,30 @@ export interface LinkState {
 export const entriesFor = (s: Standard, gameVersion: string | null) =>
   s.entries.filter((e) => e.scope === "global" || e.scope === gameVersion);
 
+/** One installation's copy of something it could share. */
+export interface InstCopy {
+  installation: string;
+  path: string;
+  /** where it's linked from ("Shared", a standard, "elsewhere"); null: its own */
+  link: string | null;
+  size_bytes: number;
+  /** unix seconds */
+  modified: number;
+  /** files: same hash, same content */
+  hash: string;
+  /** folders: what's inside */
+  names: string[];
+}
+
+export interface Linkable {
+  /** "options.txt", "config/sodium.json", "saves" */
+  dest: string;
+  is_dir: boolean;
+  copies: InstCopy[];
+  /** folders: what Shared already has */
+  shared: string[];
+}
+
 export interface Pack {
   name: string;
   size_bytes: number;
@@ -291,6 +315,11 @@ export const api = {
   /** how each entry stands in the installation, in the order asked */
   linkStates: (name: string, installation: string, relPaths: string[]) =>
     invoke<LinkState[]>("link_states", { name, installation, relPaths }),
+  /** what the installations could share, each one's copy side by side */
+  scanLinkables: (installations: string[]) => invoke<Linkable[]>("scan_linkables", { installations }),
+  /** copies the kept version of a file into a standard (the old one there goes to the Trash) */
+  adoptFile: (standard: string, source: string, dest: string) =>
+    invoke<void>("adopt_file", { standard, source, dest }),
   setCustomIcon: (name: string, imagePath: string) =>
     invoke<string>("set_custom_icon", { name, imagePath }),
   listPacks: (installation: string | null) => invoke<PackList>("list_packs", { installation }),

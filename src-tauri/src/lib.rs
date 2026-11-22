@@ -1280,6 +1280,133 @@ fn delete_standard(name: String) -> CmdResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Link Existing: compare what installations already have, then link it
+// ---------------------------------------------------------------------------
+
+/// Top-level settings files worth sharing (config/ is scanned whole).
+const LINK_FILES: [&str; 5] = ["options.txt", "optionsof.txt", "optionsshaders.txt", "servers.dat", "hotbar.nbt"];
+
+/// One installation's copy of a linkable thing.
+#[derive(Serialize)]
+struct InstCopy {
+    installation: String,
+    path: String,
+    /// where it's linked from (a standard's name, "Shared", "elsewhere"); None: its own
+    link: Option<String>,
+    size_bytes: u64,
+    modified: u64,
+    /// files: same hash, same content
+    hash: String,
+    /// folders: what's inside
+    names: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct Linkable {
+    /// "options.txt", "config/sodium.json", "saves"
+    dest: String,
+    is_dir: bool,
+    copies: Vec<InstCopy>,
+    /// folders: what Shared already has
+    shared: Vec<String>,
+}
+
+fn copy_of(installation: &str, inst: &Path, p: &Path, is_dir: bool) -> Option<InstCopy> {
+    let meta = fs::metadata(p).ok()?; // follows links; a broken one counts as missing
+    if meta.is_dir() != is_dir {
+        return None;
+    }
+    // the item itself, or a folder on the way (the old whole-config/ links)
+    let linked = p.is_symlink() || linked_ancestor(inst, p).is_some();
+    let link = linked.then(|| link_source(p).unwrap_or_else(|| "elsewhere".into()));
+    let (hash, names) = if is_dir {
+        (String::new(), visible_children(p).into_iter().map(|(n, _)| n).collect())
+    } else {
+        (sha512_hex(&fs::read(p).ok()?), vec![])
+    };
+    Some(InstCopy {
+        installation: installation.into(),
+        path: p.to_string_lossy().into(),
+        link,
+        size_bytes: if is_dir { 0 } else { meta.len() },
+        modified: modified_secs(p),
+        hash,
+        names,
+    })
+}
+
+fn scan_in(insts: &[(String, PathBuf)], mc: &Path) -> Vec<Linkable> {
+    let mut out: Vec<Linkable> = SHARED_DIRS
+        .iter()
+        .map(|d| Linkable {
+            dest: d.to_string(),
+            is_dir: true,
+            copies: insts.iter().filter_map(|(n, p)| copy_of(n, p, &p.join(d), true)).collect(),
+            shared: visible_children(&mc.join(d)).into_iter().map(|(n, _)| n).collect(),
+        })
+        .collect();
+    let mut files: Vec<String> = LINK_FILES.iter().map(|s| s.to_string()).collect();
+    let mut cfg = std::collections::BTreeSet::new();
+    for (_, p) in insts {
+        let mut found = vec![];
+        walk_files(&p.join(MERGED), &mut found);
+        cfg.extend(
+            found
+                .iter()
+                .map(|f| slash_path(f.strip_prefix(p.join(MERGED)).unwrap_or(f)))
+                .filter(|r| valid_rel(r))
+                .map(|r| format!("{MERGED}/{r}")),
+        );
+    }
+    files.extend(cfg);
+    out.extend(files.into_iter().filter_map(|dest| {
+        let copies: Vec<_> = insts.iter().filter_map(|(n, p)| copy_of(n, p, &p.join(&dest), false)).collect();
+        (!copies.is_empty()).then_some(Linkable { dest, is_dir: false, copies, shared: vec![] })
+    }));
+    out
+}
+
+/// Everything the installations could share, with each one's copy, so they can be compared.
+#[tauri::command(async)]
+fn scan_linkables(installations: Vec<String>) -> CmdResult<Vec<Linkable>> {
+    let insts = installations
+        .iter()
+        .map(|n| game_dir(Some(n)).map(|p| (n.clone(), p)))
+        .collect::<CmdResult<Vec<_>>>()?;
+    Ok(scan_in(&insts, &mc_dir()))
+}
+
+/// Copies `src` into the standard as `dest`. What the standard had there goes
+/// to the Trash, unless it's the same file or the same content.
+fn adopt_in(std: &Path, src: &Path, dest: &str) -> CmdResult<()> {
+    if !valid_dest(dest) {
+        return Err(format!("can't share {dest}"));
+    }
+    let target = std.join(dest);
+    if target.symlink_metadata().is_ok() {
+        if fs::canonicalize(&target).ok() == fs::canonicalize(src).ok()
+            || fs::read(&target).ok() == fs::read(src).ok()
+        {
+            return Ok(());
+        }
+        trash::delete(&target).map_err(err)?;
+    }
+    fs::create_dir_all(target.parent().unwrap()).map_err(err)?;
+    fs::copy(src, &target).map(|_| ()).map_err(err)
+}
+
+/// Puts one installation's copy of a file (the one picked to keep) into a standard.
+/// The path must be in an installation, but may be a link to anywhere.
+#[tauri::command(async)]
+fn adopt_file(standard: String, source: String, dest: String) -> CmdResult<()> {
+    let src = PathBuf::from(&source);
+    if !src.starts_with(installations_dir()) || src.components().any(|c| c == std::path::Component::ParentDir) {
+        return Err("not a file in an installation".into());
+    }
+    adopt_in(&standard_dir(&standard)?, &src, &dest)
+}
+
+// ---------------------------------------------------------------------------
 // Custom images
 // ---------------------------------------------------------------------------
 
@@ -1689,6 +1816,14 @@ fn entry_size(p: &Path) -> u64 {
 }
 
 fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    walk_depth(dir, out, 0)
+}
+
+/// Follows linked folders, so a link loop would recurse forever: stop deep down.
+fn walk_depth(dir: &Path, out: &mut Vec<PathBuf>, depth: u8) {
+    if depth > 24 {
+        return;
+    }
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1696,7 +1831,7 @@ fn walk_files(dir: &Path, out: &mut Vec<PathBuf>) {
                 continue;
             }
             if path.is_dir() {
-                walk_files(&path, out);
+                walk_depth(&path, out, depth + 1);
             } else {
                 out.push(path);
             }
@@ -3757,6 +3892,58 @@ mod tests {
 
     // throwaway temp folder, never the real minecraft dir
     #[test]
+    fn scan_compares_copies_and_adopt_keeps_one() {
+        let root = std::env::temp_dir().join(format!("mim-scan-{}", uuid::Uuid::new_v4()));
+        let (a, b, std) = (root.join("a"), root.join("b"), root.join("standards/Linked"));
+        for d in [a.join("config/fabric"), b.join("config"), a.join("saves/W1"), root.join("saves/W0"), std.clone()] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(a.join("options.txt"), "fov:90").unwrap();
+        fs::write(b.join("options.txt"), "fov:70").unwrap();
+        fs::write(a.join("config/fabric/x.toml"), "k=1").unwrap();
+        fs::write(b.join("config/sodium.json"), "{}").unwrap();
+        let insts = vec![("a".to_string(), a.clone()), ("b".to_string(), b.clone())];
+        let scan = scan_in(&insts, &root);
+        let get = |d: &str| scan.iter().find(|l| l.dest == d).unwrap();
+
+        let opts = get("options.txt");
+        assert_eq!(opts.copies.len(), 2);
+        assert_ne!(opts.copies[0].hash, opts.copies[1].hash); // two versions to pick from
+        assert_eq!(get("config/fabric/x.toml").copies.len(), 1);
+        assert_eq!(get("config/sodium.json").copies[0].installation, "b");
+        let saves = get("saves");
+        assert_eq!((saves.copies.len(), saves.copies[0].names.clone(), saves.shared.clone()), (1, vec!["W1".into()], vec!["W0".into()]));
+        assert!(!scan.iter().any(|l| l.dest == "servers.dat")); // nobody has one
+
+        // the kept copy lands in the standard; same content again is a no-op
+        adopt_in(&std, &a.join("options.txt"), "options.txt").unwrap();
+        adopt_in(&std, &a.join("config/fabric/x.toml"), "config/fabric/x.toml").unwrap();
+        assert_eq!(fs::read_to_string(std.join("options.txt")).unwrap(), "fov:90");
+        assert_eq!(fs::read_to_string(std.join("config/fabric/x.toml")).unwrap(), "k=1");
+        adopt_in(&std, &a.join("options.txt"), "options.txt").unwrap();
+        // linked already: copying onto itself changes nothing
+        fs::remove_file(a.join("options.txt")).unwrap();
+        symlink(std.join("options.txt"), a.join("options.txt")).unwrap();
+        adopt_in(&std, &a.join("options.txt"), "options.txt").unwrap();
+        assert_eq!(fs::read_to_string(std.join("options.txt")).unwrap(), "fov:90");
+        assert!(scan_in(&insts, &root).iter().find(|l| l.dest == "options.txt").unwrap().copies[0].link.is_some());
+        assert!(adopt_in(&std, &b.join("options.txt"), "../x").is_err());
+
+        // a link loop under config/ ends instead of overflowing the stack
+        symlink("..", b.join("config/loop")).unwrap();
+        // files inside an old whole-folder config link count as linked
+        let c = root.join("c");
+        fs::create_dir_all(&c).unwrap();
+        symlink(std.join("config"), c.join("config")).unwrap();
+        let insts = vec![("b".to_string(), b.clone()), ("c".to_string(), c.clone())];
+        let scan = scan_in(&insts, &root);
+        let x = scan.iter().find(|l| l.dest == "config/fabric/x.toml").unwrap();
+        assert!(x.copies[0].link.is_some());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
     fn share_config_links_single_mods() {
         let root = std::env::temp_dir().join(format!("mim-cfg-{}", uuid::Uuid::new_v4()));
         let (std, a, b) = (root.join("standards/PvP"), root.join("a"), root.join("b"));
@@ -4358,6 +4545,8 @@ pub fn run() {
             unlink_standard,
             link_states,
             share_config,
+            scan_linkables,
+            adopt_file,
             set_custom_icon,
             delete_installation,
             reveal_path,

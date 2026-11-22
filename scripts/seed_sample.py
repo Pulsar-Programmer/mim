@@ -536,6 +536,11 @@ def seed():
           "---- Minecraft Crash Report ----\n// Who set us up the TNT?\n\n"
           "Description: Ticking block entity\n\njava.lang.IllegalStateException: Create contraption\n", 3)
     write("installations/Create Modpack/logs/debug.log", game_log(3, "1.21.1"), 3)
+    # same mod configs as Hypixel's, one differing, one not: something for Link Existing to compare
+    write("installations/Create Modpack/config/sodium-options.json",
+          json.dumps({"quality": {"weather_quality": "FANCY"}, "performance": {"chunk_builder_threads": 4}}, indent=2), 3)
+    write("installations/Create Modpack/config/modmenu.json",
+          json.dumps({"sorting": "ascending", "count_libraries": True}, indent=2), 3)
     write("launcher_profiles.json", json.dumps({"profiles": profiles, "version": 3}, indent=2), 0.1)
 
     # standards
