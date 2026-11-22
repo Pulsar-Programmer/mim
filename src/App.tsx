@@ -22,6 +22,7 @@ import { ServersView } from "./ServersView";
 import { ModsView } from "./ModsView";
 import { ScreenshotsView } from "./ScreenshotsView";
 import { SettingsView } from "./SettingsView";
+import { ProfilesView } from "./ProfilesView";
 import { PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
 import { Settings, applySettings, loadSettings, saveSettings } from "./settings";
 import "./App.css";
@@ -38,6 +39,7 @@ type View =
   | "mods"
   | "options"
   | "logs"
+  | "profiles"
   | "settings";
 
 // Library: things you own and control. Minecraft Folder: housekeeping.
@@ -60,6 +62,7 @@ const NAV: [string, [View, string][]][] = [
     [
       ["folder", "Overview"],
       ["logs", "Logs"],
+      ["profiles", "Launcher Profiles"],
     ],
   ],
 ];
@@ -217,6 +220,7 @@ function App() {
         {view === "mods" && (
           <ModsView notify={notify} installations={installations} onChanged={refresh} />
         )}
+        {view === "profiles" && <ProfilesView notify={notify} onChanged={refresh} />}
         {view === "settings" && (
           <SettingsView settings={settings} onChange={changeSettings} mcDir={mcDir} />
         )}

@@ -162,6 +162,34 @@ export interface Screenshot {
   height: number;
 }
 
+export interface Profile {
+  id: string;
+  name: string;
+  kind: string;
+  version_id: string | null;
+  last_used: string | null;
+  game_dir: string;
+  shares_root: boolean;
+  outside: boolean;
+  missing: boolean;
+}
+
+export interface ArchivedProfile {
+  id: string;
+  profile: { name?: string; lastVersionId?: string };
+  game_dir: string;
+  moved_dir: boolean;
+  versions: string[];
+  archived: string;
+}
+
+export interface ProfilesOverview {
+  profiles: Profile[];
+  archived: ArchivedProfile[];
+  launcher_running: boolean;
+  backups: string;
+}
+
 export interface InstallSpec {
   name: string;
   game_version: string;
@@ -228,6 +256,12 @@ export const api = {
     invoke<number>("purge_logs", { installation }),
   folderOverview: () => invoke<FolderItem[]>("folder_overview"),
   purgeCache: () => invoke<number>("purge_cache"),
+  listProfiles: () => invoke<ProfilesOverview>("list_profiles"),
+  relinkProfile: (id: string, dir: string) => invoke<void>("relink_profile", { id, dir }),
+  /** returns the new folder */
+  moveProfile: (id: string) => invoke<string>("move_profile", { id }),
+  archiveProfile: (id: string) => invoke<void>("archive_profile", { id }),
+  restoreProfile: (id: string) => invoke<void>("restore_profile", { id }),
 };
 
 export function formatBytes(n: number): string {

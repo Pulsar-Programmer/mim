@@ -76,22 +76,12 @@ fn standards_dir() -> PathBuf {
     mc_dir().join("standards")
 }
 
-fn profiles_path() -> PathBuf {
-    mc_dir().join("launcher_profiles.json")
-}
-
 fn read_profiles() -> CmdResult<Value> {
-    let p = profiles_path();
-    if !p.exists() {
-        return Ok(json!({ "profiles": {}, "version": 3 }));
-    }
-    let text = fs::read_to_string(&p).map_err(err)?;
-    serde_json::from_str(&text).map_err(err)
+    read_profiles_in(&mc_dir())
 }
 
 fn write_profiles(v: &Value) -> CmdResult<()> {
-    let text = serde_json::to_string_pretty(v).map_err(err)?;
-    fs::write(profiles_path(), text).map_err(err)
+    write_profiles_in(&mc_dir(), v)
 }
 
 fn now_iso() -> String {
@@ -1013,7 +1003,7 @@ fn category(name: &str) -> &'static str {
         | "updateSourceCache.json" | "usercache.json" => "cache",
         "assets" | "libraries" | "versions" | "runtime" | "bin" => "game",
         "saves" | "resourcepacks" | "shaderpacks" | "screenshots" | "mods" | "config"
-        | "installations" | "standards" | "servers.dat" | "servers.dat_old" | "hotbar.nbt"
+        | "installations" | "standards" | ".mim" | "servers.dat" | "servers.dat_old" | "hotbar.nbt"
         | "command_history.txt" | "options.txt" | "options.txt.bak" | "optionsof.txt" | "optionsshaders.txt" => {
             "yours"
         }
@@ -2178,6 +2168,314 @@ fn list_screenshots() -> Vec<Screenshot> {
     out
 }
 
+// ---------------------------------------------------------------------------
+// Launcher profiles — every edit backs up launcher_profiles.json first, and
+// archives keep everything they move so a restore puts it all back.
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct Profile {
+    id: String,
+    name: String,
+    kind: String,
+    version_id: Option<String>,
+    last_used: Option<String>,
+    /// gameDir resolved the launcher's way: unset means the Minecraft folder
+    game_dir: String,
+    shares_root: bool,
+    /// not under installations/ (and not the Minecraft folder itself)
+    outside: bool,
+    missing: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ArchivedProfile {
+    id: String,
+    profile: Value,
+    game_dir: String,
+    /// the game folder went into the archive; false when it was shared
+    moved_dir: bool,
+    /// version folders moved into the archive (ones nothing else used)
+    versions: Vec<String>,
+    archived: String,
+}
+
+#[derive(Serialize)]
+struct ProfilesOverview {
+    profiles: Vec<Profile>,
+    archived: Vec<ArchivedProfile>,
+    launcher_running: bool,
+    backups: String,
+}
+
+fn canon(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+fn read_profiles_in(mc: &Path) -> CmdResult<Value> {
+    let p = mc.join("launcher_profiles.json");
+    if !p.exists() {
+        return Ok(json!({ "profiles": {}, "version": 3 }));
+    }
+    serde_json::from_str(&fs::read_to_string(&p).map_err(err)?).map_err(err)
+}
+
+/// Backs up the current file, then writes `v`.
+fn write_profiles_in(mc: &Path, v: &Value) -> CmdResult<()> {
+    let p = mc.join("launcher_profiles.json");
+    if p.exists() {
+        let dir = mc.join(".mim/profile-backups");
+        fs::create_dir_all(&dir).map_err(err)?;
+        let stamp = chrono::Local::now().format("%Y-%m-%d_%H.%M.%S");
+        fs::copy(&p, free_path(&dir, &format!("launcher_profiles-{stamp}.json"))).map_err(err)?;
+    }
+    fs::write(&p, serde_json::to_string_pretty(v).map_err(err)?).map_err(err)
+}
+
+fn profile_dir(mc: &Path, p: &Value) -> PathBuf {
+    match p["gameDir"].as_str().filter(|d| !d.trim().is_empty()) {
+        Some(d) => canon(&mc.join(d)), // an absolute gameDir replaces mc
+        None => canon(mc),
+    }
+}
+
+fn version_parent(mc: &Path, vid: &str) -> Option<String> {
+    let text = fs::read_to_string(mc.join("versions").join(vid).join(format!("{vid}.json"))).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    v["inheritsFrom"].as_str().map(String::from)
+}
+
+fn archive_dir(mc: &Path, id: &str) -> CmdResult<PathBuf> {
+    if !valid_name(id) {
+        return Err("invalid profile id".into());
+    }
+    Ok(mc.join(".mim/archive").join(id))
+}
+
+fn list_profiles_in(mc: &Path) -> CmdResult<ProfilesOverview> {
+    let root = canon(mc);
+    let insts = canon(&mc.join("installations"));
+    let file = read_profiles_in(mc)?;
+    let empty = serde_json::Map::new();
+    let mut profiles: Vec<Profile> = file["profiles"]
+        .as_object()
+        .unwrap_or(&empty)
+        .iter()
+        .map(|(id, p)| {
+            let dir = profile_dir(mc, p);
+            let s = |k: &str| p[k].as_str().map(String::from);
+            Profile {
+                id: id.clone(),
+                name: s("name").filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone()),
+                kind: s("type").unwrap_or_else(|| "custom".into()),
+                version_id: s("lastVersionId"),
+                last_used: s("lastUsed"),
+                shares_root: dir == root,
+                outside: dir != root && !dir.starts_with(&insts),
+                missing: !dir.is_dir(),
+                game_dir: dir.to_string_lossy().into(),
+            }
+        })
+        .collect();
+    profiles.sort_by(|a, b| b.last_used.cmp(&a.last_used));
+
+    let mut archived: Vec<ArchivedProfile> = fs::read_dir(mc.join(".mim/archive"))
+        .map(|rd| {
+            rd.flatten()
+                .filter_map(|e| fs::read_to_string(e.path().join("archive.json")).ok())
+                .filter_map(|t| serde_json::from_str(&t).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+    archived.sort_by(|a, b| b.archived.cmp(&a.archived));
+
+    Ok(ProfilesOverview {
+        profiles,
+        archived,
+        launcher_running: false,
+        backups: mc.join(".mim/profile-backups").to_string_lossy().into(),
+    })
+}
+
+fn relink_profile_in(mc: &Path, id: &str, dir: &Path) -> CmdResult<()> {
+    if !dir.is_dir() {
+        return Err("pick an existing folder".into());
+    }
+    let mut file = read_profiles_in(mc)?;
+    let p = file["profiles"].get_mut(id).filter(|p| p.is_object()).ok_or("no such profile")?;
+    p["gameDir"] = json!(canon(dir).to_string_lossy());
+    write_profiles_in(mc, &file)
+}
+
+/// Moves a profile's own folder into installations/<name> and points it there.
+fn move_profile_in(mc: &Path, id: &str) -> CmdResult<String> {
+    let mut file = read_profiles_in(mc)?;
+    let p = file["profiles"].get(id).filter(|p| p.is_object()).ok_or("no such profile")?;
+    let dir = profile_dir(mc, p);
+    let insts = mc.join("installations");
+    if dir == canon(mc) {
+        return Err("it uses the Minecraft folder itself — archive it instead".into());
+    }
+    if !dir.is_dir() {
+        return Err("its folder is missing — re-link it first".into());
+    }
+    if dir.starts_with(canon(&insts)) {
+        return Err("already in installations/".into());
+    }
+    let name = p["name"].as_str().unwrap_or("").replace('/', "-");
+    let name = name.trim().trim_start_matches('.');
+    let name = if name.is_empty() { id } else { name };
+    let dest = (0..)
+        .map(|n| insts.join(if n == 0 { name.to_string() } else { format!("{name} {n}") }))
+        .find(|d| !d.exists())
+        .unwrap();
+    fs::create_dir_all(&insts).map_err(err)?;
+    // ponytail: rename only, so a folder on another drive errors instead of copying
+    fs::rename(&dir, &dest).map_err(|e| format!("couldn't move the folder: {e}"))?;
+    file["profiles"][id]["gameDir"] = json!(dest.to_string_lossy());
+    if let Err(e) = write_profiles_in(mc, &file) {
+        let _ = fs::rename(&dest, &dir);
+        return Err(e);
+    }
+    Ok(dest.to_string_lossy().into())
+}
+
+/// Takes a profile out of the launcher. Its own folder and any version folders
+/// nothing else uses move into .mim/archive/<id>; a folder it shares (like the
+/// Minecraft folder) stays put.
+fn archive_profile_in(mc: &Path, id: &str) -> CmdResult<()> {
+    let arch = archive_dir(mc, id)?;
+    if arch.exists() {
+        return Err("already archived".into());
+    }
+    let mut file = read_profiles_in(mc)?;
+    let map = file["profiles"].as_object().ok_or("no profiles")?;
+    let p = map.get(id).ok_or("no such profile")?.clone();
+    let others: Vec<&Value> = map.iter().filter(|(k, _)| *k != id).map(|(_, v)| v).collect();
+    let dir = profile_dir(mc, &p);
+    let shared = dir == canon(mc) || others.iter().any(|o| profile_dir(mc, o) == dir);
+
+    fs::create_dir_all(&arch).map_err(err)?;
+    let moved_dir = !shared && dir.is_dir();
+    if moved_dir {
+        if let Err(e) = fs::rename(&dir, arch.join("game")) {
+            let _ = fs::remove_dir_all(&arch);
+            return Err(format!("couldn't move the folder: {e}"));
+        }
+    }
+    let mut versions = vec![];
+    if let Some(vid) = p["lastVersionId"].as_str().filter(|v| valid_name(v)) {
+        let used = others.iter().any(|o| {
+            let ov = o["lastVersionId"].as_str().unwrap_or("");
+            ov == vid || version_parent(mc, ov).as_deref() == Some(vid)
+        });
+        let src = mc.join("versions").join(vid);
+        // ponytail: "latest-release" profiles aren't resolved; vanilla versions re-download anyway
+        if !used && src.is_dir() {
+            fs::create_dir_all(arch.join("versions")).map_err(err)?;
+            if fs::rename(&src, arch.join("versions").join(vid)).is_ok() {
+                versions.push(vid.to_string());
+            }
+        }
+    }
+    let record = ArchivedProfile {
+        id: id.into(),
+        profile: p,
+        game_dir: dir.to_string_lossy().into(),
+        moved_dir,
+        versions,
+        archived: now_iso(),
+    };
+    fs::write(arch.join("archive.json"), serde_json::to_string_pretty(&record).map_err(err)?)
+        .map_err(err)?;
+    file["profiles"].as_object_mut().unwrap().remove(id);
+    write_profiles_in(mc, &file)
+}
+
+fn restore_profile_in(mc: &Path, id: &str) -> CmdResult<()> {
+    let arch = archive_dir(mc, id)?;
+    let text = fs::read_to_string(arch.join("archive.json")).map_err(|_| "not archived")?;
+    let record: ArchivedProfile = serde_json::from_str(&text).map_err(err)?;
+    let mut file = read_profiles_in(mc)?;
+    if !file["profiles"].is_object() {
+        file["profiles"] = json!({});
+    }
+    if file["profiles"].get(id).is_some() {
+        return Err("a profile with this id is back in the launcher already".into());
+    }
+    let dir = PathBuf::from(&record.game_dir);
+    if record.moved_dir {
+        if dir.exists() {
+            return Err(format!("something is already at {}", dir.display()));
+        }
+        fs::create_dir_all(dir.parent().unwrap_or(mc)).map_err(err)?;
+        fs::rename(arch.join("game"), &dir).map_err(err)?;
+    }
+    for v in &record.versions {
+        let dest = mc.join("versions").join(v);
+        if !dest.exists() {
+            fs::create_dir_all(mc.join("versions")).map_err(err)?;
+            let _ = fs::rename(arch.join("versions").join(v), dest);
+        }
+    }
+    file["profiles"][id] = record.profile;
+    write_profiles_in(mc, &file)?;
+    // only empties go; anything left over (a version that came back meanwhile) stays
+    let _ = fs::remove_file(arch.join("archive.json"));
+    let _ = fs::remove_dir(arch.join("versions"));
+    let _ = fs::remove_dir(&arch);
+    Ok(())
+}
+
+/// The launcher rewrites launcher_profiles.json when it quits, undoing edits.
+fn launcher_running() -> bool {
+    std::env::var_os(MC_DIR_ENV).is_none() // a sample folder isn't the launcher's
+        && std::process::Command::new("pgrep")
+            .args(["-f", "Minecraft.app/Contents/MacOS"])
+            .stdout(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success())
+}
+
+fn launcher_closed() -> CmdResult<()> {
+    if launcher_running() {
+        Err("Quit the Minecraft Launcher first — it would overwrite these edits".into())
+    } else {
+        Ok(())
+    }
+}
+
+#[tauri::command(async)]
+fn list_profiles() -> CmdResult<ProfilesOverview> {
+    let mut o = list_profiles_in(&mc_dir())?;
+    o.launcher_running = launcher_running();
+    Ok(o)
+}
+
+#[tauri::command(async)]
+fn relink_profile(id: String, dir: String) -> CmdResult<()> {
+    launcher_closed()?;
+    relink_profile_in(&mc_dir(), &id, Path::new(&dir))
+}
+
+#[tauri::command(async)]
+fn move_profile(id: String) -> CmdResult<String> {
+    launcher_closed()?;
+    move_profile_in(&mc_dir(), &id)
+}
+
+#[tauri::command(async)]
+fn archive_profile(id: String) -> CmdResult<()> {
+    launcher_closed()?;
+    archive_profile_in(&mc_dir(), &id)
+}
+
+#[tauri::command(async)]
+fn restore_profile(id: String) -> CmdResult<()> {
+    launcher_closed()?;
+    restore_profile_in(&mc_dir(), &id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2501,6 +2799,67 @@ mod tests {
         assert_eq!(plain_text(&v), "Hypixel Network!");
     }
 
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
+    fn profiles_flag_move_archive_restore() {
+        let mc = canon(&std::env::temp_dir()).join(format!("mim-prof-{}", uuid::Uuid::new_v4()));
+        let ext = mc.join("elsewhere/Old Pack");
+        for d in ["installations/Kept", "versions/1.21.10", "versions/hop-1.0", "elsewhere/Old Pack"] {
+            fs::create_dir_all(mc.join(d)).unwrap();
+        }
+        fs::write(mc.join("versions/hop-1.0/hop-1.0.json"), r#"{"inheritsFrom":"1.21.10"}"#).unwrap();
+        fs::write(ext.join("options.txt"), "fov:1").unwrap();
+        let file = json!({"version": 3, "profiles": {
+            "hop": {"name": "Hoplite", "lastVersionId": "hop-1.0", "type": "custom"},
+            "kept": {"name": "Kept", "gameDir": mc.join("installations/Kept"), "lastVersionId": "1.21.10"},
+            "old": {"name": "Old Pack", "gameDir": ext, "lastVersionId": "1.21.10"},
+            "gone": {"name": "Gone", "gameDir": mc.join("nope")}
+        }});
+        fs::write(mc.join("launcher_profiles.json"), file.to_string()).unwrap();
+
+        let o = list_profiles_in(&mc).unwrap();
+        let get = |o: &ProfilesOverview, id: &str| {
+            let p = o.profiles.iter().find(|p| p.id == id).unwrap();
+            (p.shares_root, p.outside, p.missing)
+        };
+        assert_eq!(get(&o, "hop"), (true, false, false));
+        assert_eq!(get(&o, "kept"), (false, false, false));
+        assert_eq!(get(&o, "old"), (false, true, false));
+        assert_eq!(get(&o, "gone"), (false, true, true));
+        assert!(move_profile_in(&mc, "hop").is_err()); // root-sharing can't move
+
+        // root-sharing archive: exports profile + its unused version, root untouched
+        archive_profile_in(&mc, "hop").unwrap();
+        assert!(mc.join("installations").is_dir());
+        assert!(!mc.join("versions/hop-1.0").exists());
+        assert!(mc.join("versions/1.21.10").exists()); // others still use it
+        let o = list_profiles_in(&mc).unwrap();
+        assert!(o.profiles.iter().all(|p| p.id != "hop"));
+        assert_eq!(o.archived[0].versions, ["hop-1.0"]);
+        assert!(!o.archived[0].moved_dir);
+        restore_profile_in(&mc, "hop").unwrap();
+        assert!(mc.join("versions/hop-1.0/hop-1.0.json").exists());
+        assert!(!mc.join(".mim/archive/hop").exists());
+        assert_eq!(read_profiles_in(&mc).unwrap()["profiles"]["hop"]["name"], "Hoplite");
+
+        // moving into installations/, then archiving takes the folder along
+        let dest = move_profile_in(&mc, "old").unwrap();
+        assert_eq!(dest, mc.join("installations/Old Pack").to_string_lossy());
+        assert!(!ext.exists());
+        archive_profile_in(&mc, "old").unwrap();
+        assert!(!Path::new(&dest).exists());
+        assert!(mc.join(".mim/archive/old/game/options.txt").exists());
+        restore_profile_in(&mc, "old").unwrap();
+        assert_eq!(fs::read_to_string(Path::new(&dest).join("options.txt")).unwrap(), "fov:1");
+
+        relink_profile_in(&mc, "gone", &mc.join("installations/Kept")).unwrap();
+        assert!(!list_profiles_in(&mc).unwrap().profiles.iter().any(|p| p.missing));
+        assert!(relink_profile_in(&mc, "gone", &mc.join("nope")).is_err());
+        // every write left a backup
+        assert_eq!(fs::read_dir(mc.join(".mim/profile-backups")).unwrap().count(), 6);
+        fs::remove_dir_all(&mc).unwrap();
+    }
+
     #[test]
     fn options_keep_colons_in_values() {
         let o = parse_options("fov:0.5\nresourcePacks:[\"file/a:b.zip\"]\n\n");
@@ -2572,7 +2931,12 @@ pub fn run() {
             toggle_mod,
             add_mods,
             list_screenshots,
-            purge_cache
+            purge_cache,
+            list_profiles,
+            relink_profile,
+            move_profile,
+            archive_profile,
+            restore_profile
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

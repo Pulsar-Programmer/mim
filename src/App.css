@@ -1585,6 +1585,9 @@ select:focus {
 .chip.loader-forge { background: #e1e8f3; color: #3f5f8f; }
 .chip.loader-neoforge { background: #f6e2d6; color: #a2552b; }
 
+.chip.flag-warn { background: #f6ecd2; color: #8a6418; }
+.chip.flag-bad { background: #f6dcd6; color: #a2412b; }
+
 /* ---- screenshots ---- */
 
 kbd {
