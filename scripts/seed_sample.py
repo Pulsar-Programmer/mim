@@ -135,6 +135,49 @@ def png(w, h, top, bottom):
     )
 
 
+def scene(w, h, sky, horizon, ground, seed):
+    """A blocky little landscape: sky, sun, hills, water — so the gallery has something to show."""
+    import math
+    r = random.Random(seed)
+    block = max(4, w // 60)
+    phase = [r.uniform(0, 6.3) for _ in range(3)]
+    sun = (r.uniform(0.2, 0.8) * w, r.uniform(0.12, 0.35) * h, h * 0.07)
+    sea = int(h * 0.72)
+    cols = []
+    for bx in range(0, w, block):
+        f = bx / w
+        y = h * (0.58 + 0.10 * math.sin(f * 5 + phase[0]) + 0.06 * math.sin(f * 13 + phase[1])
+                 + 0.03 * math.sin(f * 29 + phase[2]))
+        cols.append(int(y) // block * block)
+    lerp = lambda a, b, t: tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+    rows = bytearray()
+    for y in range(h):
+        rows.append(0)
+        sky_px = lerp(sky, horizon, min(1, y / (h * 0.65)))
+        for x in range(w):
+            top = cols[x // block]
+            if y >= top:
+                d = (y - top) // block
+                px = ground if d == 0 else lerp(ground, (90, 64, 44), min(1, 0.5 + d * 0.12))
+                if (x // block + y // block) % 7 == 0:
+                    px = lerp(px, (0, 0, 0), 0.12)
+            elif y >= sea:
+                px = lerp((60, 110, 190), sky_px, 0.35 if (y // 3) % 4 else 0.6)
+            elif (x - sun[0]) ** 2 + (y - sun[1]) ** 2 < sun[2] ** 2:
+                px = (255, 244, 214)
+            else:
+                px = sky_px
+            rows += bytes(px)
+
+    def chunk(kind, data):
+        c = kind + data
+        return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(bytes(rows))) + chunk(b"IEND", b""))
+
+
 # ---- options.txt -----------------------------------------------------------
 
 BASE_OPTIONS = {
@@ -326,17 +369,21 @@ def seed():
     write("resourcepacks/Faithful 32x.zip", blob(1800), 50)
     write("resourcepacks/My Tweaks/pack.mcmeta", '{"pack":{"pack_format":46}}', 20)
     write("shaderpacks/Complementary Reimagined.zip", blob(600), 40)
-    shots = [
-        ((120, 170, 230), (250, 220, 160)),
-        ((40, 60, 90), (200, 120, 80)),
-        ((20, 20, 50), (120, 60, 140)),
-        ((150, 210, 140), (60, 120, 70)),
-        ((240, 200, 150), (230, 120, 90)),
-        ((30, 40, 40), (90, 140, 130)),
+    shots = [  # sky, horizon, ground, size
+        ((110, 165, 235), (235, 225, 200), (95, 160, 70), (480, 270)),
+        ((40, 60, 110), (240, 140, 90), (70, 110, 60), (480, 270)),
+        ((15, 15, 45), (110, 60, 140), (40, 60, 70), (560, 240)),
+        ((150, 200, 240), (250, 250, 240), (235, 240, 245), (480, 270)),
+        ((250, 190, 120), (250, 120, 80), (200, 170, 110), (400, 300)),
+        ((30, 45, 60), (110, 150, 140), (60, 90, 60), (480, 300)),
+        ((120, 190, 250), (200, 235, 255), (110, 180, 80), (480, 270)),
+        ((70, 30, 30), (220, 90, 40), (90, 40, 40), (480, 270)),
+        ((90, 140, 200), (240, 210, 170), (130, 160, 80), (270, 400)),
+        ((20, 30, 60), (60, 90, 150), (50, 70, 90), (480, 270)),
     ]
-    for i, (a, b) in enumerate(shots):
+    for i, (a, b, g, (w, h)) in enumerate(shots):
         write(f"screenshots/2026-{10 + i % 2}-{10 + i:02d}_18.22.0{i}.png",
-              png(320, 180, a, b), 4 + i * 9)
+              scene(w, h, a, b, g, i), 4 + i * 9)
     write("config/fabric/indigo-renderer.properties", "ambient-occlusion-mode=hybrid\n", 20)
 
     # worlds in the shared saves folder
@@ -451,7 +498,7 @@ def seed():
         own_screenshots=True,
     )
     write("installations/Create Modpack/screenshots/2026-11-18_21.04.11.png",
-          png(160, 90, (210, 160, 90), (60, 40, 20)), 3)
+          scene(480, 270, (200, 160, 110), (250, 210, 150), (150, 110, 70), 42), 3)
     write("installations/Create Modpack/crash-reports/crash-2026-11-18-client.txt",
           "---- Minecraft Crash Report ----\n// Who set us up the TNT?\n\n"
           "Description: Ticking block entity\n\njava.lang.IllegalStateException: Create contraption\n", 3)
