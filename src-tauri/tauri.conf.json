@@ -41,6 +41,15 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDE1QjBCOEI3MzIyMTA5NTkKUldSWkNTRXl0N2l3Rlk4SWVBeE5yK0pFMHhMbDJyc0JUVVJJSlhDN2ViSlJiUVZnbnpDUE0vTWsK",
+      "endpoints": [
+        "https://github.com/Pulsar-Programmer/mim/releases/latest/download/latest.json"
+      ]
+    }
   }
 }

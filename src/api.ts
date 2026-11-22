@@ -374,8 +374,10 @@ export const api = {
   readLog: (path: string) => invoke<string>("read_log", { path }),
   purgeLogs: (installation: string | null = null) =>
     invoke<number>("purge_logs", { installation }),
-  folderOverview: () => invoke<FolderItem[]>("folder_overview"),
-  purgeCache: () => invoke<number>("purge_cache"),
+  folderOverview: (installation: string | null = null) =>
+    invoke<FolderItem[]>("folder_overview", { installation }),
+  purgeCache: (installation: string | null = null) =>
+    invoke<number>("purge_cache", { installation }),
   listProfiles: () => invoke<ProfilesOverview>("list_profiles"),
   relinkProfile: (id: string, dir: string) => invoke<void>("relink_profile", { id, dir }),
   /** returns the new folder */

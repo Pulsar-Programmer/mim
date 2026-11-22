@@ -1798,6 +1798,8 @@ fn root_entries(root: &Path, cat: &str) -> Vec<PathBuf> {
         .map(|rd| {
             rd.flatten()
                 .filter(|e| e.file_name() != ".DS_Store")
+                // a link (Links drawer) points at shared data, never purge through it
+                .filter(|e| e.file_type().is_ok_and(|t| !t.is_symlink()))
                 .filter(|e| category(&e.file_name().to_string_lossy()) == cat)
                 .map(|e| e.path())
                 .collect()
@@ -1994,11 +1996,12 @@ struct FolderItem {
     is_dir: bool,
 }
 
-/// Every top-level entry of the minecraft folder, categorized. async so the
-/// size walk (assets/libraries can be GBs) runs off the main thread.
+/// Every top-level entry of the minecraft folder (or an installation's game
+/// folder), categorized. async so the size walk (assets/libraries can be GBs)
+/// runs off the main thread.
 #[tauri::command]
-async fn folder_overview() -> CmdResult<Vec<FolderItem>> {
-    let paths: Vec<PathBuf> = fs::read_dir(mc_dir())
+async fn folder_overview(installation: Option<String>) -> CmdResult<Vec<FolderItem>> {
+    let paths: Vec<PathBuf> = fs::read_dir(game_dir(installation.as_deref())?)
         .map_err(err)?
         .flatten()
         .filter(|e| e.file_name() != ".DS_Store")
@@ -2019,8 +2022,8 @@ async fn folder_overview() -> CmdResult<Vec<FolderItem>> {
 }
 
 #[tauri::command(async)]
-fn purge_cache() -> CmdResult<usize> {
-    let t = root_entries(&mc_dir(), "cache");
+fn purge_cache(installation: Option<String>) -> CmdResult<usize> {
+    let t = root_entries(&game_dir(installation.as_deref())?, "cache");
     if !t.is_empty() {
         trash::delete_all(&t).map_err(err)?;
     }
@@ -4098,6 +4101,11 @@ mod tests {
         };
         assert_eq!(names("logs"), ["crash-reports", "debug", "logs"]);
         assert_eq!(names("cache"), ["downloads", "usercache.json", "webcache2"]);
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(root.join("downloads"), root.join(".fabric")).unwrap();
+            assert_eq!(names("cache"), ["downloads", "usercache.json", "webcache2"]);
+        }
         assert_eq!(names("launcher"), ["launcher_profiles.json"]);
         assert_eq!(names("yours"), ["options.txt"]);
 
@@ -4512,6 +4520,8 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .register_asynchronous_uri_scheme_protocol("thumb", |_ctx, req, responder| {
             let path = req.uri().path().to_string();
             std::thread::spawn(move || {
