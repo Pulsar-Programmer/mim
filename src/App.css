@@ -30,6 +30,19 @@
   --hover: rgba(0, 0, 0, 0.04);
   --warm: #fdf6ee;
   color-scheme: light;
+
+  /* badge tones: text on its own tint */
+  --green: #3f7a3a;   --green-bg: #dfeedd;  --green-bg2: #b9d3b3;
+  --blue: #3f5f8f;    --blue-bg: #e1e8f3;
+  --purple: #6a4f93;  --purple-bg: #e9e3f3;
+  --yellow: #8a6418;  --yellow-bg: #f6ecd2;
+  --orange: #a2552b;  --orange-bg: #f6e2d6;
+  --red-bg: #f6dcd6;  --red-line: #efc9c0;
+  --ok: #7fa650;
+  /* faint row washes for pending changes */
+  --wash-add: #fdf7f3;
+  --wash-trash: #fdf4f2;
+  --wash-drop: #fdfaf1;
   --radius: 10px;
   --serif: "P22 Mackinack Pro", "Lora", "Charter", "Abyssinica SIL", serif;
   --display: "Eczar", "Lora", serif;
@@ -61,17 +74,17 @@
   --hover: rgba(255, 255, 255, 0.05);
   --warm: #2e281f;
   color-scheme: dark;
-}
 
-/* ponytail: the pastel badge pairs are hardcoded light colors; inverting
-   lightness (hue kept) turns them into dark pills with light text.
-   Give each a real dark pair if the tint ever looks off. */
-:root[data-theme="dark"] :is(
-  .chip[class*="kind-"], .chip[class*="mode-"], .chip[class*="loader-"],
-  .chip[class*="flag-"], .chip.differs, .font-status, .share-note, .link-info.warn,
-  .lw-badge.synced, .lw-linked, .lw-lines .keep
-) {
-  filter: invert(1) hue-rotate(180deg);
+  --green: #9cc48a;   --green-bg: #2b3626;  --green-bg2: #3a4a33;
+  --blue: #98b0d8;    --blue-bg: #262f3d;
+  --purple: #bca6dd;  --purple-bg: #322a3f;
+  --yellow: #d8b663;  --yellow-bg: #383020;
+  --orange: #e39d70;  --orange-bg: #40291d;
+  --red-bg: #43251f;  --red-line: #5c3128;
+  --ok: #8fb862;
+  --wash-add: #2f2520;
+  --wash-trash: #33221e;
+  --wash-drop: #2e2a1f;
 }
 
 * {
@@ -575,7 +588,7 @@ button.card-name:hover {
 }
 
 .dot.linked::before {
-  background: #7fa650;
+  background: var(--ok);
 }
 
 .card-actions {
@@ -927,11 +940,11 @@ select:focus {
   margin-top: 22px;
 }
 
-.chip.kind-crash { background: #f6dcd6; color: var(--danger); }
-.chip.kind-launcher { background: #e1e8f3; color: #3f5f8f; }
-.chip.kind-updater { background: #e9e3f3; color: #6a4f93; }
-.chip.kind-debug { background: #f3ecd6; color: #8a6d1f; }
-.chip.kind-game { background: #dfeedd; color: #3f7a3a; }
+.chip.kind-crash { background: var(--red-bg); color: var(--danger); }
+.chip.kind-launcher { background: var(--blue-bg); color: var(--blue); }
+.chip.kind-updater { background: var(--purple-bg); color: var(--purple); }
+.chip.kind-debug { background: var(--yellow-bg); color: var(--yellow); }
+.chip.kind-game { background: var(--green-bg); color: var(--green); }
 
 .viewer-backdrop {
   position: fixed;
@@ -1003,7 +1016,7 @@ select:focus {
 .world-icon {
   aspect-ratio: 16 / 9;
   width: 100%;
-  background: linear-gradient(135deg, #dfeedd, #b9d3b3) center / cover;
+  background: linear-gradient(135deg, var(--green-bg), var(--green-bg2)) center / cover;
   image-rendering: pixelated;
   display: grid;
   place-items: center;
@@ -1031,11 +1044,11 @@ select:focus {
   color: var(--accent);
 }
 
-.chip.mode-survival { background: #dfeedd; color: #3f7a3a; }
-.chip.mode-creative { background: #e1e8f3; color: #3f5f8f; }
-.chip.mode-adventure { background: #f3ecd6; color: #8a6d1f; }
-.chip.mode-spectator { background: #e9e3f3; color: #6a4f93; }
-.chip.mode-hardcore { background: #f6dcd6; color: var(--danger); }
+.chip.mode-survival { background: var(--green-bg); color: var(--green); }
+.chip.mode-creative { background: var(--blue-bg); color: var(--blue); }
+.chip.mode-adventure { background: var(--yellow-bg); color: var(--yellow); }
+.chip.mode-spectator { background: var(--purple-bg); color: var(--purple); }
+.chip.mode-hardcore { background: var(--red-bg); color: var(--danger); }
 
 .drawer-backdrop {
   justify-content: flex-end;
@@ -1269,8 +1282,8 @@ select:focus {
 }
 
 .chip.differs {
-  background: #f3ecd6;
-  color: #8a6d1f;
+  background: var(--yellow-bg);
+  color: var(--yellow);
   max-width: 150px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1485,12 +1498,12 @@ select:focus {
 }
 
 .font-status.ok {
-  background: #dfeedd;
-  color: #3f7a3a;
+  background: var(--green-bg);
+  color: var(--green);
 }
 
 .font-status.missing {
-  background: #f6dcd6;
+  background: var(--red-bg);
   color: var(--danger);
 }
 
@@ -1616,7 +1629,7 @@ select:focus {
 }
 
 .bars span.on {
-  background: #5a9a4e;
+  background: var(--ok);
 }
 
 .server-motd {
@@ -1762,13 +1775,13 @@ select:focus {
   min-width: 0;
 }
 
-.chip.loader-fabric { background: #f3ecd6; color: #8a6d1f; }
-.chip.loader-quilt { background: #e9e3f3; color: #6a4f93; }
-.chip.loader-forge { background: #e1e8f3; color: #3f5f8f; }
-.chip.loader-neoforge { background: #f6e2d6; color: #a2552b; }
+.chip.loader-fabric { background: var(--yellow-bg); color: var(--yellow); }
+.chip.loader-quilt { background: var(--purple-bg); color: var(--purple); }
+.chip.loader-forge { background: var(--blue-bg); color: var(--blue); }
+.chip.loader-neoforge { background: var(--orange-bg); color: var(--orange); }
 
-.chip.flag-warn { background: #f6ecd2; color: #8a6418; }
-.chip.flag-bad { background: #f6dcd6; color: #a2412b; }
+.chip.flag-warn { background: var(--yellow-bg); color: var(--yellow); }
+.chip.flag-bad { background: var(--red-bg); color: var(--danger); }
 
 /* ---- screenshots ---- */
 
@@ -3019,9 +3032,9 @@ kbd {
 .le-row:hover { background: var(--panel); }
 .le-row input { accent-color: var(--accent); margin: 0; }
 /* pending changes get a faint wash; the pill says which */
-.le-row.add { background: #fdf7f3; }
-.le-row.trash { background: #fdf4f2; }
-.le-row.drop { background: #fdfaf1; }
+.le-row.add { background: var(--wash-add); }
+.le-row.trash { background: var(--wash-trash); }
+.le-row.drop { background: var(--wash-drop); }
 .le-row.drop .le-name { text-decoration: line-through; text-decoration-color: var(--faint); color: var(--muted); }
 .le-row.idle .le-name { color: var(--muted); }
 
@@ -3069,10 +3082,10 @@ kbd {
   color: var(--muted);
   background: var(--chip);
 }
-.le-pill.linked { color: #4c7139; background: #e4eedb; }
+.le-pill.linked { color: var(--green); background: var(--green-bg); }
 .le-pill.add { color: var(--accent); background: var(--accent-soft); }
-.le-pill.trash { color: var(--danger); background: #f6dcd6; }
-.le-pill.drop { color: #8a6418; background: #f6ecd2; }
+.le-pill.trash { color: var(--danger); background: var(--red-bg); }
+.le-pill.drop { color: var(--yellow); background: var(--yellow-bg); }
 .le-pill.idle { background: none; color: var(--faint); }
 
 .le-row.skeleton {
@@ -3100,8 +3113,8 @@ kbd {
 .le-sec:nth-child(3) { animation-delay: 0.06s; }
 .le-sec:nth-child(4) { animation-delay: 0.09s; }
 .le-sec.add h3 { color: var(--accent); }
-.le-sec.drop h3 { color: #8a6418; }
-.le-sec.trash { border-color: #efc9c0; background: #fdf6f4; }
+.le-sec.drop h3 { color: var(--yellow); }
+.le-sec.trash { border-color: var(--red-line); background: var(--wash-trash); }
 .le-sec h3 { margin: 0 0 6px; font-size: 13px; }
 .le-sec.trash h3 { color: var(--danger); }
 .le-sec p { margin: 8px 0 0; color: var(--muted); }
@@ -3140,7 +3153,7 @@ kbd {
 .le-foot { align-items: center; }
 .le-sum { display: flex; gap: 10px; margin-right: auto; font-family: var(--mono); font-size: 12px; }
 .le-sum .add { color: var(--accent); }
-.le-sum .drop { color: #8a6418; }
+.le-sum .drop { color: var(--yellow); }
 .le-sum .trash { color: var(--danger); }
 
 .btn.danger.solid { color: #fff; background: var(--danger); border-color: var(--danger); font-weight: 600; }
@@ -3357,7 +3370,7 @@ kbd {
 }
 
 .link-dot.on {
-  background: #7fa650;
+  background: var(--ok);
 }
 
 .links-ask {
@@ -3539,7 +3552,7 @@ select.sort {
 }
 
 .link-info span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.link-info.warn { color: #8a6d1f; }
+.link-info.warn { color: var(--yellow); }
 .link-info.bad,
 :root.reduced .more { display: none; }
 
@@ -3794,8 +3807,8 @@ select.sort {
   padding: 9px 12px;
   font-size: 12.5px;
   line-height: 1.55;
-  color: #8a6418;
-  background: #f6ecd2;
+  color: var(--yellow);
+  background: var(--yellow-bg);
   border-radius: 8px;
 }
 
@@ -3993,7 +4006,7 @@ select.sort {
 .lw-tile.on { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
 .lw-tile-text { display: flex; flex-direction: column; gap: 1px; flex: 1; min-width: 0; }
 .lw-tile-name { font-size: 13px; font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.lw-linked { color: #4c7139; }
+.lw-linked { color: var(--green); }
 .lw-check {
   display: grid;
   place-items: center;
@@ -4086,7 +4099,7 @@ select.sort {
   background: var(--chip);
 }
 .lw-badge.differ { color: var(--accent); background: var(--accent-soft); }
-.lw-badge.synced { color: #4c7139; background: #e4eedb; }
+.lw-badge.synced { color: var(--green); background: var(--green-bg); }
 .lw-badge.single { color: var(--faint); background: none; padding: 0; }
 
 .lw-detail { min-height: 260px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
@@ -4170,7 +4183,7 @@ select.sort {
 .lw-key { color: var(--muted); }
 .lw-none { color: var(--faint); }
 .lw-lines { display: flex; flex-direction: column; gap: 8px; }
-.lw-lines .keep { color: #4c7139; }
+.lw-lines .keep { color: var(--green); }
 .lw-lines .lose { color: var(--danger); }
 
 .lw-outcome { margin-top: 12px; font-size: 12.5px; color: var(--muted); }

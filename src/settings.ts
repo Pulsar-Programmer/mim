@@ -1,4 +1,5 @@
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 // Per-machine UI preferences, kept in localStorage (they're conveniences,
 // nothing breaks if storage is unavailable).
@@ -73,11 +74,18 @@ const STACKS: Record<Exclude<FontChoice, "minecraft" | "custom">, string | null>
 
 let reduced = DEFAULT_SETTINGS.reducedText;
 let theme: Theme = DEFAULT_SETTINGS.theme;
+let windowTheme: Theme | undefined;
 
 const darkQuery = window.matchMedia("(prefers-color-scheme: dark)");
 function applyTheme() {
   const dark = theme === "dark" || (theme === "system" && darkQuery.matches);
   document.documentElement.dataset.theme = dark ? "dark" : "light";
+  // The native window (title bar, resize/zoom backdrop) has its own appearance;
+  // left on the OS's, it shows white behind a forced dark page, and vice versa.
+  if (windowTheme !== theme) {
+    windowTheme = theme;
+    getCurrentWindow().setTheme(theme === "system" ? null : theme).catch(() => {});
+  }
 }
 darkQuery.addEventListener("change", applyTheme);
 
