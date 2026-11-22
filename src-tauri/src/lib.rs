@@ -1076,13 +1076,7 @@ fn link_standard(
 ) -> CmdResult<Vec<String>> {
     let std = if name == SHARED { None } else { Some(standard_dir(&name)?) };
     let inst = game_dir(Some(&installation))?;
-    let pairs = rel_paths
-        .iter()
-        .map(|r| match r.split_once('/') {
-            Some((s, _)) if s == name => entry_src(r),
-            _ => Err(format!("{r} isn't part of \"{name}\"")),
-        })
-        .collect::<CmdResult<Vec<_>>>()?;
+    let pairs = rel_paths.iter().map(|r| entry_of(&name, r)).collect::<CmdResult<Vec<_>>>()?;
     let blocked = link_entries(&inst, &pairs, replace)?;
     if let Some(std) = std.filter(|_| blocked.is_empty() || replace) {
         add_link(&std, &installation)?;
@@ -1090,15 +1084,84 @@ fn link_standard(
     Ok(blocked)
 }
 
+/// Unlinks the given entries; with `keep`, each becomes a real copy. Once
+/// nothing is linked any more, the installation leaves the standard's list.
 #[tauri::command(async)]
-fn unlink_standard(name: String, installation: String, keep: bool) -> CmdResult<()> {
+fn unlink_standard(name: String, installation: String, rel_paths: Vec<String>, keep: bool) -> CmdResult<()> {
     let inst = game_dir(Some(&installation))?;
-    if name != SHARED {
+    let mut links = vec![];
+    for r in &rel_paths {
+        let (src, dest) = entry_of(&name, r)?;
+        if let (LinkState { state: "linked", .. }, link) = link_state(&inst, &src, &dest) {
+            if !links.contains(&link) {
+                links.push(link);
+            }
+        }
+    }
+    detach(&links, keep)?;
+    if name != SHARED && links_of(&inst, &name).is_empty() {
         let std = standard_dir(&name)?;
         let v: Vec<String> = read_links(&std).into_iter().filter(|n| *n != installation).collect();
         write_links(&std, &v)?;
     }
-    detach(&links_of(&inst, &name), keep)
+    Ok(())
+}
+
+/// An entry of standard `name`: where it lives and its name inside an installation.
+fn entry_of(name: &str, rel: &str) -> CmdResult<(PathBuf, String)> {
+    match rel.split_once('/') {
+        Some((s, _)) if s == name => entry_src(rel),
+        _ => Err(format!("{rel} isn't part of \"{name}\"")),
+    }
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+struct LinkState {
+    /// "linked"; "free": nothing there yet; "own": the installation's own copy,
+    /// which linking moves to the Trash; "other": a link to somewhere else
+    state: &'static str,
+    /// for "other": the standard it's linked from, when it's one
+    from: Option<String>,
+}
+
+/// How entry `src` stands in `inst` under `name`, and the link that does (or
+/// would) carry it: the item itself, or a linked folder on the way to it (how
+/// whole folders like config/ used to be linked).
+fn link_state(inst: &Path, src: &Path, name: &str) -> (LinkState, PathBuf) {
+    let dest = inst.join(name);
+    let link = linked_ancestor(inst, &dest).unwrap_or_else(|| dest.clone());
+    let depth = dest.strip_prefix(&link).map_or(0, |r| r.iter().count());
+    let state = if src.ancestors().nth(depth).is_some_and(|s| links_to(&link, s)) {
+        "linked"
+    } else if link.is_symlink() {
+        "other"
+    } else if link.symlink_metadata().is_ok() {
+        "own"
+    } else {
+        "free"
+    };
+    let from = (state == "other").then(|| link_source(&link)).flatten();
+    (LinkState { state, from }, link)
+}
+
+/// The standard a link points into, if any.
+fn link_source(link: &Path) -> Option<String> {
+    let t = fs::canonicalize(link).ok()?;
+    if let Some(r) = fs::canonicalize(standards_dir()).ok().and_then(|s| t.strip_prefix(s).ok().map(PathBuf::from)) {
+        return r.iter().next().map(|c| c.to_string_lossy().into());
+    }
+    let mc = fs::canonicalize(mc_dir()).ok()?;
+    SHARED_DIRS.iter().any(|d| t == mc.join(d)).then(|| SHARED.into())
+}
+
+/// How each entry stands in an installation, in the order asked.
+#[tauri::command(async)]
+fn link_states(name: String, installation: String, rel_paths: Vec<String>) -> CmdResult<Vec<LinkState>> {
+    let inst = game_dir(Some(&installation))?;
+    rel_paths
+        .iter()
+        .map(|r| entry_of(&name, r).map(|(src, dest)| link_state(&inst, &src, &dest).0))
+        .collect()
 }
 
 /// Moves files from an installation's config/ (`names` relative to it, like
@@ -3613,6 +3676,22 @@ mod tests {
             .unwrap();
         assert!(link_entries(&inst, &pairs, false).unwrap().is_empty());
 
+        // per-item state: linked, someone else's link, the install's own, nothing yet
+        let st = |src: &Path, n: &str| link_state(&inst, src, n).0.state;
+        assert_eq!(st(&std.join("1.21.10/servers.dat"), "servers.dat"), "linked");
+        fs::write(std.join("other.txt"), "").unwrap();
+        assert_eq!(st(&std.join("other.txt"), "options.txt"), "other");
+        assert_eq!(st(&std.join("other.txt"), "other.txt"), "free");
+        fs::write(inst.join("own.txt"), "").unwrap();
+        assert_eq!(st(&std.join("other.txt"), "own.txt"), "own");
+        let cfg = root.join("standards/PvP/config");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(cfg.join("a.json"), "").unwrap();
+        symlink(&cfg, inst.join("config")).unwrap(); // the old whole-folder link
+        let (s, link) = link_state(&inst, &cfg.join("a.json"), "config/a.json");
+        assert_eq!((s.state, link), ("linked", inst.join("config")));
+        remove_link(&inst.join("config")).unwrap();
+
         // keep: real copy; remove: gone. Originals untouched either way.
         detach(&[inst.join("options.txt")], true).unwrap();
         assert!(!inst.join("options.txt").is_symlink());
@@ -4200,6 +4279,7 @@ pub fn run() {
             delete_standard,
             link_standard,
             unlink_standard,
+            link_states,
             share_config,
             set_custom_icon,
             delete_installation,

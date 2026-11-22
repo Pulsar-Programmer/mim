@@ -45,6 +45,14 @@ export interface Standard {
   images: string[];
 }
 
+export interface LinkState {
+  /** free: nothing there yet · own: the installation's own copy (linking trashes it) ·
+   * other: a link to somewhere else */
+  state: "linked" | "free" | "own" | "other";
+  /** for "other": the standard it's linked from */
+  from: string | null;
+}
+
 /** Entries that apply to a game version: global ones plus that version's folder. */
 export const entriesFor = (s: Standard, gameVersion: string | null) =>
   s.entries.filter((e) => e.scope === "global" || e.scope === gameVersion);
@@ -275,8 +283,11 @@ export const api = {
   linkStandard: (name: string, installation: string, relPaths: string[], replace: boolean) =>
     invoke<string[]>("link_standard", { name, installation, relPaths, replace }),
   /** keep: leave the installation a real copy instead of removing the files */
-  unlinkStandard: (name: string, installation: string, keep: boolean) =>
-    invoke<void>("unlink_standard", { name, installation, keep }),
+  unlinkStandard: (name: string, installation: string, relPaths: string[], keep: boolean) =>
+    invoke<void>("unlink_standard", { name, installation, relPaths, keep }),
+  /** how each entry stands in the installation, in the order asked */
+  linkStates: (name: string, installation: string, relPaths: string[]) =>
+    invoke<LinkState[]>("link_states", { name, installation, relPaths }),
   setCustomIcon: (name: string, imagePath: string) =>
     invoke<string>("set_custom_icon", { name, imagePath }),
   listPacks: (installation: string | null) => invoke<PackList>("list_packs", { installation }),

@@ -29,6 +29,7 @@ import { PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
 import { ProgressBar, useProgress } from "./Progress";
 import { PacksView } from "./PacksView";
 import { ConfigView } from "./ConfigView";
+import { LinkEditor } from "./LinkEditor";
 import { Settings, applySettings, brief, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
@@ -820,49 +821,14 @@ function StandardsView({
   const [standards = [], load] = useCached<Standard[]>("standards", api.listStandards, notify);
   const [newName, setNewName] = useState("");
   const { armed, confirm } = useConfirm(notify, load);
-  // a link or unlink waiting on the user's answer
-  const [ask, setAsk] = useState<
-    | { kind: "blocked"; std: string; inst: string; items: string[] }
-    | { kind: "unlink"; std: string; inst: string }
-    | null
-  >(null);
+  // the link editor, open for one standard and installation
+  const [editing, setEditing] = useState<{ s: Standard; i: Installation } | null>(null);
 
   async function create() {
     if (!newName.trim()) return;
     try {
       await api.createStandard(newName);
       setNewName("");
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
-  }
-
-  async function link(s: Standard, inst: string, replace = false) {
-    const v = installations.find((i) => i.name === inst)?.game_version ?? null;
-    const rels = entriesFor(s, v).map((e) => e.rel_path);
-    try {
-      const inWay = await api.linkStandard(s.name, inst, rels, replace);
-      if (inWay.length && !replace) {
-        setAsk({ kind: "blocked", std: s.name, inst, items: inWay });
-        return;
-      }
-      setAsk(null);
-      notify(
-        `Linked "${s.name}" into ${inst}` +
-          (inWay.length ? ` · moved ${inWay.join(", ")} to Trash` : "")
-      );
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
-  }
-
-  async function unlink(s: Standard, inst: string, keep: boolean) {
-    try {
-      await api.unlinkStandard(s.name, inst, keep);
-      setAsk(null);
-      notify(keep ? brief(`Unlinked ${inst} — it keeps a copy`) : `Unlinked ${inst} and removed its links`);
       load();
     } catch (e) {
       notify(String(e));
@@ -880,14 +846,6 @@ function StandardsView({
     await api.revealPath(path, false);
     load();
   }
-
-  const list = (items: string[]) =>
-    items.map((n, k) => (
-      <span key={n}>
-        {k > 0 && ", "}
-        <code>{n}</code>
-      </span>
-    ));
 
   return (
     <>
@@ -968,72 +926,39 @@ function StandardsView({
           <div className="std-label">Linked installations</div>
           <div className="places">
             {installations.map((i) => {
-              const on = s.installations.includes(i.name);
               const want = entriesFor(s, i.game_version).length;
-              // a new file in the standard, or something replaced a link with a real file
-              const stale = on && (s.live[i.name] ?? 0) < want;
+              const n = Math.min(s.live[i.name] ?? 0, want);
               return (
                 <PlaceChip
                   key={i.name}
-                  className="toggle"
+                  className={`toggle ${n > 0 && n < want ? "partial" : ""}`}
                   place={{
                     key: i.name,
                     label: i.name,
                     inst: i,
-                    sub: stale ? `↻ ${s.live[i.name] ?? 0} of ${want} linked` : on ? "linked" : "not linked",
+                    sub: n === 0 ? "not linked" : n < want ? `${n} of ${want} linked` : "linked",
                   }}
-                  active={on}
-                  title={stale ? brief("Some files aren't linked — click to relink") : on ? "Unlink…" : "Link"}
-                  onClick={() =>
-                    stale || !on
-                      ? link(s, i.name)
-                      : setAsk({ kind: "unlink", std: s.name, inst: i.name })
-                  }
+                  active={n > 0}
+                  title="Choose what's linked…"
+                  onClick={() => setEditing({ s, i })}
                 />
               );
             })}
             {installations.length === 0 && <span className="hint">No installations yet.</span>}
           </div>
 
-          {ask?.std === s.name && ask.kind === "blocked" && (
-            <div className="std-ask warn">
-              <p>
-                <b>{ask.inst}</b> already has {list(ask.items)}. To link "{s.name}",{" "}
-                {ask.items.length === 1 ? "it has" : "they have"} to be removed — MIM moves{" "}
-                {ask.items.length === 1 ? "it" : "them"} to the Trash.
-              </p>
-              <div className="row-inline">
-                <button className="btn small danger" onClick={() => link(s, ask.inst, true)}>
-                  Move to Trash &amp; link
-                </button>
-                <button className="btn small" onClick={() => setAsk(null)}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-          {ask?.std === s.name && ask.kind === "unlink" && (
-            <div className="std-ask">
-              <p>
-                Unlink <b>{ask.inst}</b> from "{s.name}"? Do you want to remove the files from{" "}
-                {ask.inst}, or keep a copy of them there? Nothing in "{s.name}" is deleted either
-                way.
-              </p>
-              <div className="row-inline">
-                <button className="btn small" onClick={() => unlink(s, ask.inst, true)}>
-                  Keep a copy
-                </button>
-                <button className="btn small danger" onClick={() => unlink(s, ask.inst, false)}>
-                  Remove the files
-                </button>
-                <button className="btn small ghost" onClick={() => setAsk(null)}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
         </section>
       ))}
+
+      {editing && (
+        <LinkEditor
+          std={editing.s}
+          inst={editing.i}
+          notify={notify}
+          onClose={() => setEditing(null)}
+          onDone={load}
+        />
+      )}
     </>
   );
 }
