@@ -574,60 +574,18 @@ async fn create_in(spec: InstallSpec, p: &Progress) -> CmdResult<()> {
     if name.is_empty() || name.starts_with('.') || name.contains('/') {
         return Err("Invalid installation name".into());
     }
-    let mc = mc_dir();
     let inst = installations_dir().join(name);
     if inst.exists() {
         return Err(format!("\"{name}\" already exists"));
     }
     fs::create_dir_all(&inst).map_err(err)?;
 
-    // resolve the launcher version id
-    let version_id = if spec.loader == "forge" || spec.loader == "neoforge" {
-        let ver = match spec.loader_version {
-            Some(v) => v,
-            None => {
-                let vs = list_loader_versions(spec.loader.clone(), spec.game_version.clone()).await?;
-                vs.iter().find(|l| l.stable).or(vs.first()).ok_or("no loader build for this version")?.version.clone()
-            }
-        };
-        match install_forge(&spec.loader, &spec.game_version, &ver, p).await {
-            Ok(id) => id,
-            Err(e) => {
-                let _ = fs::remove_dir(&inst); // still empty
-                return Err(e);
-            }
+    let version_id = match install_loader(&spec.loader, &spec.game_version, spec.loader_version, p).await {
+        Ok(id) => id,
+        Err(e) => {
+            let _ = fs::remove_dir(&inst); // still empty
+            return Err(e);
         }
-    } else if spec.loader == "fabric" {
-        let loader = match spec.loader_version {
-            Some(v) => v,
-            None => {
-                let loaders = list_loader_versions("fabric".into(), spec.game_version.clone()).await?;
-                loaders
-                    .iter()
-                    .find(|l| l.stable)
-                    .or(loaders.first())
-                    .ok_or("no fabric loader available")?
-                    .version
-                    .clone()
-            }
-        };
-        let url = format!(
-            "https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",
-            spec.game_version, loader
-        );
-        let profile: Value = reqwest::get(&url).await.map_err(err)?.json().await.map_err(err)?;
-        let id = profile["id"].as_str().ok_or("bad fabric profile json")?.to_string();
-        let vdir = mc.join("versions").join(&id);
-        fs::create_dir_all(&vdir).map_err(err)?;
-        fs::write(
-            vdir.join(format!("{id}.json")),
-            serde_json::to_string_pretty(&profile).map_err(err)?,
-        )
-        .map_err(err)?;
-        id
-    } else {
-        // vanilla: the launcher fetches the version json itself
-        spec.game_version.clone()
     };
 
     // linked from the picked standards (the built-in Shared one covers saves & co.)
@@ -661,6 +619,52 @@ async fn create_in(spec: InstallSpec, p: &Progress) -> CmdResult<()> {
         "type": "custom"
     });
     write_profiles(&profiles)
+}
+
+/// Installs `loader` (latest stable unless `loader_version`) for `game` into the
+/// minecraft folder and returns the launcher version id to run it with.
+async fn install_loader(loader: &str, game: &str, loader_version: Option<String>, p: &Progress) -> CmdResult<String> {
+    if loader == "forge" || loader == "neoforge" {
+        let ver = match loader_version {
+            Some(v) => v,
+            None => {
+                let vs = list_loader_versions(loader.into(), game.into()).await?;
+                vs.iter().find(|l| l.stable).or(vs.first()).ok_or("no loader build for this version")?.version.clone()
+            }
+        };
+        install_forge(loader, game, &ver, p).await
+    } else if loader == "fabric" {
+        let loader = match loader_version {
+            Some(v) => v,
+            None => {
+                let loaders = list_loader_versions("fabric".into(), game.into()).await?;
+                loaders
+                    .iter()
+                    .find(|l| l.stable)
+                    .or(loaders.first())
+                    .ok_or("no fabric loader available")?
+                    .version
+                    .clone()
+            }
+        };
+        let url = format!(
+            "https://meta.fabricmc.net/v2/versions/loader/{}/{}/profile/json",
+            game, loader
+        );
+        let profile: Value = reqwest::get(&url).await.map_err(err)?.json().await.map_err(err)?;
+        let id = profile["id"].as_str().ok_or("bad fabric profile json")?.to_string();
+        let vdir = mc_dir().join("versions").join(&id);
+        fs::create_dir_all(&vdir).map_err(err)?;
+        fs::write(
+            vdir.join(format!("{id}.json")),
+            serde_json::to_string_pretty(&profile).map_err(err)?,
+        )
+        .map_err(err)?;
+        Ok(id)
+    } else {
+        // vanilla: the launcher fetches the version json itself
+        Ok(game.into())
+    }
 }
 
 /// Moves everything in `own` into `shared`, then removes `own`. A name both
@@ -1684,6 +1688,58 @@ fn delete_installation(name: String, remove_profile: bool) -> CmdResult<()> {
             });
         }
         write_profiles(&profiles)?;
+    }
+    Ok(())
+}
+
+/// Renames an installation everywhere it's known: its folder, its launcher
+/// profile (name and game folder) and the standards linked into it.
+#[tauri::command(async)]
+fn rename_installation(name: String, new_name: String) -> CmdResult<()> {
+    launcher_closed()?;
+    let new = new_name.trim();
+    if new.is_empty() || new.starts_with('.') || new.contains(['/', '\\']) || new == SHARED {
+        return Err("That name can't be a folder name".into());
+    }
+    if new == name {
+        return Ok(());
+    }
+    let old = game_dir(Some(&name))?;
+    let dest = installations_dir().join(new);
+    // "pack" -> "Pack" is the same folder on macOS and Windows
+    if dest.symlink_metadata().is_ok() && new.to_lowercase() != name.to_lowercase() {
+        return Err(format!("\"{new}\" already exists"));
+    }
+    let mc = mc_dir();
+    let mut profiles = read_profiles()?;
+    let here = canon(&old);
+    let mut found = false;
+    for p in profiles["profiles"].as_object_mut().into_iter().flat_map(|m| m.values_mut()) {
+        if profile_dir(&mc, p) == here {
+            p["gameDir"] = json!(dest.to_string_lossy());
+            p["name"] = json!(new);
+            found = true;
+        }
+    }
+    fs::rename(&old, &dest).map_err(err)?;
+    if found {
+        if let Err(e) = write_profiles(&profiles) {
+            let _ = fs::rename(&dest, &old); // keep folder and launcher in step
+            return Err(e);
+        }
+    }
+    // raw lists: read_links would drop the old name, it no longer exists
+    for (_, std) in visible_children(&standards_dir()) {
+        let file = std.join(LINKS_FILE);
+        let Some(mut v) = fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
+            continue;
+        };
+        let list: Vec<String> =
+            strs(&v["installations"]).into_iter().map(|n| if n == name { new.to_string() } else { n }).collect();
+        if v["installations"] != json!(list) {
+            v["installations"] = json!(list);
+            fs::write(&file, serde_json::to_string_pretty(&v).map_err(err)?).map_err(err)?;
+        }
     }
     Ok(())
 }
@@ -3420,14 +3476,8 @@ async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> 
     if current.is_empty() {
         return Ok(report);
     }
-    let hashes: Vec<&String> = current.iter().map(|(h, _)| h).collect();
-    let latest = send_json(http().post(format!("{MR}/v2/version_files/update")).json(&json!({
-        "hashes": hashes,
-        "algorithm": "sha512",
-        "loaders": [loader],
-        "game_versions": [game],
-    })))
-    .await?;
+    let hashes: Vec<String> = current.iter().map(|(h, _)| h.clone()).collect();
+    let latest = latest_for(&hashes, &loader, &game).await?;
     let mut jobs = vec![];
     for (hash, old) in current {
         let Some((url, name, new_hash)) = latest.get(&hash).and_then(primary_file) else { continue };
@@ -3449,6 +3499,231 @@ async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> 
             Err(e) => report.skipped.push(e),
         }
     }
+    Ok(report)
+}
+
+/// Newest build of each mod (keyed by its sha512) for one game version and
+/// loader. Mods with no such build are left out.
+async fn latest_for(hashes: &[String], loader: &str, game: &str) -> CmdResult<Value> {
+    if hashes.is_empty() {
+        return Ok(json!({}));
+    }
+    send_json(http().post(format!("{MR}/v2/version_files/update")).json(&json!({
+        "hashes": hashes,
+        "algorithm": "sha512",
+        "loaders": [loader],
+        "game_versions": [game],
+    })))
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Upgrade — move an installation, loader and mods, to a newer game version
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct UpgradeMod {
+    file: String,
+    name: String,
+    icon: Option<String>,
+    /// on Modrinth, so MIM can check and update it
+    known: bool,
+}
+
+#[derive(Serialize)]
+struct UpgradeTarget {
+    game: String,
+    /// the installation's loader has a build for this version
+    loader_ok: bool,
+    /// files of the known mods that have no build for it
+    missing: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct UpgradeScan {
+    game: String,
+    loader: String,
+    mods: Vec<UpgradeMod>,
+    /// newer releases, newest first
+    targets: Vec<UpgradeTarget>,
+}
+
+/// Game versions `loader` has builds for; None means any (vanilla).
+async fn loader_games(loader: &str) -> CmdResult<Option<std::collections::HashSet<String>>> {
+    let games: Vec<String> = match loader {
+        "fabric" => send_json(http().get("https://meta.fabricmc.net/v2/versions/game"))
+            .await?
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v["version"].as_str().map(String::from))
+            .collect(),
+        "forge" => {
+            let xml = http().get(format!("{FORGE_MAVEN}/maven-metadata.xml")).send().await.map_err(err)?.text().await.map_err(err)?;
+            // "<version>1.20.1-47.2.0</version>"
+            xml.split("<version>").skip(1).filter_map(|v| v.split('-').next().map(String::from)).collect()
+        }
+        "neoforge" => {
+            let list = send_json(
+                http().get("https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge"),
+            )
+            .await?;
+            strs(&list["versions"]).iter().map(|v| neoforge_game(v)).collect()
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(games.into_iter().collect()))
+}
+
+/// The mods folder, unless it's linked: upgrading it would change every
+/// installation sharing it.
+fn own_mods(dir: &Path) -> CmdResult<PathBuf> {
+    let mods = dir.join("mods");
+    if mods.is_symlink() {
+        return Err("This installation's mods folder is linked from somewhere else — unlink it before upgrading".into());
+    }
+    Ok(mods)
+}
+
+fn file_name(p: &Path) -> String {
+    p.file_name().unwrap_or_default().to_string_lossy().into()
+}
+
+/// Which newer game versions each enabled mod has a build for, one Modrinth
+/// request per version.
+#[tauri::command]
+async fn scan_upgrade(app: tauri::AppHandle, installation: String) -> CmdResult<UpgradeScan> {
+    scan_upgrade_in(&installation, &Progress::new(Some(app))).await
+}
+
+async fn scan_upgrade_in(installation: &str, p: &Progress) -> CmdResult<UpgradeScan> {
+    let (dir, game, loader) = inst_target(installation)?;
+    p.say("Reading mods");
+    let current = jar_hashes(&own_mods(&dir)?, false);
+    let hashes: Vec<String> = current.iter().map(|(h, _)| h.clone()).collect();
+    let known = if hashes.is_empty() {
+        json!({})
+    } else {
+        send_json(http().post(format!("{MR}/v2/version_files")).json(&json!({"hashes": hashes, "algorithm": "sha512"})))
+            .await?
+    };
+    let mut mods = par_map(&current, |(h, path)| {
+        let m = read_mod(path);
+        UpgradeMod { file: m.file, name: m.name, icon: m.icon, known: known.get(h).is_some() }
+    });
+    mods.sort_by_key(|m| m.name.to_lowercase());
+    let checkable: Vec<(String, String)> = current
+        .iter()
+        .filter(|(h, _)| known.get(h).is_some())
+        .map(|(h, path)| (h.clone(), file_name(path)))
+        .collect();
+
+    p.say("Looking for newer versions");
+    // ponytail: newest 40 releases at most, plenty unless jumping from 1.12
+    let newer: Vec<String> = list_game_versions()
+        .await?
+        .into_iter()
+        .filter(|v| v.kind == "release")
+        .map(|v| v.id)
+        .take_while(|id| *id != game)
+        .take(40)
+        .collect();
+    let supported = loader_games(&loader).await?;
+    let jobs: Vec<_> = newer
+        .into_iter()
+        .map(|g| {
+            let (mods, loader) = (checkable.clone(), loader.clone());
+            async move {
+                let hashes: Vec<String> = mods.iter().map(|(h, _)| h.clone()).collect();
+                let missing = latest_for(&hashes, &loader, &g)
+                    .await
+                    .map(|latest| mods.into_iter().filter(|(h, _)| latest.get(h).is_none()).map(|(_, f)| f).collect());
+                (g, missing)
+            }
+        })
+        .collect();
+    let checked = in_chunks(jobs, p, |(g, _): &(String, CmdResult<Vec<String>>)| format!("Checked {g}")).await?;
+    let targets = checked
+        .into_iter()
+        .map(|(g, missing)| {
+            Ok(UpgradeTarget { loader_ok: supported.as_ref().is_none_or(|s| s.contains(&g)), missing: missing?, game: g })
+        })
+        .collect::<CmdResult<_>>()?;
+    Ok(UpgradeScan { game, loader, mods, targets })
+}
+
+/// Moves the installation to `game`: installs its loader there, swaps every
+/// enabled mod for its build for that version and trashes the `remove` ones.
+/// Mods with no build that aren't in `remove` are left as they are. Every
+/// download lands before anything is swapped, so a failure changes nothing.
+#[tauri::command]
+async fn upgrade_installation(
+    app: tauri::AppHandle,
+    installation: String,
+    game: String,
+    remove: Vec<String>,
+) -> CmdResult<ImportReport> {
+    upgrade_in(&installation, &game, &remove, &Progress::new(Some(app))).await
+}
+
+async fn upgrade_in(installation: &str, game: &str, remove: &[String], p: &Progress) -> CmdResult<ImportReport> {
+    launcher_closed()?;
+    let (dir, _, loader) = inst_target(installation)?;
+    let mods = own_mods(&dir)?;
+    let current = jar_hashes(&mods, false);
+    let hashes: Vec<String> = current.iter().map(|(h, _)| h.clone()).collect();
+    p.say(format!("Checking mods for {game}"));
+    let latest = latest_for(&hashes, &loader, game).await?;
+    // the loader first: if it can't be installed, nothing else has changed
+    let version_id = install_loader(&loader, game, None, p).await?;
+
+    let staging = dir.join(".mim").join("upgrade");
+    let _ = fs::remove_dir_all(&staging);
+    let mut report = ImportReport { title: game.into(), ..Default::default() };
+    let (mut swaps, mut drop, mut jobs) = (vec![], vec![], vec![]);
+    for (hash, old) in current {
+        let file = file_name(&old);
+        if remove.contains(&file) {
+            drop.push(old);
+            report.skipped.push(file);
+            continue;
+        }
+        let Some((url, name, new_hash)) = latest.get(&hash).and_then(primary_file) else { continue };
+        if new_hash.as_deref() == Some(hash.as_str()) {
+            continue; // the same file covers both versions
+        }
+        let staged = staging.join(&name);
+        swaps.push((old, staged.clone(), name.clone()));
+        jobs.push(async move {
+            download(&url, new_hash.as_deref(), &staged).await.map(|_| name.clone()).map_err(|e| format!("{name} ({e})"))
+        });
+    }
+    let failed: Vec<String> =
+        in_chunks(jobs, p, done_label).await?.into_iter().filter_map(Result::err).collect();
+    if !failed.is_empty() {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("Nothing changed — couldn't download {}", failed.join(", ")));
+    }
+
+    p.say("Swapping in the new mods");
+    for (old, staged, name) in swaps {
+        trash::delete(&old).map_err(err)?;
+        fs::rename(&staged, mods.join(&name)).map_err(err)?;
+        report.added.push(name);
+    }
+    for old in drop {
+        trash::delete(&old).map_err(err)?;
+    }
+    let _ = fs::remove_dir_all(&staging);
+
+    let mut profiles = read_profiles()?;
+    let at = dir.to_string_lossy();
+    let profile = profiles["profiles"]
+        .as_object_mut()
+        .and_then(|m| m.values_mut().find(|p| p["gameDir"].as_str() == Some(at.as_ref())))
+        .ok_or("the launcher profile disappeared")?;
+    profile["lastVersionId"] = json!(version_id);
+    write_profiles(&profiles)?;
     Ok(report)
 }
 
@@ -4334,6 +4609,61 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    // hits Modrinth and Fabric in a temp folder: cargo test upgrade_e2e -- --ignored
+    #[test]
+    #[ignore]
+    fn upgrade_e2e() {
+        let root = std::env::temp_dir().join(format!("mim-up-{}", uuid::Uuid::new_v4()));
+        let inst = root.join("installations/Old");
+        fs::create_dir_all(inst.join("mods")).unwrap();
+        let profile = json!({"profiles": {"t": {"gameDir": inst.to_string_lossy(), "lastVersionId": "fabric-loader-0.16.14-1.20.1"}}});
+        fs::write(root.join("launcher_profiles.json"), profile.to_string()).unwrap();
+        std::env::set_var(MC_DIR_ENV, &root);
+        tauri::async_runtime::block_on(import_in(&["sodium".into()], "Old", &Progress::new(None))).unwrap();
+        fs::write(inst.join("mods/homemade.jar"), b"not on modrinth").unwrap();
+
+        let scan = tauri::async_runtime::block_on(scan_upgrade_in("Old", &Progress::new(None))).unwrap();
+        assert_eq!(scan.game, "1.20.1");
+        assert!(scan.mods.iter().any(|m| m.file == "homemade.jar" && !m.known));
+        let t = scan.targets.iter().find(|t| t.game == "1.21.1").expect("1.21.1 offered");
+        assert!(t.loader_ok && t.missing.is_empty(), "{:?}", t.missing);
+
+        let r = tauri::async_runtime::block_on(upgrade_in("Old", "1.21.1", &["homemade.jar".into()], &Progress::new(None))).unwrap();
+        assert!(r.added.iter().any(|n| n.starts_with("sodium")) && r.skipped == ["homemade.jar"], "{r:?}");
+        let files: Vec<_> = fs::read_dir(inst.join("mods")).unwrap().flatten().map(|e| file_name(&e.path())).filter(|n| n.ends_with(".jar")).collect();
+        assert!(files.len() == 1 && files[0].contains("1.21"), "{files:?}");
+        let (_, game, loader) = inst_target("Old").unwrap();
+        assert_eq!((game.as_str(), loader.as_str()), ("1.21.1", "fabric"));
+        assert!(!inst.join(".mim/upgrade").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rename_follows_everywhere() {
+        let root = std::env::temp_dir().join(format!("mim-rn-{}", uuid::Uuid::new_v4()));
+        let inst = root.join("installations/Old");
+        let std = root.join("standards/Base");
+        fs::create_dir_all(inst.join(".mim")).unwrap();
+        fs::create_dir_all(&std).unwrap();
+        fs::write(std.join("options.txt"), "fov:1").unwrap();
+        symlink(std.join("options.txt"), inst.join("options.txt")).unwrap();
+        fs::write(std.join(LINKS_FILE), r#"{"installations":["Old","Other"]}"#).unwrap();
+        let profile = json!({"profiles": {"t": {"name": "Old", "gameDir": inst.to_string_lossy(), "lastVersionId": "1.21.1"}}});
+        fs::write(root.join("launcher_profiles.json"), profile.to_string()).unwrap();
+        std::env::set_var(MC_DIR_ENV, &root);
+
+        assert!(rename_installation("Old".into(), "Shared".into()).is_err());
+        rename_installation("Old".into(), " New ".into()).unwrap();
+        let moved = root.join("installations/New");
+        assert!(!inst.exists() && fs::read_to_string(moved.join("options.txt")).unwrap() == "fov:1");
+        let p = read_profiles().unwrap();
+        assert_eq!(p["profiles"]["t"]["name"], "New");
+        assert_eq!(p["profiles"]["t"]["gameDir"], json!(moved.to_string_lossy()));
+        let links: Value = serde_json::from_str(&fs::read_to_string(std.join(LINKS_FILE)).unwrap()).unwrap();
+        assert_eq!(links["installations"], json!(["New", "Other"]));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn pack_order_round_trip() {
         let game = std::env::temp_dir().join(format!("mim-packs-{}", uuid::Uuid::new_v4()));
@@ -4559,6 +4889,7 @@ pub fn run() {
             adopt_file,
             set_custom_icon,
             delete_installation,
+            rename_installation,
             reveal_path,
             open_launcher,
             minecraft_dir,
@@ -4585,6 +4916,8 @@ pub fn run() {
             resolve_link,
             import_links,
             update_mods,
+            scan_upgrade,
+            upgrade_installation,
             list_config,
             read_config,
             write_config,

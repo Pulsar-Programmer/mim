@@ -33,6 +33,7 @@ import { ConfigView } from "./ConfigView";
 import { LinkEditor } from "./LinkEditor";
 import { LinksDrawer } from "./LinksDrawer";
 import { LinkWizard } from "./LinkWizard";
+import { UpgradeDrawer } from "./UpgradeDrawer";
 import { Settings, applySettings, brief, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
@@ -318,6 +319,23 @@ function InstallationsView({
   const [standards = [], loadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
   const [linking, setLinking] = useState<string | null>(null);
   const linkingInst = installations.find((i) => i.name === linking);
+  const [upgrading, setUpgrading] = useState<string | null>(null);
+  const upgradingInst = installations.find((i) => i.name === upgrading);
+  const [renaming, setRenaming] = useState<string | null>(null);
+
+  async function rename(inst: Installation, to: string) {
+    if (renaming !== inst.name) return; // Enter already handled it before the blur
+    setRenaming(null);
+    if (!to.trim() || to.trim() === inst.name) return;
+    try {
+      await api.renameInstallation(inst.name, to.trim());
+      notify(brief(`Renamed to "${to.trim()}" — folder, launcher profile and links follow`));
+      refresh();
+      loadStandards();
+    } catch (e) {
+      notify(String(e));
+    }
+  }
 
   async function pickImage(inst: Installation) {
     const path = await openDialog({
@@ -391,9 +409,28 @@ function InstallationsView({
               )}
             </div>
             <div className="card-body">
-              <div className="card-name" title={inst.name}>
-                {inst.name}
-              </div>
+              {renaming === inst.name ? (
+                <input
+                  className="card-name card-rename"
+                  autoFocus
+                  defaultValue={inst.name}
+                  aria-label="New name"
+                  onFocus={(e) => e.target.select()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") rename(inst, e.currentTarget.value);
+                    if (e.key === "Escape") setRenaming(null);
+                  }}
+                  onBlur={(e) => rename(inst, e.target.value)}
+                />
+              ) : (
+                <button
+                  className="card-name"
+                  title={`${inst.name} — click to rename`}
+                  onClick={() => setRenaming(inst.name)}
+                >
+                  {inst.name}
+                </button>
+              )}
               <div className="card-meta">
                 {inst.game_version && <code>{inst.game_version}</code>}
                 {inst.mods_count > 0 && <span>{inst.mods_count} mods</span>}
@@ -419,8 +456,14 @@ function InstallationsView({
               </button>
               <div className="card-actions">
                 <button onClick={() => api.revealPath(inst.path, false)}>Open</button>
+                <button onClick={() => setRenaming(inst.name)}>Rename</button>
                 <button onClick={() => pickImage(inst)}>Image</button>
                 <button onClick={() => setLinking(inst.name)}>Links</button>
+                {inst.registered && (
+                  <button title="Move it and its mods to a newer Minecraft" onClick={() => setUpgrading(inst.name)}>
+                    Upgrade
+                  </button>
+                )}
                 <button className="danger" onClick={() => remove(inst)}>
                   {confirming === inst.name ? "Sure?" : "Delete"}
                 </button>
@@ -435,6 +478,14 @@ function InstallationsView({
         )}
       </div>
 
+      {upgradingInst && (
+        <UpgradeDrawer
+          inst={upgradingInst}
+          notify={notify}
+          onChanged={refresh}
+          onClose={() => setUpgrading(null)}
+        />
+      )}
       {linkingInst && (
         <LinksDrawer
           inst={linkingInst}

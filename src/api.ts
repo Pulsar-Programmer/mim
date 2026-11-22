@@ -280,6 +280,30 @@ export const reportSummary = (r: ImportReport, verb = "Added") =>
     : `${verb} ${r.added.length}${r.title ? ` from ${r.title}` : ""}` +
       (r.skipped.length ? ` · ${r.skipped.length} skipped` : "");
 
+export interface UpgradeMod {
+  file: string;
+  name: string;
+  icon: string | null;
+  /** on Modrinth, so MIM can check and update it */
+  known: boolean;
+}
+
+export interface UpgradeTarget {
+  game: string;
+  /** the installation's loader has a build for this version */
+  loader_ok: boolean;
+  /** files of known mods with no build for it */
+  missing: string[];
+}
+
+export interface UpgradeScan {
+  game: string;
+  loader: string;
+  mods: UpgradeMod[];
+  /** newer releases, newest first */
+  targets: UpgradeTarget[];
+}
+
 export type Loader = "vanilla" | "fabric" | "forge" | "neoforge";
 
 export interface InstallSpec {
@@ -337,6 +361,9 @@ export const api = {
     invoke<string[]>("share_config", { installation, standard, names, replace }),
   deleteInstallation: (name: string, removeProfile: boolean) =>
     invoke<void>("delete_installation", { name, removeProfile }),
+  /** moves its folder and updates its launcher profile and standards */
+  renameInstallation: (name: string, newName: string) =>
+    invoke<void>("rename_installation", { name, newName }),
   revealPath: (path: string, select = true) =>
     invoke<void>("reveal_path", { path, select }),
   openLauncher: () => invoke<void>("open_launcher"),
@@ -366,6 +393,11 @@ export const api = {
   importLinks: (links: string[], installation: string) =>
     invoke<ImportReport>("import_links", { links, installation }),
   updateMods: (installation: string) => invoke<ImportReport>("update_mods", { installation }),
+  /** which newer game versions every enabled mod has a build for */
+  scanUpgrade: (installation: string) => invoke<UpgradeScan>("scan_upgrade", { installation }),
+  /** added: mods swapped for their new build · skipped: the `remove` ones, now in the Trash */
+  upgradeInstallation: (installation: string, game: string, remove: string[]) =>
+    invoke<ImportReport>("upgrade_installation", { installation, game, remove }),
   listScreenshots: () => invoke<Screenshot[]>("list_screenshots"),
   listLogs: (installation: string | null = null) =>
     invoke<LogEntry[]>("list_logs", { installation }),
