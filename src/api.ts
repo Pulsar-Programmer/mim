@@ -30,12 +30,14 @@ export interface StandardEntry {
   rel_path: string;
   scope: string;
   is_dir: boolean;
+  /** on Shared's list, but the Minecraft folder doesn't have it yet */
+  missing: boolean;
 }
 
 export interface Standard {
   name: string;
   path: string;
-  /** the Minecraft folder's own shared folders (saves, packs, screenshots) */
+  /** the Minecraft folder itself; its entries are the list the user keeps */
   builtin: boolean;
   installations: string[];
   /** installation -> the entries (rel_path) that are live links in it */
@@ -54,8 +56,22 @@ export interface LinkState {
 }
 
 /** Entries that apply to a game version: global ones plus that version's folder. */
-export const entriesFor = (s: Standard, gameVersion: string | null) =>
-  s.entries.filter((e) => e.scope === "global" || e.scope === gameVersion);
+export const entriesFor = (s: Standard, gameVersion: string | null) => {
+  // Possible future feature: version-only items, kept in a subfolder like 1.21.10/.
+  // Probably not needed, since a separate standard covers a one-version special case.
+  // To bring it back, use this filter and restore the `{e.scope} only` chips:
+  // return s.entries.filter((e) => !e.missing && (e.scope === "global" || e.scope === gameVersion));
+  //
+  // Old version subfolders still work, for every version. If several hold the
+  // same item, the installation's own version wins, then the unversioned one.
+  const rank = (e: StandardEntry) => (e.scope === gameVersion ? 2 : e.scope === "global" ? 1 : 0);
+  const best = new Map<string, StandardEntry>();
+  for (const e of s.entries) {
+    const had = best.get(e.name);
+    if (!e.missing && (!had || rank(e) > rank(had))) best.set(e.name, e);
+  }
+  return [...best.values()];
+};
 
 /** One installation's copy of something it could share. */
 export interface InstCopy {
@@ -170,6 +186,10 @@ export interface OptionsSource {
   kind: "base" | "installation";
   path: string;
   exists: boolean;
+  /** where it's linked from ("Shared", a standard, "elsewhere"); null: its own */
+  link: string | null;
+  /** the real file, the same for every source linked to it */
+  target: string;
 }
 
 export type OptionEntry = [string, string];
@@ -311,7 +331,10 @@ export interface InstallSpec {
   game_version: string;
   loader: Loader;
   loader_version: string | null;
+  /** linked: changes stay in sync */
   standards: string[];
+  /** copied once, then the installation's own */
+  copies: string[];
 }
 
 export const api = {
@@ -359,6 +382,23 @@ export const api = {
    * standard already has; when non-empty and !replace, nothing changed. */
   shareConfig: (installation: string, standard: string, names: string[], replace: boolean) =>
     invoke<string[]>("share_config", { installation, standard, names, replace }),
+  /** Adds items to a standard, from an installation (moved in, linked back) or the
+   * Minecraft folder (from = null). Returns what it already has; when non-empty and
+   * neither replace nor merge settled it, nothing changed. */
+  addToStandard: (standard: string, from: string | null, names: string[], replace: boolean, merge: boolean) =>
+    invoke<string[]>("add_to_standard", { standard, from, names, replace, merge }),
+  /** Takes an item off Shared's list; its files stay. */
+  removeSharedItem: (name: string) => invoke<void>("remove_shared_item", { name }),
+  /** Moves an item to the Trash; installations using it keep their own copy. */
+  removeFromStandard: (name: string, relPath: string) =>
+    invoke<void>("remove_from_standard", { name, relPath }),
+  /** Gives an installation its own copy of entries instead of links. */
+  copyStandard: (name: string, installation: string, relPaths: string[]) =>
+    invoke<void>("copy_standard", { name, installation, relPaths }),
+  /** What's at the top of a game folder: [name, is folder] */
+  listItems: (from: string | null) => invoke<[string, boolean][]>("list_items", { from }),
+  adoptText: (standard: string, dest: string, text: string) =>
+    invoke<void>("adopt_text", { standard, dest, text }),
   deleteInstallation: (name: string, removeProfile: boolean) =>
     invoke<void>("delete_installation", { name, removeProfile }),
   /** moves its folder and updates its launcher profile and standards */

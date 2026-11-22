@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatBytes, InstCopy, Installation, Linkable, Standard, timeAgo } from "./api";
+import { compare, Comparison, mergeText, sameValue } from "./compare";
 import { useCached } from "./hooks";
 import { Avatar } from "./Places";
 import { brief } from "./settings";
@@ -42,18 +43,18 @@ function versionsOf(l: Linkable): Version[] {
 /** The copy to read or copy from: one inside the Minecraft folder when there is one. */
 const source = (v: Version) => v.copies.find((c) => c.link !== "elsewhere") ?? v.copies[0];
 
-/** key → value for options.txt / .properties / flat toml; null when it's not that simple. */
-function parseKV(text: string): Map<string, string> | null {
-  const m = new Map<string, string>();
-  for (const raw of text.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || /^([#;!]|\/\/|\[)/.test(line)) continue;
-    const x = /^"?([^"=:]+?)"?\s*[:=]\s*(.*?),?$/.exec(line);
-    if (!x || m.has(x[1])) return null; // nested (json) or odd: compare by lines instead
-    m.set(x[1], x[2]);
-  }
-  return m.size ? m : null;
+/** What's in the list next to a file that has several versions. */
+function verdict(c: Comparison | undefined): [string, string] {
+  if (!c) return ["", "…"];
+  if (c.kind === "same") return ["synced", "same settings"];
+  if (c.kind === "additive" || (c.kind === "combine" && c.mergeable)) return ["single", "auto-merge"];
+  if (c.kind === "conflict" && c.mergeable) return ["differ", plural(c.conflicts.length, "clash", "clashes")];
+  return ["differ", "pick one"];
 }
+
+/** Only these need a person: real clashes, or files that can't be combined. */
+const needsYou = (c: Comparison | undefined) =>
+  !!c && (c.kind === "unknown" || c.kind === "conflict" || (c.kind === "combine" && !c.mergeable));
 
 /**
  * Link Existing: pick installations you already have, see how their
@@ -79,11 +80,13 @@ export function LinkWizard({
   const [scan, setScan] = useState<Linkable[] | null>(null);
   const scanId = useRef(0);
   const [on, setOn] = useState<Set<string>>(new Set());
-  const [policy, setPolicy] = useState("newest"); // or an installation's name
-  const [keep, setKeep] = useState<Record<string, string>>({}); // dest -> hash, per-file picks
+  const [policy, setPolicy] = useState("merge"); // "newest", or an installation's name
+  const [keep, setKeep] = useState<Record<string, string>>({}); // dest -> hash, "use this one as is"
+  const [picks, setPicks] = useState<Record<string, Record<string, number>>>({}); // dest -> setting -> version
+  const [how, setHow] = useState<Record<string, "link" | "clone">>({});
   const [focus, setFocus] = useState<string | null>(null);
   const [find, setFind] = useState("");
-  const [diffOnly, setDiffOnly] = useState(false);
+  const [attention, setAttention] = useState(false);
   const [texts, setTexts] = useState<Record<string, string | null>>({}); // hash -> text (null: unreadable)
 
   const [stdName, setStdName] = useState("");
@@ -111,15 +114,44 @@ export function LinkWizard({
       ? l.copies.every((c) => c.link === "Shared")
       : new Set(l.copies.map((c) => c.link)).size === 1 && l.copies[0].link !== null);
 
-  /** The version that wins for a file: a per-file pick, else the policy. */
+  const comparisons = useMemo(() => {
+    const out = new Map<string, Comparison>();
+    for (const l of scan ?? []) {
+      if (l.is_dir) continue;
+      const vs = versionsOf(l);
+      if (vs.length < 2) continue;
+      if (!TEXT.test(l.dest)) out.set(l.dest, compare(vs.map(() => null), l.dest));
+      else if (vs.every((v) => v.hash in texts)) out.set(l.dest, compare(vs.map((v) => texts[v.hash]), l.dest));
+    }
+    return out;
+  }, [scan, texts]);
+  const reading = (scan ?? []).some((l) => !l.is_dir && versionsOf(l).length > 1 && !comparisons.has(l.dest));
+
+  /** The version a file comes from, unless it's being merged. */
   const keeper = (l: Linkable): Version => {
     const vs = versionsOf(l);
+    const c = comparisons.get(l.dest);
     return (
       vs.find((v) => v.hash === keep[l.dest]) ??
-      (policy !== "newest" ? vs.find((v) => v.copies.some((c) => c.installation === policy)) : undefined) ??
+      (policy !== "newest" && policy !== "merge"
+        ? vs.find((v) => v.copies.some((c) => c.installation === policy))
+        : undefined) ??
+      (policy === "merge" && c?.kind === "additive" ? vs[c.superset] : undefined) ??
       vs[0]
     );
   };
+
+  /** Merging writes a new file; identical or one-has-it-all files never need to. */
+  const merging = (l: Linkable) => {
+    const c = comparisons.get(l.dest);
+    return policy === "merge" && !keep[l.dest] && !!c?.mergeable && (c.kind === "combine" || c.kind === "conflict");
+  };
+  const mergedText = (l: Linkable) => {
+    const vs = versionsOf(l);
+    return mergeText(vs.map((v) => texts[v.hash] ?? ""), comparisons.get(l.dest)!, l.dest, 0, picks[l.dest]);
+  };
+  // servers.dat is rewritten by the game, so it's safer as each installation's own
+  const howOf = (l: Linkable) => how[l.dest] ?? (l.dest === "servers.dat" ? "clone" : "link");
 
   async function startCompare() {
     const id = ++scanId.current; // a later Compare wins over a slow earlier one
@@ -145,6 +177,18 @@ export function LinkWizard({
         )
       );
       setFocus(list.find((l) => !l.is_dir && versionsOf(l).length > 1)?.dest ?? list[0]?.dest ?? null);
+      // read every differing file up front, so the list can say which need attention
+      const wanted = new Map<string, string>();
+      for (const l of list) {
+        const vs = l.is_dir || !TEXT.test(l.dest) ? [] : versionsOf(l);
+        if (vs.length > 1) for (const v of vs) if (!(v.hash in texts)) wanted.set(v.hash, source(v).path);
+      }
+      const read = await Promise.all(
+        [...wanted].map(([hash, path]) =>
+          api.readConfig(path).then((t) => [hash, t] as const, () => [hash, null] as const)
+        )
+      );
+      if (id === scanId.current) setTexts((m) => ({ ...m, ...Object.fromEntries(read) }));
     } catch (e) {
       if (id !== scanId.current) return;
       notify(String(e));
@@ -153,12 +197,19 @@ export function LinkWizard({
   }
 
   const differs = (l: Linkable) => !l.is_dir && versionsOf(l).length > 1;
+  const needing = (scan ?? []).filter((l) => {
+    const c = comparisons.get(l.dest);
+    const settled = !!keep[l.dest] || (merging(l) && c!.conflicts.every((k) => picks[l.dest]?.[k] !== undefined));
+    return on.has(l.dest) && needsYou(c) && !settled;
+  });
   const visible = (scan ?? []).filter(
-    (l) => l.dest.toLowerCase().includes(find.toLowerCase()) && (!diffOnly || differs(l))
+    (l) =>
+      l.dest.toLowerCase().includes(find.toLowerCase()) &&
+      (!attention || needsYou(comparisons.get(l.dest)))
   );
   const focused = scan?.find((l) => l.dest === focus) ?? null;
 
-  // read each distinct version of the focused file once, for the comparison
+  // a file not read up front (it was linked since, say) is read when opened, for the comparison
   useEffect(() => {
     if (!focused || focused.is_dir || !TEXT.test(focused.dest)) return;
     for (const v of versionsOf(focused)) {
@@ -203,13 +254,13 @@ export function LinkWizard({
   const nameOk = /^[^./][^/]*$/.test(stdName.trim()) && stdName.trim().toLowerCase() !== "shared";
   // own copies that lose to the keeper: replaced, so they go to the Trash
   const replaced = files.flatMap((l) => {
-    const k = keeper(l);
-    return l.copies.filter((c) => c.link === null && c.hash !== k.hash).map((c) => `${c.installation} · ${l.dest}`);
+    const k = merging(l) ? null : keeper(l);
+    return l.copies.filter((c) => c.link === null && c.hash !== k?.hash).map((c) => `${c.installation} · ${l.dest}`);
   });
   // a folder linked from some standard can't merge into Shared; it's left alone
   const mergeable = (l: Linkable, inst: string) =>
     !l.copies.some((c) => c.installation === inst && c.link && c.link !== "Shared");
-  const canLink = ticked.length > 0 && (files.length === 0 || nameOk) && !busy;
+  const canLink = ticked.length > 0 && (files.length === 0 || nameOk) && !busy && !reading;
 
   async function apply() {
     if (!canLink) return;
@@ -229,11 +280,15 @@ export function LinkWizard({
         if (!existing) await api.createStandard(name);
         for (const l of files) {
           tick(`Keeping ${l.dest}`);
-          await api.adoptFile(name, source(keeper(l)).path, l.dest);
+          const merged = merging(l) ? mergedText(l) : null;
+          if (merged != null) await api.adoptText(name, l.dest, merged);
+          else await api.adoptFile(name, source(keeper(l)).path, l.dest);
         }
+        const rels = (m: "link" | "clone") => files.filter((l) => howOf(l) === m).map((l) => `${name}/${l.dest}`);
         for (const i of pickedList) {
-          tick(`Linking ${i.name}`);
-          await api.linkStandard(name, i.name, files.map((l) => `${name}/${l.dest}`), true);
+          tick(`Applying to ${i.name}`);
+          if (rels("link").length) await api.linkStandard(name, i.name, rels("link"), true);
+          if (rels("clone").length) await api.copyStandard(name, i.name, rels("clone"));
         }
       }
       for (const i of folders.length ? pickedList : []) {
@@ -243,7 +298,11 @@ export function LinkWizard({
       }
       setResult(
         [
-          files.length && `${plural(files.length, "file")} now shared through "${name}"`,
+          files.some((l) => howOf(l) === "link") &&
+            `${plural(files.filter((l) => howOf(l) === "link").length, "file")} linked through "${name}"`,
+          files.some((l) => howOf(l) === "clone") &&
+            `${plural(files.filter((l) => howOf(l) === "clone").length, "file")} cloned, each installation keeps its own`,
+          files.some(merging) && `${plural(files.filter(merging).length, "file")} merged`,
           folders.length && `${folders.map((l) => FOLDER_LABEL[l.dest]).join(", ")} merged into Shared`,
           replaced.length && `${plural(replaced.length, "older copy", "older copies")} in the Trash`,
           renamed.length && `${plural(renamed.length, "name clash", "name clashes")} — kept both`,
@@ -263,8 +322,10 @@ export function LinkWizard({
     setPicked(new Set());
     setScan(null);
     setKeep({});
+    setPicks({});
+    setHow({});
     setTexts({});
-    setPolicy("newest");
+    setPolicy("merge");
     setStep("pick");
   }
 
@@ -286,7 +347,7 @@ export function LinkWizard({
             {step === "pick"
               ? "Pick the installations that should share settings, configs and folders."
               : step === "compare"
-                ? "Tick what to share. Where copies differ, click the one to keep."
+                ? "Settings that match are handled for you. Only real clashes need a decision."
                 : brief("Done — they stay in sync from now on.")}
           </p>
         </div>
@@ -380,10 +441,14 @@ export function LinkWizard({
               {scan.length > 10 && (
                 <input className="search" placeholder="Find…" value={find} onChange={(e) => setFind(e.target.value)} />
               )}
-              <label className="lw-toggle">
-                <input type="checkbox" checked={diffOnly} onChange={(e) => setDiffOnly(e.target.checked)} />
-                Only differences
-              </label>
+              <div className="segmented small">
+                <button className={attention ? "" : "active"} onClick={() => setAttention(false)}>
+                  All
+                </button>
+                <button className={attention ? "active" : ""} onClick={() => setAttention(true)}>
+                  Needs you{needing.length > 0 && ` · ${needing.length}`}
+                </button>
+              </div>
             </div>
             <div className="lw-list" tabIndex={0} onKeyDown={listKeys} title="↑↓ to move · space to tick">
               {GROUPS.map(([label, test]) => {
@@ -412,6 +477,7 @@ export function LinkWizard({
                         focus={focus === l.dest}
                         synced={synced(l)}
                         versions={l.is_dir ? 0 : versionsOf(l).length}
+                        status={verdict(comparisons.get(l.dest))}
                         onFocus={() => setFocus(l.dest)}
                         onTick={() => setTicked([l.dest], !on.has(l.dest))}
                       />
@@ -419,14 +485,14 @@ export function LinkWizard({
                   </div>
                 );
               })}
-              {visible.length === 0 && <p className="le-empty">{diffOnly ? "No differences — all copies match." : "Nothing here."}</p>}
+              {visible.length === 0 && <p className="le-empty">{attention ? "Nothing needs you — the rest merges cleanly." : "Nothing here."}</p>}
             </div>
           </div>
 
           <div className="lw-detail">
             {pickedList.length > 1 && scan.some(differs) && (
               <label className="lw-policy">
-                When copies differ, keep
+                Build the shared copy by
                 <select
                   value={policy}
                   onChange={(e) => {
@@ -434,10 +500,11 @@ export function LinkWizard({
                     setKeep({});
                   }}
                 >
-                  <option value="newest">the newest</option>
+                  <option value="merge">merging them (recommended)</option>
+                  <option value="newest">using the newest of each</option>
                   {pickedList.map((i) => (
                     <option key={i.name} value={i.name}>
-                      {i.name}'s
+                      staying true to {i.name}
                     </option>
                   ))}
                 </select>
@@ -452,6 +519,10 @@ export function LinkWizard({
                 l={focused}
                 versions={versionsOf(focused)}
                 keeper={keeper(focused)}
+                merging={merging(focused)}
+                comparison={comparisons.get(focused.dest)}
+                picks={picks[focused.dest] ?? {}}
+                how={howOf(focused)}
                 picked={pickedList}
                 texts={texts}
                 instOf={instOf}
@@ -459,6 +530,17 @@ export function LinkWizard({
                   setKeep({ ...keep, [focused.dest]: hash });
                   setTicked([focused.dest], true);
                 }}
+                onMerge={() => {
+                  const { [focused.dest]: _, ...rest } = keep;
+                  setKeep(rest);
+                  setPolicy("merge");
+                  setTicked([focused.dest], true);
+                }}
+                onPick={(key, version) => {
+                  setPicks({ ...picks, [focused.dest]: { ...picks[focused.dest], [key]: version } });
+                  setArmed(false);
+                }}
+                onHow={(m) => setHow({ ...how, [focused.dest]: m })}
               />
             )}
           </div>
@@ -494,7 +576,9 @@ export function LinkWizard({
               <span className="lw-foot-sum" title={replaced.join("\n")}>
                 {busy ??
                   [
+                    reading && "Reading files…",
                     plural(ticked.length, "item"),
+                    needing.length > 0 && `${needing.length} using the default choice`,
                     replaced.length && `${plural(replaced.length, "copy", "copies")} to Trash`,
                   ]
                     .filter(Boolean)
@@ -502,7 +586,7 @@ export function LinkWizard({
               </span>
               {files.length > 0 && (
                 <label className="lw-via" title={existing ? "Adds to this standard" : "A new standard: a folder linked into each installation"}>
-                  via
+                  Save to
                   <input
                     className={`search ${nameOk ? "" : "bad"}`}
                     list="lw-stds"
@@ -549,6 +633,7 @@ function Row({
   focus,
   synced,
   versions,
+  status,
   onFocus,
   onTick,
 }: {
@@ -557,6 +642,7 @@ function Row({
   focus: boolean;
   synced: boolean;
   versions: number;
+  status: [string, string];
   onFocus: () => void;
   onTick: () => void;
 }) {
@@ -566,7 +652,7 @@ function Row({
     : l.is_dir
       ? ["", String(l.copies.reduce((n, c) => n + (c.link ? 0 : c.names.length), 0) || "")]
       : versions > 1
-        ? ["differ", `${versions} versions`]
+        ? status
         : l.copies.length === 1
           ? ["single", `only ${l.copies[0].installation}`]
           : ["", ""];
@@ -633,29 +719,66 @@ function FileDetail({
   l,
   versions,
   keeper,
+  merging,
+  comparison: c,
+  picks,
+  how,
   picked,
   texts,
   instOf,
   onKeep,
+  onMerge,
+  onPick,
+  onHow,
 }: {
   l: Linkable;
   versions: Version[];
   keeper: Version;
+  merging: boolean;
+  comparison?: Comparison;
+  picks: Record<string, number>;
+  how: "link" | "clone";
   picked: Installation[];
   texts: Record<string, string | null>;
   instOf: (n: string) => Installation | undefined;
   onKeep: (hash: string) => void;
+  onMerge: () => void;
+  onPick: (key: string, version: number) => void;
+  onHow: (m: "link" | "clone") => void;
 }) {
   const [peek, setPeek] = useState<string | null>(null);
+  const [showAdded, setShowAdded] = useState(false);
   const missing = picked.filter((i) => !l.copies.some((c) => c.installation === i.name));
   const textual = TEXT.test(l.dest);
-  const loaded = versions.every((v) => v.hash in texts);
   const ki = Math.max(0, versions.findIndex((v) => v.hash === keeper.hash));
-  const maps = loaded ? versions.map((v) => (texts[v.hash] == null ? null : parseKV(texts[v.hash]!))) : [];
-  const kv = loaded && maps.every(Boolean) ? (maps as Map<string, string>[]) : null;
-  const diffKeys = kv
-    ? [...new Set(kv.flatMap((m) => [...m.keys()]))].filter((k) => new Set(kv.map((m) => m.get(k))).size > 1)
-    : [];
+  const several = versions.length > 1;
+  const canMerge = !!c?.mergeable && (c.kind === "combine" || c.kind === "conflict");
+  const added = c ? c.keys.filter((k) => !c.conflicts.includes(k)) : [];
+  const whoHas = (k: string) => c!.maps.flatMap((m, i) => (m.has(k) ? [letter(i)] : [])).join(", ");
+  // a version that lacks the setting can't supply it: the first that has it does
+  const chosen = (key: string) => {
+    const want = merging ? (picks[key] ?? 0) : ki;
+    return c!.maps[want]?.has(key) ? want : c!.maps.findIndex((m) => m.has(key));
+  };
+  const summary = !several
+    ? l.copies.length > 1
+      ? "Identical everywhere."
+      : "Only one installation has it."
+    : !c
+      ? "Reading…"
+      : c.kind === "same"
+        ? "Same settings — only the order or formatting differs. Nothing is lost either way."
+        : c.kind === "additive"
+          ? `${letter(c.superset)} has everything, plus ${plural(c.keys.length, "setting")} the others don't — usually a newer mod version. Using ${letter(c.superset)} loses nothing.`
+          : c.kind === "combine"
+            ? c.mergeable
+              ? `No clashes: each has settings the others lack, so they combine cleanly.`
+              : "Each has settings the others lack, and this format can't be combined safely. Pick the one to keep."
+            : c.kind === "conflict"
+              ? c.mergeable
+                ? `${plural(c.conflicts.length, "setting")} ${c.conflicts.length === 1 ? "has" : "have"} different values. Click the value you want.`
+                : `${plural(c.conflicts.length, "setting")} ${c.conflicts.length === 1 ? "has" : "have"} different values, and this format can't be combined safely. Pick the one to keep.`
+              : "These can't be compared setting by setting. Pick the one to keep.";
 
   return (
     <div className="lw-detail-body">
@@ -663,25 +786,41 @@ function FileDetail({
         <code>{l.dest}</code>
       </h2>
       <p className="hint">
-        {versions.length > 1
-          ? `${versions.length} versions — the one you keep goes to all.`
-          : l.copies.length > 1
-            ? "Identical everywhere."
-            : "Only one installation has it."}
-        {missing.length > 0 && ` Added to ${missing.map((i) => i.name).join(", ")}.`}
+        {summary}
+        {missing.length > 0 && ` Also goes to ${missing.map((i) => i.name).join(", ")}.`}
       </p>
 
+      <div className="lw-how" role="radiogroup" aria-label="How installations get this file">
+        <button role="radio" aria-checked={how === "link"} className={how === "link" ? "on" : ""} onClick={() => onHow("link")}>
+          <b>Link</b>
+          <span>One file, always in sync</span>
+        </button>
+        <button role="radio" aria-checked={how === "clone"} className={how === "clone" ? "on" : ""} onClick={() => onHow("clone")}>
+          <b>Clone</b>
+          <span>Each keeps its own copy</span>
+        </button>
+      </div>
+
       <div className="lw-versions">
+        {canMerge && (
+          <button className={`lw-version pickable lw-merge ${merging ? "kept" : ""}`} onClick={onMerge}>
+            <span className="lw-version-head">
+              <span className="lw-letter">+</span>
+              <span className="lw-who">Merge all versions</span>
+              <span className="lw-meta">keeps every setting</span>
+            </span>
+          </button>
+        )}
         {versions.map((v, k) => {
-          const kept = k === ki;
+          const kept = k === ki && !merging;
           return (
             <div
               key={v.hash}
-              className={`lw-version ${versions.length > 1 ? "pickable" : ""} ${kept && versions.length > 1 ? "kept" : ""}`}
+              className={`lw-version ${several ? "pickable" : ""} ${kept && several ? "kept" : ""}`}
               onClick={() => onKeep(v.hash)}
             >
               <div className="lw-version-head">
-                {versions.length > 1 && <span className="lw-letter">{letter(k)}</span>}
+                {several && <span className="lw-letter">{letter(k)}</span>}
                 <span className="lw-who">
                   {v.copies.map((c) => (
                     <span key={c.installation} className="lw-member" title={c.link ? `linked from ${c.link}` : undefined}>
@@ -710,41 +849,68 @@ function FileDetail({
         })}
       </div>
 
-      {versions.length > 1 && textual && loaded && (
+      {several && c && c.kind !== "same" && (
         <div className="lw-diff">
-          {kv ? (
-            diffKeys.length === 0 ? (
-              <p className="le-empty">Same settings, different order.</p>
-            ) : (
-              <div className="lw-table-wrap">
-                <table className="lw-table">
-                  <thead>
-                    <tr>
-                      <th>{plural(diffKeys.length, "difference")}</th>
-                      {versions.map((v, k) => (
-                        <th key={v.hash} className={k === ki ? "kept" : ""}>
-                          {letter(k)}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {diffKeys.map((key) => (
-                      <tr key={key}>
-                        <td className="lw-key">{key}</td>
-                        {kv.map((m, k) => (
-                          <td key={k} className={k === ki ? "kept" : m.get(key) === kv[ki].get(key) ? "" : "diff"}>
-                            {m.get(key) ?? <span className="lw-none">—</span>}
-                          </td>
+          {c.kind === "unknown" ? (
+            textual ? <LineDiff versions={versions} keeper={ki} texts={versions.map((v) => texts[v.hash] ?? "")} /> : null
+          ) : (
+            <>
+              {c.conflicts.length > 0 && (
+                <div className="lw-table-wrap">
+                  <table className="lw-table">
+                    <thead>
+                      <tr>
+                        <th>{plural(c.conflicts.length, "clash", "clashes")}</th>
+                        {versions.map((v, k) => (
+                          <th key={v.hash}>{letter(k)}</th>
                         ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )
-          ) : (
-            <LineDiff versions={versions} keeper={ki} texts={versions.map((v) => texts[v.hash] ?? "")} />
+                    </thead>
+                    <tbody>
+                      {c.conflicts.map((key) => (
+                        <tr key={key}>
+                          <td className="lw-key">{key}</td>
+                          {c.maps.map((m, k) => {
+                            const v = m.get(key);
+                            const on = sameValue(v, c.maps[chosen(key)]?.get(key));
+                            return (
+                              <td key={k} className={on ? "kept" : ""}>
+                                {v === undefined ? (
+                                  <span className="lw-none">—</span>
+                                ) : merging ? (
+                                  <button className="lw-cell" title={v} aria-pressed={on} onClick={() => onPick(key, k)}>
+                                    {v}
+                                  </button>
+                                ) : (
+                                  v
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              {added.length > 0 && (
+                <>
+                  <button className="linklike lw-added" onClick={() => setShowAdded(!showAdded)}>
+                    {showAdded ? "Hide" : "Show"} {plural(added.length, "setting")} only some have
+                  </button>
+                  {showAdded && (
+                    <ul className="lw-added-list">
+                      {added.map((k) => (
+                        <li key={k}>
+                          <code>{k}</code>
+                          <span>in {whoHas(k)}</span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </>
+              )}
+            </>
           )}
         </div>
       )}

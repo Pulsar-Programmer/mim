@@ -67,6 +67,8 @@ export function LinkEditor({
   const tree = useMemo(() => buildTree(entries), [entries]);
   const [states, setStates] = useState<Record<string, LinkState> | null>(null);
   const [want, setWant] = useState<Set<string>>(new Set());
+  // what a ticked row does; unset means link for folders, copy for files
+  const [modes, setModes] = useState<Record<string, "link" | "copy">>({});
   const [closed, setClosed] = useState<Set<string>>(new Set());
   const [review, setReview] = useState(false);
   const [keep, setKeep] = useState(true);
@@ -93,14 +95,16 @@ export function LinkEditor({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const toLink = rels.filter((r) => want.has(r) && st(r) !== "linked");
+  const isDir = (r: string) => entries.find((e) => e.rel_path === r)?.is_dir ?? false;
+  const modeOf = (r: string) => modes[r] ?? (st(r) === "linked" || isDir(r) ? "link" : "copy");
+  const toLink = rels.filter((r) => want.has(r) && modeOf(r) === "link" && st(r) !== "linked");
+  const toCopy = rels.filter((r) => want.has(r) && modeOf(r) === "copy");
   const toUnlink = linkedNow.filter((r) => !want.has(r));
-  // Shared folders the installation has its own of get merged in, not trashed
-  const own = toLink.filter((r) => st(r) === "own");
-  const trash = std.builtin ? [] : own;
-  const merge = std.builtin ? own : [];
-  const swap = toLink.filter((r) => st(r) === "other");
-  const changed = toLink.length + toUnlink.length > 0;
+  // Shared folders the installation has its own of get merged in; the rest are replaced
+  const merge = std.builtin ? toLink.filter((r) => st(r) === "own" && isDir(r)) : [];
+  const trash = [...toLink, ...toCopy].filter((r) => st(r) === "own" && !merge.includes(r));
+  const swap = [...toLink, ...toCopy].filter((r) => st(r) === "other");
+  const changed = toLink.length + toCopy.length + toUnlink.length > 0;
   const risky = trash.length > 0 || (toUnlink.length > 0 && !keep);
 
   function flip(rs: string[], on: boolean) {
@@ -132,16 +136,16 @@ export function LinkEditor({
     setBusy(true);
     try {
       let renamed: string[] = [];
-      if (std.builtin) {
-        if (toLink.length) renamed = await api.mergeShared(inst.name, toLink.map((r) => r.split("/")[1]));
-      } else if (want.size) {
-        // the whole wanted set, so already-linked items stay put (and old whole-folder links split up)
-        await api.linkStandard(std.name, inst.name, rels.filter((r) => want.has(r)), true);
-      }
+      if (merge.length) renamed = await api.mergeShared(inst.name, merge.map((r) => r.split("/")[1]));
+      // the whole wanted set, so already-linked items stay put (and old whole-folder links split up)
+      const links = rels.filter((r) => want.has(r) && modeOf(r) === "link");
+      if (links.length) await api.linkStandard(std.name, inst.name, links, true);
+      if (toCopy.length) await api.copyStandard(std.name, inst.name, toCopy);
       if (toUnlink.length) await api.unlinkStandard(std.name, inst.name, keep, toUnlink);
       notify(
         [
           toLink.length && `Linked ${plural(toLink.length, "item")} from "${std.name}" into ${inst.name}`,
+          toCopy.length && `copied ${plural(toCopy.length, "item")}`,
           toUnlink.length && `unlinked ${toUnlink.length}${keep ? ", kept copies" : ""}`,
           trash.length && `${trash.length} moved to Trash`,
           merge.length && `${inst.name}'s own merged into Shared`,
@@ -164,15 +168,18 @@ export function LinkEditor({
     const s = states?.[r];
     const on = want.has(r);
     if (!s) return ["idle", "…"];
-    if (s.state === "linked") return on ? ["linked", "Linked"] : ["drop", "Will unlink"];
-    if (on)
+    if (s.state === "linked")
+      return !on ? ["drop", "Will unlink"] : modeOf(r) === "copy" ? ["add", "Becomes its own copy"] : ["linked", "Linked"];
+    if (on) {
+      const verb = modeOf(r) === "link" ? "link" : "copy";
       return s.state === "own"
-        ? std.builtin
+        ? std.builtin && isDir(r) && verb === "link"
           ? ["add", "Merges its own in"]
           : ["trash", "Replaces its own"]
         : s.state === "other"
-          ? ["add", s.from ? `Will link · was ${s.from}` : "Will link · replaces a link"]
-          : ["add", "Will link"];
+          ? ["add", s.from ? `Will ${verb} · was ${s.from}` : `Will ${verb} · replaces a link`]
+          : ["add", `Will ${verb}`];
+    }
     return s.state === "own"
       ? ["idle", "Its own copy"]
       : s.state === "other"
@@ -235,7 +242,26 @@ export function LinkEditor({
           {n.name}
           {e.is_dir ? "/" : ""}
         </span>
-        {e.scope !== "global" && <span className="chip">{e.scope}</span>}
+        {/* version-only items: see entriesFor */}
+        {want.has(e.rel_path) && (
+          <span className="le-mode" role="radiogroup" aria-label={`How ${n.name} is shared`}>
+            {(["link", "copy"] as const).map((m) => (
+              <button
+                key={m}
+                role="radio"
+                aria-checked={modeOf(e.rel_path) === m}
+                className={modeOf(e.rel_path) === m ? "on" : ""}
+                title={m === "link" ? "One shared item: changes show up everywhere" : "This installation gets its own copy"}
+                onClick={(ev) => {
+                  ev.preventDefault();
+                  setModes({ ...modes, [e.rel_path]: m });
+                }}
+              >
+                {m === "link" ? "Link" : "Copy"}
+              </button>
+            ))}
+          </span>
+        )}
         <span className={`le-pill ${kind}`}>{text}</span>
       </label>
     );
@@ -273,11 +299,8 @@ export function LinkEditor({
                 `What happens to ${inst.name} when you apply. Esc to go back.`
               ) : (
                 <>
-                  Ticked items use {std.name}'s copy
-                  <span className="more">
-                    {" "}
-                    — a change on either side shows up in both. Unticked ones stay {inst.name}'s own.
-                  </span>
+                  <b>Link</b> shares one item, so changes show up everywhere. <b>Copy</b> gives{" "}
+                  {inst.name} its own.
                 </>
               )}
             </p>
@@ -311,7 +334,7 @@ export function LinkEditor({
             <div className="share-files le-files">
               {rels.length === 0 ? (
                 <p className="le-empty">
-                  {std.name} has nothing for {inst.game_version ?? "this version"} yet —{" "}
+                  {std.name} has nothing yet —{" "}
                   <button className="linklike" onClick={() => api.revealPath(std.path, false)}>
                     open it
                   </button>{" "}
@@ -335,6 +358,13 @@ export function LinkEditor({
               <section className="le-sec add">
                 <h3>Link {plural(toLink.length, "item")}</h3>
                 {list(toLink)}
+              </section>
+            )}
+            {toCopy.length > 0 && (
+              <section className="le-sec add">
+                <h3>Copy {plural(toCopy.length, "item")}</h3>
+                {list(toCopy)}
+                <p>{inst.name} gets its own, separate from {std.name}.</p>
               </section>
             )}
             {trash.length > 0 && (
@@ -386,7 +416,7 @@ export function LinkEditor({
         <footer className="share-foot le-foot">
           {!review && changed && (
             <span className="le-sum">
-              {toLink.length > 0 && <b className="add">+{toLink.length}</b>}
+              {toLink.length + toCopy.length > 0 && <b className="add">+{toLink.length + toCopy.length}</b>}
               {toUnlink.length > 0 && <b className="drop">−{toUnlink.length}</b>}
               {trash.length > 0 && <b className="trash">{trash.length} to Trash</b>}
             </span>

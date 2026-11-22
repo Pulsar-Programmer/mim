@@ -561,7 +561,11 @@ struct InstallSpec {
     /// "vanilla", "fabric", "forge" or "neoforge"
     loader: String,
     loader_version: Option<String>,
+    /// linked: changes stay in sync
     standards: Vec<String>,
+    /// copied once: the new installation's own from then on
+    #[serde(default)]
+    copies: Vec<String>,
 }
 
 #[tauri::command]
@@ -595,6 +599,10 @@ async fn create_in(spec: InstallSpec, p: &Progress) -> CmdResult<()> {
         .map(|r| entry_src(r))
         .collect::<CmdResult<Vec<_>>>()?;
     link_entries(&inst, &pairs, true)?;
+    for rel in &spec.copies {
+        let (src, dest) = entry_src(rel)?;
+        copy_recursive(&src, &inst.join(dest)).map_err(err)?;
+    }
     for rel in &spec.standards {
         match rel.split_once('/') {
             Some((std_name, _)) if std_name != SHARED => add_link(&standard_dir(std_name)?, name)?,
@@ -697,17 +705,17 @@ fn merge_into(own: &Path, shared: &Path, tag: &str) -> CmdResult<Vec<String>> {
     Ok(renamed)
 }
 
-/// Moves an installation's own saves, packs or screenshots into the Shared
+/// Moves an installation's own folders (saves, journeymap, …) into the Shared
 /// ones and links them, so nothing is lost. Returns what had to be renamed.
 #[tauri::command(async)]
 fn merge_shared(installation: String, folders: Vec<String>) -> CmdResult<Vec<String>> {
     let inst = game_dir(Some(&installation))?;
     let mut renamed = vec![];
     for d in &folders {
-        if !SHARED_DIRS.contains(&d.as_str()) {
+        let (own, shared) = (inst.join(d), mc_dir().join(d));
+        if !shareable(d) || d == MERGED || (shared.exists() && !shared.is_dir()) {
             return Err(format!("not a shared folder: {d}"));
         }
-        let (own, shared) = (inst.join(d), mc_dir().join(d));
         if own.is_symlink() {
             if links_to(&own, &shared) {
                 continue;
@@ -738,6 +746,8 @@ struct StandardEntry {
     rel_path: String, // relative to standards/, starts with the standard's name
     scope: String,    // "global" or a game version like "1.21.10"
     is_dir: bool,
+    /// on Shared's list, but the Minecraft folder doesn't have it (yet)
+    missing: bool,
 }
 
 /// One named folder in `standards/`, plus the installations linked to it.
@@ -771,8 +781,94 @@ fn images_in(dir: &Path) -> Vec<String> {
 /// Hidden, so listing and applying skip it.
 const LINKS_FILE: &str = ".mim.json";
 
-/// The built-in standard: SHARED_DIRS in the Minecraft folder itself.
+/// The built-in standard: the Minecraft folder itself. Everything at its top
+/// level can be linked, except what the launcher or MIM keeps for itself.
 const SHARED: &str = "Shared";
+
+/// Launcher and MIM folders/files in the Minecraft folder, never shared.
+const NOT_SHARED: [&str; 16] = [
+    "installations", "standards", "versions", "libraries", "assets", "runtime", "bin", "natives",
+    "launcher", "downloads", "webcache", "webcache2", "treatment_tags.json", "updateSourceCache.json",
+    "realms_persistence.json", "quickPlay",
+];
+
+/// A top-level name in the Minecraft folder that Shared can link. Logs and
+/// caches can be; launcher files and backups (servers.dat_old, options.txt.bak) can't.
+fn shareable(name: &str) -> bool {
+    valid_name(name)
+        && !NOT_SHARED.contains(&name)
+        && !["launcher_", "clientId", "nativeUpdaterLog"].iter().any(|p| name.starts_with(p))
+        && !name.ends_with("_old")
+        && !name.ends_with(".bak")
+}
+
+/// What Shared offers until the user adds or removes something.
+const SHARED_DEFAULT: [&str; 5] = ["resourcepacks", "saves", "screenshots", "options.txt", "servers.dat"];
+
+/// Shared's list of items, kept in standards/ (hidden, so it's no standard).
+const SHARED_FILE: &str = ".shared.json";
+
+fn read_shared_in(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join(SHARED_FILE))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_else(|| SHARED_DEFAULT.iter().map(|n| n.to_string()).collect())
+}
+
+fn write_shared_in(dir: &Path, items: &[String]) -> CmdResult<()> {
+    fs::create_dir_all(dir).map_err(err)?;
+    fs::write(dir.join(SHARED_FILE), serde_json::to_string_pretty(items).map_err(err)?).map_err(err)
+}
+
+fn shared_item_ok(n: &str) -> bool {
+    valid_dest(n) && shareable(n.split('/').next().unwrap_or_default())
+}
+
+/// Shared links installations already have, so none become invisible when
+/// they aren't on the list.
+fn live_shared_links() -> Vec<String> {
+    let Ok(mc) = fs::canonicalize(mc_dir()) else { return vec![] };
+    let mut out = vec![];
+    for name in installation_names() {
+        let inst = installations_dir().join(name);
+        let mut links: Vec<PathBuf> =
+            visible_children(&inst).into_iter().map(|(_, p)| p).filter(|p| p.is_symlink()).collect();
+        if !inst.join(MERGED).is_symlink() {
+            links_under(&inst.join(MERGED), &mut links);
+        }
+        for l in links.iter().filter(|l| link_source(l).as_deref() == Some(SHARED)) {
+            let target = fs::canonicalize(l).ok();
+            let rel = target.as_deref().and_then(|t| t.strip_prefix(&mc).ok()).map(slash_path);
+            if let Some(r) = rel.filter(|r| l.strip_prefix(&inst).is_ok_and(|x| slash_path(x) == *r)) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+fn shared_items() -> Vec<String> {
+    let mut items = read_shared_in(&standards_dir());
+    items.extend(live_shared_links());
+    let mut seen = std::collections::HashSet::new();
+    items.retain(|n| shared_item_ok(n) && seen.insert(n.clone()));
+    items
+}
+
+fn shared_entries() -> Vec<StandardEntry> {
+    let mc = mc_dir();
+    let mut entries = vec![];
+    for n in shared_items() {
+        let (p, rel) = (mc.join(&n), format!("{SHARED}/{n}"));
+        let folder = SHARED_DIRS.contains(&n.as_str());
+        if folder || p.symlink_metadata().is_err() {
+            entries.push(StandardEntry { rel_path: rel, scope: "global".into(), is_dir: folder, missing: !folder, name: n });
+        } else {
+            push_entry(&mut entries, rel, "global", n, &p);
+        }
+    }
+    entries
+}
 
 fn valid_name(n: &str) -> bool {
     !n.is_empty() && !n.starts_with('.') && !n.contains('/')
@@ -834,12 +930,13 @@ fn push_entry(entries: &mut Vec<StandardEntry>, rel: String, scope: &str, name: 
                     rel_path: format!("{rel}/{r}"),
                     scope: scope.into(),
                     is_dir: false,
+                    missing: false,
                     name: format!("{MERGED}/{r}"),
                 });
             }
         }
     } else {
-        entries.push(StandardEntry { rel_path: rel, scope: scope.into(), is_dir: path.is_dir(), name });
+        entries.push(StandardEntry { rel_path: rel, scope: scope.into(), is_dir: path.is_dir(), missing: false, name });
     }
 }
 
@@ -888,15 +985,7 @@ fn list_standards() -> CmdResult<Vec<Standard>> {
             .filter(|(_, v)| !v.is_empty())
             .collect()
     };
-    let shared_entries: Vec<_> = SHARED_DIRS
-        .iter()
-        .map(|d| StandardEntry {
-            name: d.to_string(),
-            rel_path: format!("{SHARED}/{d}"),
-            scope: "global".into(),
-            is_dir: true,
-        })
-        .collect();
+    let shared_entries = shared_entries();
     let shared_linked = linked_of(&shared_entries);
     let mut out = vec![Standard {
         name: SHARED.into(),
@@ -916,7 +1005,8 @@ fn list_standards() -> CmdResult<Vec<Standard>> {
         let mut entries = vec![];
         for (name, path) in visible_children(&std_path) {
             if path.is_dir() && is_version_name(&name) {
-                // version-scoped group: list its children
+                // old version subfolders stay readable so existing links keep working;
+                // the app no longer limits them to one version (see entriesFor in api.ts)
                 for (cname, cpath) in visible_children(&path) {
                     push_entry(&mut entries, format!("{std_name}/{name}/{cname}"), &name, cname, &cpath);
                 }
@@ -1010,11 +1100,16 @@ fn entry_src(rel: &str) -> CmdResult<(PathBuf, String)> {
         _ => return Err("invalid standards path".into()),
     };
     if rel.split_once('/').map(|(s, _)| s) == Some(SHARED) {
-        if !SHARED_DIRS.contains(&dest.as_str()) || rel != format!("{SHARED}/{dest}") {
-            return Err(format!("not a shared folder: {rel}"));
+        let top = dest.split('/').next().unwrap_or_default();
+        if !shareable(top) || rel != format!("{SHARED}/{dest}") {
+            return Err(format!("can't share {dest} from the Minecraft folder"));
         }
         let src = mc_dir().join(&dest);
-        fs::create_dir_all(&src).map_err(err)?;
+        if SHARED_DIRS.contains(&dest.as_str()) {
+            fs::create_dir_all(&src).map_err(err)?;
+        } else if src.symlink_metadata().is_err() {
+            return Err(format!("the Minecraft folder has no {dest}"));
+        }
         return Ok((src, dest));
     }
     let src = standards_dir().join(rel);
@@ -1036,11 +1131,12 @@ fn linked_entries(inst: &Path, entries: &[StandardEntry]) -> Vec<String> {
 /// The live links from `inst` into standard `std`.
 fn links_of(inst: &Path, std: &str) -> Vec<PathBuf> {
     if std == SHARED {
-        let mc = mc_dir();
-        SHARED_DIRS
+        shared_entries()
             .iter()
-            .map(|d| inst.join(d))
-            .filter(|p| links_to(p, &mc.join(p.file_name().unwrap())))
+            .filter_map(|e| entry_src(&e.rel_path).ok())
+            .map(|(src, dest)| (inst.join(dest), src))
+            .filter(|(link, src)| links_to(link, src))
+            .map(|(link, _)| link)
             .collect()
     } else {
         let dir = standards_dir().join(std);
@@ -1156,12 +1252,17 @@ fn unlink_standard(
         }
     }
     detach(&links, keep)?;
-    if name != SHARED && links_of(&inst, &name).is_empty() {
-        let std = standard_dir(&name)?;
-        let v: Vec<String> = read_links(&std).into_iter().filter(|n| *n != installation).collect();
-        write_links(&std, &v)?;
+    forget_if_unlinked(&name, &inst, &installation)
+}
+
+/// Once nothing of a standard is linked, the installation leaves its list.
+fn forget_if_unlinked(name: &str, inst: &Path, installation: &str) -> CmdResult<()> {
+    if name == SHARED || !links_of(inst, name).is_empty() {
+        return Ok(());
     }
-    Ok(())
+    let std = standard_dir(name)?;
+    let v: Vec<String> = read_links(&std).into_iter().filter(|n| n != installation).collect();
+    write_links(&std, &v)
 }
 
 /// An entry of standard `name`: where it lives and its name inside an installation.
@@ -1208,7 +1309,9 @@ fn link_source(link: &Path) -> Option<String> {
         return r.iter().next().map(|c| c.to_string_lossy().into());
     }
     let mc = fs::canonicalize(mc_dir()).ok()?;
-    SHARED_DIRS.iter().any(|d| t == mc.join(d)).then(|| SHARED.into())
+    let r = t.strip_prefix(&mc).ok()?;
+    let top = r.iter().next()?.to_string_lossy();
+    (shareable(&top) && (r.iter().count() == 1 || top == MERGED)).then(|| SHARED.into())
 }
 
 /// How each entry stands in an installation, in the order asked.
@@ -1222,39 +1325,227 @@ fn link_states(name: String, installation: String, rel_paths: Vec<String>) -> Cm
 }
 
 /// Moves files from an installation's config/ (`names` relative to it, like
-/// "fabric/indigo.properties") into standard `standard` and links them back,
-/// so every installation linked to it shares them. Where the standard already
-/// has one, that copy wins: returns those names and changes nothing unless
-/// `replace`, which sends the installation's own to the Trash.
+/// "fabric/indigo.properties") into standard `standard` and links them back.
+/// Where it already has one: returned, and nothing changes unless `replace`.
 #[tauri::command(async)]
 fn share_config(installation: String, standard: String, names: Vec<String>, replace: bool) -> CmdResult<Vec<String>> {
+    let names: Vec<String> = names.iter().map(|n| format!("{MERGED}/{n}")).collect();
     let std = standard_dir(&standard)?;
-    let blocked = share_config_in(&game_dir(Some(&installation))?, &std, &names, replace)?;
+    let blocked = share_in(&game_dir(Some(&installation))?, &std, &names, replace)?;
     if blocked.is_empty() || replace {
         add_link(&std, &installation)?;
+    }
+    Ok(blocked.iter().map(|n| n[MERGED.len() + 1..].to_string()).collect())
+}
+
+/// Puts items into a standard ("journeymap", "options.txt", "config/x.json";
+/// "config" means each of its files). From an installation they move in and
+/// are linked back; from the Minecraft folder they're copied (for Shared,
+/// which is that folder, they just join the list). Where the standard already
+/// has one, returns those names and changes nothing unless `replace`
+/// (the standard's copy wins) or, for folders, `merge` (both kept).
+#[tauri::command(async)]
+fn add_to_standard(
+    standard: String,
+    from: Option<String>,
+    names: Vec<String>,
+    replace: bool,
+    merge: bool,
+) -> CmdResult<Vec<String>> {
+    let shared = standard == SHARED;
+    let std = if shared { mc_dir() } else { standard_dir(&standard)? };
+    let here = game_dir(from.as_deref())?;
+    let names = expand_config(&here, &names)?;
+    for n in &names {
+        let top = n.split('/').next().unwrap_or_default();
+        if !valid_dest(n) || (shared && !shared_item_ok(n)) || (!shared && is_version_name(top)) {
+            return Err(format!("can't add {n}"));
+        }
+    }
+    let blocked = match &from {
+        Some(tag) => add_linked(&here, &std, &names, replace, merge, tag)?,
+        None if shared => match names.iter().find(|n| std.join(n).symlink_metadata().is_err()) {
+            Some(n) => return Err(format!("the Minecraft folder has no {n}")),
+            None => vec![],
+        },
+        None => add_copied(&here, &std, &names, replace)?,
+    };
+    if !blocked.is_empty() && !replace {
+        return Ok(blocked);
+    }
+    if shared {
+        let mut items = read_shared_in(&standards_dir());
+        items.extend(names.iter().filter(|n| !items.contains(n)).cloned().collect::<Vec<_>>());
+        write_shared_in(&standards_dir(), &items)?;
+    } else if let Some(inst) = &from {
+        add_link(&std, inst)?;
     }
     Ok(blocked)
 }
 
-fn share_config_in(inst: &Path, std: &Path, names: &[String], replace: bool) -> CmdResult<Vec<String>> {
-    let (cfg, shared) = (inst.join(MERGED), std.join(MERGED));
+/// "config" becomes its files, so installations keep their other mod configs.
+fn expand_config(here: &Path, names: &[String]) -> CmdResult<Vec<String>> {
+    let mut out = vec![];
+    for n in names {
+        let n = n.trim().trim_matches('/').to_string();
+        if n != MERGED {
+            out.push(n);
+            continue;
+        }
+        let mut files = vec![];
+        walk_files(&here.join(MERGED), &mut files);
+        files.sort();
+        let own = files.iter().filter(|f| !f.is_symlink() && linked_ancestor(here, f).is_none());
+        let rels: Vec<_> = own.filter_map(|f| f.strip_prefix(here).ok()).map(slash_path).filter(|r| valid_dest(r)).collect();
+        if rels.is_empty() {
+            return Err("no unlinked files in config/".into());
+        }
+        out.extend(rels);
+    }
+    out.dedup();
+    Ok(out)
+}
+
+fn add_linked(inst: &Path, std: &Path, names: &[String], replace: bool, merge: bool, tag: &str) -> CmdResult<Vec<String>> {
+    let (dirs, rest): (Vec<String>, Vec<String>) = names.iter().cloned().partition(|n| {
+        let own = inst.join(n);
+        merge && own.is_dir() && !own.is_symlink() && std.join(n).is_dir()
+    });
+    let blocked = share_in(inst, std, &rest, replace)?;
+    if !blocked.is_empty() && !replace {
+        return Ok(blocked);
+    }
+    let mut pairs = vec![];
+    for n in dirs {
+        merge_into(&inst.join(&n), &std.join(&n), tag)?;
+        pairs.push((std.join(&n), n));
+    }
+    link_entries(inst, &pairs, false)?;
+    Ok(blocked)
+}
+
+fn add_copied(here: &Path, std: &Path, names: &[String], replace: bool) -> CmdResult<Vec<String>> {
+    if let Some(n) = names.iter().find(|n| here.join(n).symlink_metadata().is_err()) {
+        return Err(format!("no {n} here"));
+    }
+    let blocked: Vec<String> = names.iter().filter(|n| std.join(n).symlink_metadata().is_ok()).cloned().collect();
+    if !blocked.is_empty() && !replace {
+        return Ok(blocked);
+    }
+    for n in names {
+        if std.join(n).symlink_metadata().is_ok() {
+            trash::delete(std.join(n)).map_err(err)?;
+        }
+        copy_recursive(&here.join(n), &std.join(n)).map_err(err)?;
+    }
+    Ok(blocked)
+}
+
+/// Takes an item off Shared's list. Files stay where they are.
+#[tauri::command(async)]
+fn remove_shared_item(name: String) -> CmdResult<()> {
+    if let Some(i) = installation_names().iter().find(|i| {
+        let inst = installations_dir().join(i);
+        links_of(&inst, SHARED).iter().any(|l| l.strip_prefix(&inst).is_ok_and(|r| {
+            let r = slash_path(r);
+            r == name || r.starts_with(&format!("{name}/"))
+        }))
+    }) {
+        return Err(format!("{i} still links {name} — unlink it first"));
+    }
+    let mut items = read_shared_in(&standards_dir());
+    items.retain(|n| *n != name && !n.starts_with(&format!("{name}/")));
+    write_shared_in(&standards_dir(), &items)
+}
+
+/// Each installation linking this entry gets a real copy instead. Changes
+/// nothing if one only has it through a whole linked folder.
+fn free_entry(insts: &[PathBuf], src: &Path, dest: &str) -> CmdResult<()> {
+    let mut links = vec![];
+    for i in insts {
+        let (state, link) = link_state(i, src, dest);
+        if state.state == "linked" {
+            if link != i.join(dest) {
+                return Err(format!("{dest} is inside a linked folder — unlink that first"));
+            }
+            links.push(link);
+        }
+    }
+    detach(&links, true)
+}
+
+/// Moves one item out of a standard to the Trash. Installations using it keep
+/// their own copy.
+#[tauri::command(async)]
+fn remove_from_standard(name: String, rel_path: String) -> CmdResult<()> {
+    if name == SHARED {
+        return Err("Shared items come off the list instead".into());
+    }
+    let (src, dest) = entry_of(&name, &rel_path)?;
+    if dest == MERGED || is_version_name(&dest) {
+        return Err(format!("can't remove all of {dest}"));
+    }
+    let names = installation_names();
+    let dirs: Vec<PathBuf> = names.iter().map(|n| installations_dir().join(n)).collect();
+    free_entry(&dirs, &src, &dest)?;
+    for (n, d) in names.iter().zip(&dirs) {
+        forget_if_unlinked(&name, d, n)?;
+    }
+    trash::delete(src).map_err(err)
+}
+
+/// Gives an installation its own copy of standard entries instead of a link.
+#[tauri::command(async)]
+fn copy_standard(name: String, installation: String, rel_paths: Vec<String>) -> CmdResult<()> {
+    let inst = game_dir(Some(&installation))?;
+    for r in &rel_paths {
+        let (src, dest) = entry_of(&name, r)?;
+        copy_entry(&inst, &src, &dest)?;
+    }
+    forget_if_unlinked(&name, &inst, &installation)
+}
+
+/// A link to `src` becomes a real copy; another link is swapped; the
+/// installation's own different copy goes to the Trash.
+fn copy_entry(inst: &Path, src: &Path, name: &str) -> CmdResult<()> {
+    let (state, link) = link_state(inst, src, name);
+    if state.state == "linked" {
+        return detach(&[link], true);
+    }
+    let dest = inst.join(name);
+    if linked_ancestor(inst, &dest).is_some() {
+        return Err(format!("{name} is inside a linked folder — unlink that first"));
+    }
+    if dest.is_symlink() {
+        remove_link(&dest).map_err(err)?;
+    } else if dest.exists() {
+        if dest.is_file() && src.is_file() && fs::read(&dest).ok() == fs::read(src).ok() {
+            return Ok(());
+        }
+        trash::delete(&dest).map_err(err)?;
+    }
+    copy_recursive(src, &dest).map_err(err)
+}
+
+fn share_in(inst: &Path, std: &Path, names: &[String], replace: bool) -> CmdResult<Vec<String>> {
     let mut pairs = vec![];
     let mut blocked = vec![];
     for n in names {
-        let (own, dst) = (cfg.join(n), shared.join(n));
-        if !valid_rel(n) || !own.is_file() {
-            return Err(format!("no config/{n} here"));
+        let (own, dst) = (inst.join(n), std.join(n));
+        // inside config/ only single files, so other mod configs stay the installation's
+        if !valid_dest(n) || own.symlink_metadata().is_err() || (n.contains('/') && !own.is_file()) {
+            return Err(format!("no {n} here"));
         }
         if linked_ancestor(inst, &own).is_some() {
-            return Err(format!("config/{n} is inside a linked folder — relink it under Standards first"));
+            return Err(format!("{n} is inside a linked folder — relink it under Standards first"));
         }
         if own.is_symlink() && !links_to(&own, &dst) {
-            return Err(format!("config/{n} is already linked from somewhere else"));
+            return Err(format!("{n} is already linked from somewhere else"));
         }
         if dst.symlink_metadata().is_ok() && !links_to(&own, &dst) {
             blocked.push(n.clone());
         }
-        pairs.push((own, dst, format!("{MERGED}/{n}")));
+        pairs.push((own, dst, n.clone()));
     }
     if !blocked.is_empty() && !replace {
         return Ok(blocked);
@@ -1268,6 +1559,17 @@ fn share_config_in(inst: &Path, std: &Path, names: &[String], replace: bool) -> 
     let pairs: Vec<_> = pairs.into_iter().map(|(_, dst, name)| (dst, name)).collect();
     link_entries(inst, &pairs, true)?;
     Ok(blocked)
+}
+
+/// What's at the top of a game folder that could join a standard
+/// (name, is folder). Links and launcher files are left out.
+#[tauri::command(async)]
+fn list_items(from: Option<String>) -> CmdResult<Vec<(String, bool)>> {
+    Ok(visible_children(&game_dir(from.as_deref())?)
+        .into_iter()
+        .filter(|(n, p)| shareable(n) && !p.is_symlink())
+        .map(|(n, p)| (n, p.is_dir()))
+        .collect())
 }
 
 #[tauri::command(async)]
@@ -1397,6 +1699,28 @@ fn adopt_in(std: &Path, src: &Path, dest: &str) -> CmdResult<()> {
     }
     fs::create_dir_all(target.parent().unwrap()).map_err(err)?;
     fs::copy(src, &target).map(|_| ()).map_err(err)
+}
+
+/// Writes a merged file into a standard as `dest`. What it had goes to the
+/// Trash, unless the content is the same.
+#[tauri::command(async)]
+fn adopt_text(standard: String, dest: String, text: String) -> CmdResult<()> {
+    adopt_text_in(&standard_dir(&standard)?, &dest, &text)
+}
+
+fn adopt_text_in(std: &Path, dest: &str, text: &str) -> CmdResult<()> {
+    if !valid_dest(dest) {
+        return Err(format!("can't share {dest}"));
+    }
+    let target = std.join(dest);
+    if target.symlink_metadata().is_ok() {
+        if fs::read(&target).ok().as_deref() == Some(text.as_bytes()) {
+            return Ok(());
+        }
+        trash::delete(&target).map_err(err)?;
+    }
+    fs::create_dir_all(target.parent().unwrap()).map_err(err)?;
+    fs::write(target, text).map_err(err)
 }
 
 /// Puts one installation's copy of a file (the one picked to keep) into a standard.
@@ -2370,38 +2694,43 @@ struct OptionsSource {
     kind: &'static str, // "base" | "installation"
     path: String,
     exists: bool,
+    /// where it's linked from (a standard, "Shared", "elsewhere"); None: its own
+    link: Option<String>,
+    /// the file it really is, so two linked to the same one can be told apart
+    target: String,
+}
+
+fn options_source(label: String, kind: &'static str, p: PathBuf) -> OptionsSource {
+    let link = p.is_symlink().then(|| link_source(&p).unwrap_or_else(|| "elsewhere".into()));
+    OptionsSource {
+        label,
+        kind,
+        exists: p.exists(),
+        link,
+        target: fs::canonicalize(&p).unwrap_or_else(|_| p.clone()).to_string_lossy().into(),
+        path: p.to_string_lossy().into(),
+    }
 }
 
 #[tauri::command(async)]
 fn options_sources() -> Vec<OptionsSource> {
     let root = mc_dir();
     let base = root.join("options.txt");
-    let mut out = vec![OptionsSource {
-        label: "Base game".into(),
-        kind: "base",
-        exists: base.exists(),
-        path: base.to_string_lossy().into(),
-    }];
+    let mut out = vec![options_source("Base game".into(), "base", base)];
     let inst_dir = root.join("installations");
     for name in names_in(&inst_dir) {
         let dir = inst_dir.join(&name);
         if !dir.is_dir() || name == "Shared" {
             continue;
         }
-        let p = dir.join("options.txt");
-        out.push(OptionsSource {
-            label: name,
-            kind: "installation",
-            exists: p.exists(),
-            path: p.to_string_lossy().into(),
-        });
+        out.push(options_source(name, "installation", dir.join("options.txt")));
     }
     out
 }
 
 fn parse_options(text: &str) -> Vec<(String, String)> {
     text.lines()
-        .filter_map(|l| l.split_once(':'))
+        .filter_map(|l| l.trim_end_matches('\r').split_once(':'))
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
 }
@@ -4293,6 +4622,69 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    /// share_in with names relative to config/, like the Config page sends them
+    fn share_config_in(inst: &Path, std: &Path, names: &[String], replace: bool) -> CmdResult<Vec<String>> {
+        let names: Vec<_> = names.iter().map(|n| format!("{MERGED}/{n}")).collect();
+        let blocked = share_in(inst, std, &names, replace)?;
+        Ok(blocked.iter().map(|n| n[MERGED.len() + 1..].to_string()).collect())
+    }
+
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
+    fn share_item_moves_whole_folders() {
+        let root = std::env::temp_dir().join(format!("mim-item-{}", uuid::Uuid::new_v4()));
+        let (std, a) = (root.join("standards/Maps"), root.join("a"));
+        fs::create_dir_all(a.join("journeymap/data")).unwrap();
+        fs::create_dir_all(&std).unwrap();
+        fs::write(a.join("journeymap/data/w.dat"), "map").unwrap();
+        let jm = vec!["journeymap".to_string()];
+        assert!(share_in(&a, &std, &jm, false).unwrap().is_empty());
+        assert!(links_to(&a.join("journeymap"), &std.join("journeymap")));
+        assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
+        assert!(share_in(&a, &std, &["nothing".into()], false).is_err());
+        // removing it from the standard leaves the installation a real copy
+        free_entry(&[a.clone()], &std.join("journeymap"), "journeymap").unwrap();
+        assert!(!a.join("journeymap").is_symlink());
+        assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
+        fs::remove_dir_all(a.join("journeymap")).unwrap();
+        symlink(&std.join("journeymap"), &a.join("journeymap")).unwrap();
+        // launcher folders never count as shareable
+        assert!(shareable("journeymap") && shareable("options.txt") && shareable("mods"));
+        assert!(!shareable("versions") && !shareable("installations") && !shareable("launcher_profiles.json"));
+        assert!(shareable("logs") && !shareable("launcher") && !shareable("servers.dat_old"));
+        assert!(!shareable("clientId_v2.txt") && !shareable("nativeUpdaterLog3.txt") && !shareable("options.txt.bak"));
+        // Shared starts with just the short list, and remembers what's added
+        let list = root.join("list");
+        assert_eq!(read_shared_in(&list), SHARED_DEFAULT);
+        write_shared_in(&list, &["logs".into()]).unwrap();
+        assert_eq!(read_shared_in(&list), ["logs"]);
+
+        // from an installation: moved in, linked back; a clash can merge, keeping both
+        let (b, maps) = (root.join("b"), root.join("standards/Maps"));
+        fs::create_dir_all(b.join("journeymap/data")).unwrap();
+        fs::write(b.join("journeymap/data/w.dat"), "other").unwrap();
+        let jm2 = vec!["journeymap".to_string()];
+        assert_eq!(add_linked(&b, &maps, &jm2, false, false, "b").unwrap(), jm2);
+        assert!(!b.join("journeymap").is_symlink());
+        assert!(add_linked(&b, &maps, &jm2, false, true, "b").unwrap().is_empty());
+        assert!(links_to(&b.join("journeymap"), &maps.join("journeymap")));
+        assert!(maps.join("journeymap/data").is_dir() && maps.join("journeymap/data (b)/w.dat").is_file());
+
+        // a link can become the installation's own copy, the original untouched
+        copy_entry(&a, &std.join("journeymap"), "journeymap").unwrap();
+        assert!(!a.join("journeymap").is_symlink());
+        assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
+        assert!(std.join("journeymap/data/w.dat").is_file());
+        let c = root.join("c");
+        fs::create_dir_all(&c).unwrap();
+        fs::write(std.join("options.txt"), "fov:0.0").unwrap();
+        copy_entry(&c, &std.join("options.txt"), "options.txt").unwrap();
+        assert!(!c.join("options.txt").is_symlink() && c.join("options.txt").is_file());
+
+        assert_eq!(parse_options("a:1\r\nb:x:y\n"), [("a".into(), "1".into()), ("b".into(), "x:y".into())]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     // throwaway temp folder, never the real minecraft dir
     #[test]
     fn share_config_links_single_mods() {
@@ -4807,6 +5199,7 @@ mod tests {
             loader: loader.into(),
             loader_version: None,
             standards: vec![],
+            copies: vec![],
         };
         tauri::async_runtime::block_on(create_in(spec, &Progress::new(None))).unwrap();
         let profiles = read_profiles().unwrap();
@@ -4970,6 +5363,12 @@ pub fn run() {
             unlink_standard,
             link_states,
             share_config,
+            add_to_standard,
+            remove_shared_item,
+            remove_from_standard,
+            copy_standard,
+            list_items,
+            adopt_text,
             scan_linkables,
             adopt_file,
             set_custom_icon,

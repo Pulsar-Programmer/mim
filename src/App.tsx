@@ -31,6 +31,7 @@ import { PacksView } from "./PacksView";
 import { UpdateButton } from "./UpdateButton";
 import { ConfigView } from "./ConfigView";
 import { LinkEditor } from "./LinkEditor";
+import { AddToStandard } from "./AddToStandard";
 import { LinksDrawer } from "./LinksDrawer";
 import { LinkWizard } from "./LinkWizard";
 import { UpgradeDrawer } from "./UpgradeDrawer";
@@ -189,7 +190,7 @@ function App() {
         <div className="sidebar-foot">
           {mcDir?.sample && (
             <div className="sample-badge" title={mcDir.path}>
-              sample folder
+              Sample folder
             </div>
           )}
           <div className="foot-row">
@@ -201,8 +202,11 @@ function App() {
             </button>
             <UpdateButton notify={notify} />
           </div>
-          <button className="btn ghost" onClick={() => api.openLauncher()}>
-            Open Launcher ↗
+          <button className="nav-item foot-link" onClick={() => api.openLauncher()}>
+            Open Launcher
+            <svg viewBox="0 0 12 12" width="12" height="12" aria-hidden>
+              <path d="M3 9l6-6M4 3h5v5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
           </button>
         </div>
       </aside>
@@ -422,6 +426,19 @@ function InstallationsView({
               {inst.loader && inst.loader !== "vanilla" && (
                 <span className="chip on-art">{inst.loader}</span>
               )}
+              <button
+                className="art-edit"
+                aria-label={`Change image for ${inst.name}`}
+                title="Change image"
+                onClick={() => pickImage(inst)}
+              >
+                <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
+                  <path
+                    fill="currentColor"
+                    d="M5.6 2.5h4.8l1 1.6h1.9A1.7 1.7 0 0 1 15 5.8v6A1.7 1.7 0 0 1 13.3 13.5H2.7A1.7 1.7 0 0 1 1 11.8v-6a1.7 1.7 0 0 1 1.7-1.7h1.9zM8 6a2.8 2.8 0 1 0 0 5.6A2.8 2.8 0 0 0 8 6z"
+                  />
+                </svg>
+              </button>
             </div>
             <div className="card-body">
               {renaming === inst.name ? (
@@ -475,7 +492,6 @@ function InstallationsView({
                 <button title="Copy it, its mods and settings under a new name" onClick={() => duplicate(inst)}>
                   Duplicate
                 </button>
-                <button onClick={() => pickImage(inst)}>Image</button>
                 <button onClick={() => setLinking(inst.name)}>Links</button>
                 {inst.registered && (
                   <button title="Move it and its mods to a newer Minecraft" onClick={() => setUpgrading(inst.name)}>
@@ -544,14 +560,19 @@ function NewInstallView({
   const [loaders, setLoaders] = useState<LoaderVersion[]>([]);
   const [loaderVersion, setLoaderVersion] = useState("");
   const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
-  // null until the user touches it: then the built-in Shared folders are on by default
+  // null until the user touches it: everything on Shared's list is on by default
   const [touched, setPicked] = useState<Set<string> | null>(null);
   const picked = useMemo(
     () =>
       touched ??
-      new Set(standards.filter((s) => s.builtin).flatMap((s) => s.entries.map((e) => e.rel_path))),
-    [touched, standards]
+      new Set(standards.filter((s) => s.builtin).flatMap((s) => entriesFor(s, gameVersion).map((e) => e.rel_path))),
+    [touched, standards, gameVersion]
   );
+  // how each picked item comes in; unset means link for folders, copy for files
+  const [modes, setModes] = useState<Record<string, "link" | "copy">>({});
+  const isCopied = (e: { rel_path: string; is_dir: boolean }) => (modes[e.rel_path] ?? (e.is_dir ? "link" : "copy")) === "copy";
+  const flipCopy = (e: { rel_path: string; is_dir: boolean }) =>
+    setModes((m) => ({ ...m, [e.rel_path]: isCopied(e) ? "link" : "copy" }));
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // standards show as one checkbox each; expanding one lets you pick single files
@@ -663,9 +684,13 @@ function NewInstallView({
         game_version: gameVersion,
         loader,
         loader_version: loader !== "vanilla" && loaderVersion ? loaderVersion : null,
-        standards: [...picked].filter((r) =>
-          relevantStandards.some((g) => g.entries.some((e) => e.rel_path === r))
-        ),
+        ...(() => {
+          const chosen = relevantStandards.flatMap((g) => g.entries).filter((e) => picked.has(e.rel_path));
+          return {
+            standards: chosen.filter((e) => !isCopied(e)).map((e) => e.rel_path),
+            copies: chosen.filter(isCopied).map((e) => e.rel_path),
+          };
+        })(),
       });
       if (imagePath) {
         await api.setCustomIcon(name.trim(), imagePath).catch(() => {});
@@ -861,7 +886,7 @@ function NewInstallView({
 
         <div className="form">
           <div className="field">
-            <span>{brief("Linked standards — changes stay in sync")}</span>
+            <span>{brief("Bring in — linked items stay in sync, copied ones become its own")}</span>
             {relevantStandards.length > 0 ? (
               <div className="based-list">
                 {relevantStandards.map(({ s, entries }) => {
@@ -884,10 +909,10 @@ function NewInstallView({
                           <span className="place-text">
                             <span className="place-label">{s.name}</span>
                             <span className="place-sub">
-                              {n > 0 && n < rels.length
-                                ? `${n} of ${rels.length} · `
-                                : ""}
-                              {entries.map((e) => e.name + (e.is_dir ? "/" : "")).join(" · ")}
+                              {n > 0 && n < rels.length ? `${n} of ${rels.length} · ` : ""}
+                              {(n > 0 ? entries.filter((e) => picked.has(e.rel_path)) : entries)
+                                .map((e) => e.name + (e.is_dir ? "/" : "") + (n > 0 && isCopied(e) ? " (copy)" : ""))
+                                .join(" · ")}
                             </span>
                           </span>
                         </label>
@@ -918,7 +943,23 @@ function NewInstallView({
                               />
                               {e.name}
                               {e.is_dir ? "/" : ""}
-                              {e.scope !== "global" && <span className="chip">{e.scope}</span>}
+                              {/* version-only items: see entriesFor */}
+                              {picked.has(e.rel_path) && (
+                                <button
+                                  className="chip"
+                                  title={
+                                    isCopied(e)
+                                      ? "Copied once — click to link instead"
+                                      : "Linked, stays in sync — click to copy instead"
+                                  }
+                                  onClick={(ev) => {
+                                    ev.preventDefault();
+                                    flipCopy(e);
+                                  }}
+                                >
+                                  {isCopied(e) ? "copy" : "link"}
+                                </button>
+                              )}
                             </label>
                           ))}
                         </div>
@@ -929,7 +970,7 @@ function NewInstallView({
               </div>
             ) : (
               <p className="hint">
-                No standard has files for this version
+                No standard has files yet
                 <span className="more"> — create one under Standards and drop an options.txt, resource packs,
                 or mod configs in it.</span>
               </p>
@@ -952,6 +993,57 @@ function NewInstallView({
 
 // ---------------------------------------------------------------------------
 
+/** The installations using a standard; + reveals the rest to link. */
+function StandardLinks({
+  s,
+  installations,
+  onEdit,
+}: {
+  s: Standard;
+  installations: Installation[];
+  onEdit: (i: Installation) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const rows = installations.flatMap((i) => {
+    const rels = entriesFor(s, i.game_version).map((e) => e.rel_path);
+    const n = rels.filter((r) => s.linked[i.name]?.includes(r)).length;
+    return rels.length ? [{ i, n, want: rels.length }] : [];
+  });
+  const linked = rows.filter((r) => r.n > 0);
+  const others = rows.filter((r) => r.n === 0);
+  return (
+    <div className="places">
+      {(open ? [...linked, ...others] : linked).map(({ i, n, want }) => (
+        <PlaceChip
+          key={i.name}
+          className={`toggle ${n > 0 && n < want ? "partial" : ""}`}
+          place={{
+            key: i.name,
+            label: i.name,
+            inst: i,
+            sub: n === 0 ? "not linked" : n < want ? `${n} of ${want} linked` : "linked",
+          }}
+          active={n > 0}
+          title="Choose what's linked or copied…"
+          onClick={() => onEdit(i)}
+        />
+      ))}
+      {others.length > 0 && (
+        <button
+          className="std-link-btn"
+          aria-expanded={open}
+          aria-label={open ? "Hide other installations" : `Link another installation to ${s.name}`}
+          title={open ? "Hide the others" : "Link another installation"}
+          onClick={() => setOpen(!open)}
+        >
+          {open ? "Hide" : linked.length ? "+" : "+ Link an installation"}
+        </button>
+      )}
+      {rows.length === 0 && <span className="hint">Add something above to link it.</span>}
+    </div>
+  );
+}
+
 function StandardsView({
   notify,
   installations,
@@ -964,6 +1056,22 @@ function StandardsView({
   const { armed, confirm } = useConfirm(notify, load);
   // the link editor, open for one standard and installation
   const [editing, setEditing] = useState<{ s: Standard; i: Installation } | null>(null);
+  const [adding, setAdding] = useState<Standard | null>(null);
+
+  async function removeItem(name: string) {
+    try {
+      await api.removeSharedItem(name);
+      load();
+    } catch (e) {
+      notify(String(e));
+    }
+  }
+
+  const removeEntry = (s: Standard, rel: string, name: string) =>
+    confirm(`rm:${rel}`, async () => {
+      await api.removeFromStandard(s.name, rel);
+      return brief(`Moved ${name} to Trash — installations using it keep a copy`);
+    });
 
   async function create() {
     if (!newName.trim()) return;
@@ -1001,13 +1109,9 @@ function StandardsView({
       </header>
 
       <p className="hint wide">
-        A standard's files are symlinked into each linked installation, so a change on either
-        side shows up everywhere.<span className="more"> <b>Shared</b> is built in: the Minecraft folder's own
-        resource packs, saves and screenshots. Your own standards live in{" "}
-        <code>minecraft/standards</code> — top-level files apply to every version, a subfolder
-        named like a version (<code>1.21.10/</code>) only to that version. A <code>config/</code>{" "}
-        folder is linked file by file, so installations keep their other mod configs — use{" "}
-        <b>Share</b> on the Config page to put one there.</span>
+        A standard is a set of files and folders installations can share. Hover a list and press{" "}
+        <b>+</b> to add to it.<span className="more"> <b>Shared</b> lives in the Minecraft folder; your own
+        live in <code>minecraft/standards</code>.</span>
       </p>
 
       <div className="row-inline std-new">
@@ -1044,51 +1148,43 @@ function StandardsView({
             </div>
           </div>
 
-          {s.entries.length > 0 ? (
-            <div className="std-files">
-              {s.entries.map((e) => (
-                <span key={e.rel_path} className="std-file">
-                  {e.name}
-                  {e.is_dir ? "/" : ""}
-                  {e.scope !== "global" && <span className="chip">{e.scope}</span>}
-                </span>
-              ))}
-            </div>
-          ) : (
-            <p className="hint">
-              Empty —{" "}
-              <button className="linklike" onClick={() => api.revealPath(s.path, false)}>
-                open it
-              </button>{" "}
-              <span className="more">and drop an options.txt, resource packs or mod configs in</span>.
-            </p>
-          )}
-
-          <div className="std-label">Linked installations</div>
-          <div className="places">
-            {installations.map((i) => {
-              const rels = entriesFor(s, i.game_version).map((e) => e.rel_path);
-              const want = rels.length;
-              const n = rels.filter((r) => s.linked[i.name]?.includes(r)).length;
-              return (
-                <PlaceChip
-                  key={i.name}
-                  className={`toggle ${n > 0 && n < want ? "partial" : ""}`}
-                  place={{
-                    key: i.name,
-                    label: i.name,
-                    inst: i,
-                    sub: n === 0 ? "not linked" : n < want ? `${n} of ${want} linked` : "linked",
-                  }}
-                  active={n > 0}
-                  title="Choose what's linked…"
-                  onClick={() => setEditing({ s, i })}
-                />
-              );
-            })}
-            {installations.length === 0 && <span className="hint">No installations yet.</span>}
+          <div className={`std-files ${s.entries.length ? "" : "empty-list"}`}>
+            {s.entries.map((e) => (
+              <span
+                key={e.rel_path}
+                className={`std-file ${e.missing ? "missing" : ""}`}
+                title={e.missing ? "Not in the Minecraft folder yet" : undefined}
+              >
+                {e.name}
+                {e.is_dir ? "/" : ""}
+                {/* version-only items: see entriesFor
+                {e.scope !== "global" && <span className="chip">{e.scope} only</span>} */}
+                <button
+                  className={`std-file-x ${armed === `rm:${e.rel_path}` ? "armed" : ""}`}
+                  aria-label={s.builtin ? `Take ${e.name} off Shared` : `Remove ${e.name} from ${s.name}`}
+                  title={
+                    s.builtin
+                      ? "Take off the list — its files stay"
+                      : "Move to Trash — installations using it keep their own copy"
+                  }
+                  onClick={() => (s.builtin ? removeItem(e.name) : removeEntry(s, e.rel_path, e.name))}
+                >
+                  {armed === `rm:${e.rel_path}` ? "Sure?" : "×"}
+                </button>
+              </span>
+            ))}
+            <button
+              className="std-add-btn"
+              aria-label={`Add to ${s.name}`}
+              title="Add a file or folder"
+              onClick={() => setAdding(s)}
+            >
+              +{s.entries.length === 0 && " Add files or folders"}
+            </button>
           </div>
 
+          <div className="std-label">Linked installations</div>
+          <StandardLinks s={s} installations={installations} onEdit={(i) => setEditing({ s, i })} />
         </section>
       ))}
 
@@ -1098,6 +1194,15 @@ function StandardsView({
           inst={editing.i}
           notify={notify}
           onClose={() => setEditing(null)}
+          onDone={load}
+        />
+      )}
+      {adding && (
+        <AddToStandard
+          std={adding}
+          installations={installations}
+          notify={notify}
+          onClose={() => setAdding(null)}
           onDone={load}
         />
       )}

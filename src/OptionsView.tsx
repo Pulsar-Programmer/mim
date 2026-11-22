@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, Installation, OptionEntry, OptionsSource } from "./api";
+import { sameValue } from "./compare";
 import { PlacePicker } from "./Places";
 import { useCached } from "./hooks";
 
@@ -172,6 +173,28 @@ function KeyBind({ value, onChange }: { value: string; onChange: (v: string) => 
 
 // ---- value editors --------------------------------------------------------
 
+/** options.txt writes floats with a decimal point: 1 -> "1.0" */
+const float = (n: number) => {
+  const t = String(+n.toFixed(3));
+  return /^-?\d+$/.test(t) ? t + ".0" : t;
+};
+
+function Slider({ value, min, label, onChange }: { value: string; min: number; label: string; onChange: (v: string) => void }) {
+  return (
+    <span className="slider">
+      <input
+        type="range"
+        min={min}
+        max={1}
+        step={0.01}
+        value={value}
+        onChange={(e) => onChange(float(+e.target.value))}
+      />
+      <span className="slider-val">{label}</span>
+    </span>
+  );
+}
+
 function Editor({ k, value, onChange }: { k: string; value: string; onChange: (v: string) => void }) {
   if (k.startsWith("key_")) return <KeyBind value={value} onChange={onChange} />;
   if (value === "true" || value === "false")
@@ -185,20 +208,11 @@ function Editor({ k, value, onChange }: { k: string; value: string; onChange: (v
         <span />
       </button>
     );
+  // fov is stored from -1 to 1 around 70°
+  if (k === "fov" && /^-?\d*\.?\d+$/.test(value))
+    return <Slider value={value} min={-1} label={`${Math.round(70 + +value * 40)}°`} onChange={onChange} />;
   if (/^-?\d*\.\d+$/.test(value) && +value >= 0 && +value <= 1)
-    return (
-      <span className="slider">
-        <input
-          type="range"
-          min={0}
-          max={1}
-          step={0.01}
-          value={value}
-          onChange={(e) => onChange(String(+(+e.target.value).toFixed(2)).replace(/^(\d)$/, "$1.0"))}
-        />
-        <span className="slider-val">{Math.round(+value * 100)}%</span>
-      </span>
-    );
+    return <Slider value={value} min={0} label={`${Math.round(+value * 100)}%`} onChange={onChange} />;
   if (/^-?\d+(\.\d+)?$/.test(value))
     return (
       <input
@@ -211,6 +225,10 @@ function Editor({ k, value, onChange }: { k: string; value: string; onChange: (v
     );
   return <input className="text" value={value} onChange={(e) => onChange(e.target.value)} />;
 }
+
+const nameOf = (s: OptionsSource) => (s.kind === "base" ? "Minecraft folder" : s.label);
+const show = (k: string, v: string | undefined) =>
+  v === undefined ? "not set" : k.startsWith("key_") ? keyLabel(v) : v;
 
 // ---- view -----------------------------------------------------------------
 
@@ -228,16 +246,23 @@ export function OptionsView({
   );
   const [selected, setSelected] = useState<string | null>(null);
   const source = sources.find((s) => s.path === selected) ?? sources[0];
-  const base = sources.find((s) => s.kind === "base");
+  // what to compare against: picked, or the Minecraft folder for an installation
+  const [comparePick, setComparePick] = useState<string | null>(null);
+  const other =
+    comparePick === ""
+      ? undefined
+      : (sources.find((s) => s.path === comparePick && s.path !== source?.path) ??
+        (source?.kind === "base" ? undefined : sources.find((s) => s.kind === "base" && s.exists)));
+  const sameFile = !!other && other.target === source?.target;
 
   const [entries, reload] = useCached<OptionEntry[]>(
     `options:${source?.path}`,
     () => (source ? api.readOptions(source.path) : Promise.resolve([])),
     notify
   );
-  const [baseEntries] = useCached<OptionEntry[]>(
-    `options:${base?.path}`,
-    () => (base ? api.readOptions(base.path) : Promise.resolve([])),
+  const [otherEntries, reloadOther] = useCached<OptionEntry[]>(
+    `options:${other?.path}`,
+    () => (other ? api.readOptions(other.path) : Promise.resolve([])),
     notify
   );
 
@@ -246,56 +271,69 @@ export function OptionsView({
   const [diffOnly, setDiffOnly] = useState(false);
   useEffect(() => setEdits(new Map()), [source?.path]);
 
-  const isInstall = source?.kind === "installation";
-  const baseMap = useMemo(() => new Map(baseEntries ?? []), [baseEntries]);
+  const mine = useMemo(() => new Map(entries ?? []), [entries]);
+  const theirs = useMemo(() => new Map(other ? (otherEntries ?? []) : []), [other, otherEntries]);
+  const comparing = !!other && !sameFile;
+
+  // every key either side has; ones only theirs can be added here
+  const keys = useMemo(() => {
+    const ks = [...mine.keys()];
+    if (comparing) for (const k of theirs.keys()) if (!mine.has(k)) ks.push(k);
+    return ks.filter((k) => k !== "version");
+  }, [mine, theirs, comparing]);
+  const differs = (k: string) => comparing && !sameValue(theirs.get(k), mine.get(k));
+  const diffKeys = useMemo(() => keys.filter(differs), [keys, mine, theirs, comparing]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const grouped = useMemo(() => {
     const q = query.toLowerCase();
-    const map = new Map<Group, OptionEntry[]>();
-    for (const [k, v] of entries ?? []) {
-      if (k === "version") continue;
+    const map = new Map<Group, string[]>();
+    for (const k of diffOnly && comparing ? diffKeys : keys) {
       if (q && !k.toLowerCase().includes(q) && !labelOf(k).toLowerCase().includes(q)) continue;
-      if (diffOnly && isInstall && baseMap.get(k) === v) continue;
       const g = groupOf(k);
       if (!map.has(g)) map.set(g, []);
-      map.get(g)!.push([k, v]);
+      map.get(g)!.push(k);
     }
     return GROUPS.filter((g) => map.has(g)).map((g) => [g, map.get(g)!] as const);
-  }, [entries, query, diffOnly, isInstall, baseMap]);
-
-  const diffCount = useMemo(
-    () => (isInstall ? (entries ?? []).filter(([k, v]) => k !== "version" && baseMap.get(k) !== v).length : 0),
-    [entries, baseMap, isInstall]
-  );
+  }, [keys, diffKeys, query, diffOnly, comparing]);
 
   const set = (k: string) => (v: string) =>
     setEdits((prev) => {
       const next = new Map(prev);
-      const original = entries?.find(([ek]) => ek === k)?.[1];
-      v === original ? next.delete(k) : next.set(k, v);
+      v === mine.get(k) ? next.delete(k) : next.set(k, v);
       return next;
     });
+
+  /** stage every one of theirs that differs; nothing is saved yet */
+  function takeAll() {
+    const next = new Map(edits);
+    for (const k of diffKeys) {
+      const v = theirs.get(k);
+      if (v !== undefined) next.set(k, v);
+    }
+    setEdits(next);
+  }
 
   async function save() {
     if (!source || !entries) return;
     try {
-      await api.writeOptions(
-        source.path,
-        entries.map(([k, v]) => [k, edits.get(k) ?? v])
-      );
+      const added = [...edits].filter(([k]) => !mine.has(k));
+      await api.writeOptions(source.path, [...entries.map(([k, v]) => [k, edits.get(k) ?? v] as OptionEntry), ...added]);
       notify(`Saved ${edits.size} change${edits.size === 1 ? "" : "s"} · backup at options.txt.bak`);
       setEdits(new Map());
       reload();
+      if (sameFile) reloadOther();
     } catch (e) {
       notify(String(e));
     }
   }
 
-  async function copyBase() {
-    if (!source || !baseEntries?.length) return;
+  // a missing options.txt starts from the compared one, or the Minecraft folder's
+  const seed = other && theirs.size ? other : sources.find((s) => s.kind === "base" && s.exists);
+  async function copyFrom() {
+    if (!source || !seed) return;
     try {
-      await api.writeOptions(source.path, baseEntries);
-      notify(`Copied Minecraft folder options into ${source.label}`);
+      await api.writeOptions(source.path, await api.readOptions(seed.path));
+      notify(`Copied ${nameOf(seed)} options into ${source.label}`);
       reloadSources();
       reload();
     } catch (e) {
@@ -313,35 +351,40 @@ export function OptionsView({
       </header>
 
       <p className="hint wide">
-            <span className="more">The <b>Minecraft folder</b> options are used when playing from the main 
-            <code>minecraft</code> folder. </span>Every installation has its own 
-            <code>options.txt</code>
-            <span className="more"> — changes never carry over between them</span>.
-          </p>
+        Every installation has its own <code>options.txt</code>
+        <span className="more">
+          {" "}
+          unless it's linked from a standard — then they share one file. Pick another installation under{" "}
+          <b>Compare with</b> to see what differs and take its values</span>.
+      </p>
 
       <PlacePicker
         places={sources.map((s) => ({
           key: s.path,
-          label: s.kind === "base" ? "Minecraft folder" : s.label,
+          label: nameOf(s),
           kind: s.kind === "base" ? ("root" as const) : undefined,
           inst: installations.find((i) => i.name === s.label),
-          sub: s.exists ? "own options.txt" : "no options.txt · game defaults",
+          sub: s.link ? `linked · ${s.link}` : s.exists ? "own options.txt" : "no options.txt · game defaults",
         }))}
         value={source?.path ?? ""}
         onChange={setSelected}
       />
       <div className="options-layout">
-
         <section className="options-editor">
+          {source?.link && (
+            <p className="hint">
+              Linked from <b>{source.link}</b> — saving here changes it for every installation linked to it.
+            </p>
+          )}
           {source && !source.exists ? (
             <div className="empty options-empty">
               <p>
                 <b>{source.label}</b> has no <code>options.txt</code> yet, so Minecraft uses its
                 built-in defaults here, <i>not</i> your Minecraft folder options.
               </p>
-              {baseEntries && baseEntries.length > 0 && (
-                <button className="btn primary" onClick={copyBase}>
-                  Copy Minecraft folder options here
+              {seed && (
+                <button className="btn primary" onClick={copyFrom}>
+                  Copy {nameOf(seed)} options here
                 </button>
               )}
             </div>
@@ -354,62 +397,79 @@ export function OptionsView({
                   value={query}
                   onChange={(e) => setQuery(e.target.value)}
                 />
-                {isInstall && (
+                <label className="inline-check">
+                  Compare with
+                  <select value={other?.path ?? ""} onChange={(e) => setComparePick(e.target.value)}>
+                    <option value="">nothing</option>
+                    {sources
+                      .filter((s) => s.path !== source?.path && (s.exists || s.path === other?.path))
+                      .map((s) => (
+                        <option key={s.path} value={s.path}>
+                          {nameOf(s)}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+                {comparing && (
                   <label className="inline-check">
-                    <input
-                      type="checkbox"
-                      checked={diffOnly}
-                      onChange={(e) => setDiffOnly(e.target.checked)}
-                    />
-                    only differences from base <span className="count">{diffCount}</span>
+                    <input type="checkbox" checked={diffOnly} onChange={(e) => setDiffOnly(e.target.checked)} />
+                    only differences <span className="count">{diffKeys.length}</span>
                   </label>
+                )}
+                {comparing && diffKeys.length > 0 && (
+                  <button className="linklike" onClick={takeAll} title="Stages them — nothing is saved until Save">
+                    take all {diffKeys.length} from {nameOf(other!)}
+                  </button>
                 )}
                 <button className="linklike" onClick={() => source && api.revealPath(source.path)}>
                   reveal file
                 </button>
               </div>
+              {sameFile && (
+                <p className="hint">
+                  {nameOf(other!)} uses the very same file — they're linked, so nothing can differ.
+                </p>
+              )}
 
               <div className="opt-groups">
-              {grouped.map(([g, rows]) => (
-                <div key={g} className="opt-group">
-                  <h3>{g}</h3>
-                  <ul className="opt-list">
-                    {rows.map(([k, v]) => {
-                      const value = edits.get(k) ?? v;
-                      const baseV = baseMap.get(k);
-                      const differs = isInstall && baseV !== v;
-                      return (
-                        <li key={k} className={edits.has(k) ? "dirty" : ""}>
-                          <div className="opt-label">
-                            <span>{labelOf(k)}</span>
-                            <code className="opt-key">{k}</code>
-                          </div>
-                          {differs && (
-                            <span
-                              className="chip differs"
-                              title={baseV === undefined ? "not set in base" : `base: ${baseV}`}
-                            >
-                              base:{" "}
-                              {baseV === undefined
-                                ? "—"
-                                : k.startsWith("key_")
-                                  ? keyLabel(baseV)
-                                  : baseV}
-                            </span>
-                          )}
-                          <div className="opt-edit">
-                            <Editor k={k} value={value} onChange={set(k)} />
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              ))}
+                {grouped.map(([g, ks]) => (
+                  <div key={g} className="opt-group">
+                    <h3>{g}</h3>
+                    <ul className="opt-list">
+                      {ks.map((k) => {
+                        const value = edits.get(k) ?? mine.get(k);
+                        const t = theirs.get(k);
+                        return (
+                          <li key={k} className={edits.has(k) ? "dirty" : ""}>
+                            <div className="opt-label">
+                              <span>{labelOf(k)}</span>
+                              <code className="opt-key">{k}</code>
+                            </div>
+                            {comparing && !sameValue(value, t) && (
+                              <button
+                                className="chip differs"
+                                disabled={t === undefined}
+                                title={t === undefined ? `${nameOf(other!)} doesn't set this` : `Use ${nameOf(other!)}'s value`}
+                                onClick={() => t !== undefined && set(k)(t)}
+                              >
+                                {nameOf(other!)}: {show(k, t)}
+                              </button>
+                            )}
+                            <div className="opt-edit">
+                              {value === undefined ? (
+                                <span className="hint">not set</span>
+                              ) : (
+                                <Editor k={k} value={value} onChange={set(k)} />
+                              )}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                ))}
               </div>
-              {entries && grouped.length === 0 && (
-                <div className="empty">Nothing matches.</div>
-              )}
+              {entries && grouped.length === 0 && <div className="empty">Nothing matches.</div>}
             </>
           )}
         </section>
@@ -418,8 +478,7 @@ export function OptionsView({
       {edits.size > 0 && (
         <div className="save-bar">
           <span>
-            {edits.size} unsaved change{edits.size === 1 ? "" : "s"} to{" "}
-            <b>{source?.label}</b>
+            {edits.size} unsaved change{edits.size === 1 ? "" : "s"} to <b>{source && nameOf(source)}</b>
           </span>
           <span className="hint">close Minecraft first or it'll overwrite them</span>
           <button className="linklike" onClick={() => setEdits(new Map())}>
