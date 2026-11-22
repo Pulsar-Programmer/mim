@@ -1,6 +1,16 @@
 import { useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { api, formatBytes, Installation, Mod } from "./api";
+import {
+  api,
+  formatBytes,
+  ImportReport,
+  Installation,
+  Mod,
+  reportSummary,
+  splitLinks,
+  timeAgo,
+} from "./api";
+import { ProgressBar, useProgress } from "./Progress";
 import { useCached, useConfirm } from "./hooks";
 import { PlacePicker } from "./Places";
 
@@ -38,10 +48,18 @@ export function ModsView({
   const { armed, confirm } = useConfirm(notify, refresh);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "on" | "off">("all");
+  const [hideLibs, setHideLibs] = useState(false);
+  const [sort, setSort] = useState<"name" | "newest" | "size">("name");
+  const [link, setLink] = useState("");
+  const [busy, setBusy] = useState<"import" | "update" | null>(null);
+  const [report, setReport] = useState<ImportReport | null>(null);
+  const progress = useProgress(!!busy);
 
+  const libs = mods.filter((m) => m.library).length;
   const shown = mods.filter((m) => {
     if (filter === "on" && !m.enabled) return false;
     if (filter === "off" && m.enabled) return false;
+    if (hideLibs && m.library) return false;
     const q = query.toLowerCase();
     return (
       !q ||
@@ -50,6 +68,8 @@ export function ModsView({
       (m.id ?? "").includes(q)
     );
   });
+  if (sort === "newest") shown.sort((a, b) => b.modified - a.modified);
+  if (sort === "size") shown.sort((a, b) => b.size_bytes - a.size_bytes);
   const disabled = mods.filter((m) => !m.enabled).length;
 
   async function toggle(m: Mod) {
@@ -77,6 +97,26 @@ export function ModsView({
     }
   }
 
+  async function fromModrinth(kind: "import" | "update") {
+    if (!current) return;
+    setBusy(kind);
+    setReport(null);
+    try {
+      const r =
+        kind === "import"
+          ? await api.importLinks(splitLinks(link), current)
+          : await api.updateMods(current);
+      notify(reportSummary(r, kind === "import" ? "Added" : "Updated"));
+      if (r.skipped.length) setReport(r);
+      if (kind === "import") setLink("");
+      refresh();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const folder = current
     ? installations.find((i) => i.name === current)?.path + "/mods"
     : null;
@@ -95,6 +135,16 @@ export function ModsView({
           {folder && (
             <button className="btn" onClick={() => api.revealPath(folder, false)}>
               Open Folder
+            </button>
+          )}
+          {current && (
+            <button
+              className="btn"
+              onClick={() => fromModrinth("update")}
+              disabled={!!busy}
+              title="Swap every mod Modrinth knows for its newest build for this version — old jars go to the Trash"
+            >
+              {busy === "update" ? "Updating…" : "Update All"}
             </button>
           )}
           <button className="btn primary" onClick={add}>
@@ -122,6 +172,45 @@ export function ModsView({
       <div className="options-layout">
 
         <section className="options-editor">
+          {current ? (
+            <form
+              className="options-toolbar import-row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (link.trim()) fromModrinth("import");
+              }}
+            >
+              <input
+                className="search"
+                placeholder="Paste Modrinth or CurseForge links — mods, collections or modpacks"
+                value={link}
+                onChange={(e) => setLink(e.target.value)}
+              />
+              <button className="btn" disabled={!link.trim() || !!busy}>
+                {busy === "import" ? "Importing…" : "Import"}
+              </button>
+            </form>
+          ) : (
+            <p className="hint">
+              Pick an installation to import from Modrinth — the Minecraft folder has no fixed
+              version to match mods to.
+            </p>
+          )}
+          {busy && (
+            <ProgressBar
+              p={progress}
+              fallback={busy === "import" ? "Looking up links…" : "Checking for updates…"}
+            />
+          )}
+          {report && (
+            <p className="hint wide">
+              Skipped: {report.skipped.join(" · ")}{" "}
+              <button className="linklike" onClick={() => setReport(null)}>
+                dismiss
+              </button>
+            </p>
+          )}
+
           <div className="options-toolbar">
             <input
               className="search"
@@ -136,6 +225,29 @@ export function ModsView({
                 </button>
               ))}
             </div>
+            {libs > 0 && (
+              <label
+                className="inline-check"
+                title="Libraries are mods other mods need — Fabric API, Cloth Config and the like"
+              >
+                <input
+                  type="checkbox"
+                  checked={hideLibs}
+                  onChange={(e) => setHideLibs(e.target.checked)}
+                />
+                hide libraries <span className="count">{libs}</span>
+              </label>
+            )}
+            <select
+              className="sort"
+              value={sort}
+              onChange={(e) => setSort(e.target.value as typeof sort)}
+              title="Sort"
+            >
+              <option value="name">A–Z</option>
+              <option value="newest">Newest</option>
+              <option value="size">Largest</option>
+            </select>
           </div>
 
           <ul className="mod-list">
@@ -152,6 +264,7 @@ export function ModsView({
                     <span className="mod-name">{m.name}</span>
                     {m.version && <code>{m.version}</code>}
                     {m.loader && <span className={`chip loader-${m.loader}`}>{m.loader}</span>}
+                    {m.library && <span className="chip lib">library</span>}
                   </div>
                   {m.description && <p className="mod-desc">{m.description}</p>}
                   <div className="mod-meta">
@@ -160,6 +273,9 @@ export function ModsView({
                       {m.file}
                     </span>
                     <span>{formatBytes(m.size_bytes)}</span>
+                    {sort === "newest" && (
+                      <span>added {timeAgo(new Date(m.modified * 1000).toISOString())}</span>
+                    )}
                   </div>
                 </div>
                 <div className="mod-actions">

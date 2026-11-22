@@ -55,11 +55,39 @@ export interface Pack {
   is_dir: boolean;
 }
 
-export interface PacksOverview {
-  shared_path: string;
-  shared: Pack[];
-  linked_installations: string[];
-  local: { installation: string; packs: Pack[] }[];
+export interface PackInfo {
+  file: string;
+  path: string;
+  description: string | null;
+  icon: string | null;
+  format: number | null;
+  is_dir: boolean;
+  size_bytes: number;
+  modified: number;
+}
+
+export interface PackList {
+  dir: string;
+  /** the folder is a link to the shared one */
+  linked: boolean;
+  /** turned-on packs, top (winning) one first */
+  enabled: string[];
+  packs: PackInfo[];
+}
+
+export interface ConfigFile {
+  /** relative to config/ */
+  rel: string;
+  path: string;
+  size_bytes: number;
+  modified: number;
+}
+
+export interface ConfigOverview {
+  dir: string;
+  files: ConfigFile[];
+  /** top-level things in the game folder Minecraft itself doesn't make */
+  loose: FolderItem[];
 }
 
 export interface LogEntry {
@@ -150,6 +178,9 @@ export interface Mod {
   loader: string | null;
   icon: string | null;
   size_bytes: number;
+  /** unix seconds */
+  modified: number;
+  library: boolean;
 }
 
 export interface Screenshot {
@@ -190,10 +221,37 @@ export interface ProfilesOverview {
   backups: string;
 }
 
+/** What a pasted Modrinth/CurseForge link points at. */
+export interface LinkInfo {
+  /** "mod", "modpack", "resourcepack", "shader", … or "collection" */
+  kind: string;
+  title: string;
+  icon: string | null;
+  projects: string[];
+  game_versions: string[];
+  loaders: string[];
+  note: string | null;
+}
+
+export interface ImportReport {
+  title: string;
+  added: string[];
+  skipped: string[];
+}
+
+/** "Added 3 from Sodium" — the skipped ones are listed separately. */
+export const reportSummary = (r: ImportReport, verb = "Added") =>
+  r.added.length === 0 && r.skipped.length === 0
+    ? "Nothing to do — all up to date"
+    : `${verb} ${r.added.length}${r.title ? ` from ${r.title}` : ""}` +
+      (r.skipped.length ? ` · ${r.skipped.length} skipped` : "");
+
+export type Loader = "vanilla" | "fabric" | "forge" | "neoforge";
+
 export interface InstallSpec {
   name: string;
   game_version: string;
-  fabric: boolean;
+  loader: Loader;
   loader_version: string | null;
   standards: string[];
 }
@@ -201,8 +259,8 @@ export interface InstallSpec {
 export const api = {
   listInstallations: () => invoke<Installation[]>("list_installations"),
   listGameVersions: () => invoke<GameVersion[]>("list_game_versions"),
-  listLoaderVersions: (gameVersion: string) =>
-    invoke<LoaderVersion[]>("list_loader_versions", { gameVersion }),
+  listLoaderVersions: (loader: Loader, gameVersion: string) =>
+    invoke<LoaderVersion[]>("list_loader_versions", { loader, gameVersion }),
   createInstallation: (spec: InstallSpec) =>
     invoke<void>("create_installation", { spec }),
   linkInstallation: (name: string) =>
@@ -219,7 +277,15 @@ export const api = {
     invoke<void>("unlink_standard", { name, installation, keep }),
   setCustomIcon: (name: string, imagePath: string) =>
     invoke<string>("set_custom_icon", { name, imagePath }),
-  listResourcepacks: () => invoke<PacksOverview>("list_resourcepacks"),
+  listPacks: (installation: string | null) => invoke<PackList>("list_packs", { installation }),
+  /** top (winning) pack first */
+  setPacks: (installation: string | null, enabled: string[]) =>
+    invoke<void>("set_packs", { installation, enabled }),
+  addPacks: (installation: string | null, files: string[]) =>
+    invoke<number>("add_packs", { installation, files }),
+  listConfig: (installation: string | null) => invoke<ConfigOverview>("list_config", { installation }),
+  readConfig: (path: string) => invoke<string>("read_config", { path }),
+  writeConfig: (path: string, text: string) => invoke<void>("write_config", { path, text }),
   deleteInstallation: (name: string, removeProfile: boolean) =>
     invoke<void>("delete_installation", { name, removeProfile }),
   revealPath: (path: string, select = true) =>
@@ -246,6 +312,11 @@ export const api = {
   toggleMod: (path: string) => invoke<string>("toggle_mod", { path }),
   addMods: (installation: string | null, files: string[]) =>
     invoke<number>("add_mods", { installation, files }),
+  resolveLink: (link: string) => invoke<LinkInfo>("resolve_link", { link }),
+  /** mod, collection or modpack links, matched to the installation's version and loader */
+  importLinks: (links: string[], installation: string) =>
+    invoke<ImportReport>("import_links", { links, installation }),
+  updateMods: (installation: string) => invoke<ImportReport>("update_mods", { installation }),
   listScreenshots: () => invoke<Screenshot[]>("list_screenshots"),
   listLogs: (installation: string | null = null) =>
     invoke<LogEntry[]>("list_logs", { installation }),
@@ -263,6 +334,9 @@ export const api = {
   archiveProfile: (id: string) => invoke<void>("archive_profile", { id }),
   restoreProfile: (id: string) => invoke<void>("restore_profile", { id }),
 };
+
+/** Links pasted together, split on spaces, commas or new lines. */
+export const splitLinks = (text: string) => text.split(/[\s,]+/).filter(Boolean);
 
 export function formatBytes(n: number): string {
   if (n < 1024) return `${n} B`;
