@@ -3600,7 +3600,7 @@ mod tests {
 
         // clear the way (a symlink, so replace just removes it — no Trash in tests)
         fs::remove_file(inst.join("options.txt")).unwrap();
-        symlink("/nowhere", inst.join("options.txt")).unwrap();
+        symlink("missing-options.txt", inst.join("options.txt")).unwrap();
         link_entries(&inst, &pairs, true).unwrap();
         fs::write(std.join("options.txt"), "fov:70").unwrap(); // live edit
         assert_eq!(fs::read_to_string(inst.join("options.txt")).unwrap(), "fov:70");
