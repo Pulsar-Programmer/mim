@@ -81,6 +81,8 @@ export interface ConfigFile {
   path: string;
   size_bytes: number;
   modified: number;
+  /** the standard its top-level entry in config/ is linked from */
+  linked: string | null;
 }
 
 export interface ConfigOverview {
@@ -286,6 +288,10 @@ export const api = {
   listConfig: (installation: string | null) => invoke<ConfigOverview>("list_config", { installation }),
   readConfig: (path: string) => invoke<string>("read_config", { path }),
   writeConfig: (path: string, text: string) => invoke<void>("write_config", { path, text }),
+  /** Moves config/ entries into a standard and links them back. Returns the ones the
+   * standard already has; when non-empty and !replace, nothing changed. */
+  shareConfig: (installation: string, standard: string, names: string[], replace: boolean) =>
+    invoke<string[]>("share_config", { installation, standard, names, replace }),
   deleteInstallation: (name: string, removeProfile: boolean) =>
     invoke<void>("delete_installation", { name, removeProfile }),
   revealPath: (path: string, select = true) =>

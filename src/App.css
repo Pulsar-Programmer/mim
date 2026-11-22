@@ -2826,8 +2826,13 @@ kbd {
 }
 
 .std-ask p {
-  margin-bottom: 8px;
+  margin-bottom: 10px;
 }
+
+/* plenty of room: buttons stay one line, wrap as a row only when narrow */
+.std-ask .row-inline { flex-wrap: wrap; gap: 8px; }
+.std-ask .btn { white-space: nowrap; width: auto; }
+.std-ask .btn.ghost { margin-left: auto; }
 
 /* ---- sidebar collapse: shrink to nothing (no stray edge at any zoom) ---- */
 
@@ -3239,6 +3244,204 @@ select.sort {
   gap: 10px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.cfg-head-end { display: flex; align-items: center; gap: 10px; flex-shrink: 0; }
+
+/* ---- sharing configs through a standard ---- */
+
+.cfg-share-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 10px;
+  font-family: var(--body);
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+}
+
+.cfg-share-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.chip.cfg-linked {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.cfg-linked-note {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--accent);
+}
+
+.cfg-row { position: relative; }
+
+.cfg-row-share {
+  position: absolute;
+  right: 64px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 6px;
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+
+.cfg-row:hover .cfg-row-share { opacity: 1; }
+.cfg-row-share:hover { color: var(--accent); background: var(--accent-soft); }
+
+.share-dialog {
+  margin: auto;
+  width: min(540px, 92vw);
+  max-height: 86vh;
+  padding: 0;
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: 0 24px 60px rgba(33, 30, 22, 0.22);
+  animation: share-in 0.16s ease-out;
+}
+
+.share-dialog::backdrop {
+  background: rgba(33, 30, 22, 0.28);
+  backdrop-filter: blur(3px);
+  -webkit-backdrop-filter: blur(3px);
+}
+
+@keyframes share-in {
+  from { transform: translateY(8px) scale(0.98); opacity: 0; }
+}
+
+.share-body { padding: 22px 24px 18px; }
+
+.share-head {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  margin-bottom: 20px;
+}
+
+.share-head h2 { font-size: 18px; margin-bottom: 4px; }
+
+.cfg-icon.big {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  color: var(--accent);
+  background-color: var(--accent-soft);
+}
+
+.cfg-icon.big svg { width: 18px; height: 18px; }
+
+.share-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.share-label .linklike { font-size: 12px; text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+.share-files {
+  display: flex;
+  flex-direction: column;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-bottom: 20px;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.share-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+}
+
+.share-file + .share-file { border-top: 1px solid var(--line); }
+.share-file:hover { background: var(--panel); }
+.share-file.done { cursor: default; color: var(--muted); }
+.share-file input { accent-color: var(--accent); }
+
+.share-rel {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.share-stds { margin-bottom: 18px; }
+
+.share-new .ava {
+  background: var(--chip);
+  color: var(--muted);
+  font-family: var(--body);
+  font-size: 16px;
+}
+
+.place.share-new { gap: 9px; }
+.place.toggle.share-new .ava { filter: none; opacity: 1; }
+
+.share-name {
+  width: 140px;
+  padding: 0;
+  font-family: var(--body);
+  font-size: 13px;
+  border: none !important;
+  background: none !important;
+  box-shadow: none !important;
+  outline: none;
+}
+
+.share-note {
+  margin: -4px 0 16px;
+  padding: 9px 12px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: #8a6418;
+  background: #f6ecd2;
+  border-radius: 8px;
+}
+
+.share-note code + code::before { content: ", "; }
+
+.share-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
 }
 
 .cfg-head .count,

@@ -733,6 +733,65 @@ fn read_links(dir: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A standard's config/ is linked into an installation's config/ file by file,
+/// so it can share single mod settings and leave everything else alone.
+const MERGED: &str = "config";
+
+fn push_entry(entries: &mut Vec<StandardEntry>, rel: String, scope: &str, name: String, path: &Path) {
+    if name == MERGED && path.is_dir() {
+        let mut files = vec![];
+        walk_files(path, &mut files);
+        files.sort();
+        for f in files {
+            let r = f.strip_prefix(path).unwrap_or(&f).to_string_lossy().to_string();
+            if valid_rel(&r) {
+                entries.push(StandardEntry {
+                    rel_path: format!("{rel}/{r}"),
+                    scope: scope.into(),
+                    is_dir: false,
+                    name: format!("{MERGED}/{r}"),
+                });
+            }
+        }
+    } else {
+        entries.push(StandardEntry { rel_path: rel, scope: scope.into(), is_dir: path.is_dir(), name });
+    }
+}
+
+/// "fabric/indigo.properties": plain names joined by '/', nothing hidden, no "..".
+fn valid_rel(r: &str) -> bool {
+    !r.is_empty() && r.split('/').all(valid_name)
+}
+
+/// "options.txt", or any file under config/ like "config/fabric/indigo.properties".
+fn valid_dest(d: &str) -> bool {
+    valid_name(d) || d.strip_prefix("config/").is_some_and(valid_rel)
+}
+
+/// Symlinks anywhere under `dir`, without following them.
+fn links_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        match e.file_type() {
+            Ok(t) if t.is_symlink() => out.push(e.path()),
+            Ok(t) if t.is_dir() => links_under(&e.path(), out),
+            _ => {}
+        }
+    }
+}
+
+/// The first symlinked folder on the way from `inst` down to `dest`.
+fn linked_ancestor(inst: &Path, dest: &Path) -> Option<PathBuf> {
+    let rel: Vec<_> = dest.strip_prefix(inst).ok()?.iter().collect();
+    let mut p = inst.to_path_buf();
+    for c in &rel[..rel.len().saturating_sub(1)] {
+        p.push(c);
+        if p.is_symlink() {
+            return Some(p);
+        }
+    }
+    None
+}
+
 #[tauri::command(async)]
 fn list_standards() -> CmdResult<Vec<Standard>> {
     let names = installation_names();
@@ -771,21 +830,11 @@ fn list_standards() -> CmdResult<Vec<Standard>> {
             if path.is_dir() && is_version_name(&name) {
                 // version-scoped group: list its children
                 for (cname, cpath) in visible_children(&path) {
-                    entries.push(StandardEntry {
-                        rel_path: format!("{std_name}/{name}/{cname}"),
-                        scope: name.clone(),
-                        is_dir: cpath.is_dir(),
-                        name: cname,
-                    });
+                    push_entry(&mut entries, format!("{std_name}/{name}/{cname}"), &name, cname, &cpath);
                 }
             } else if !is_image(&name, &path) {
                 // top-level pictures are the standard's images, not game files
-                entries.push(StandardEntry {
-                    rel_path: format!("{std_name}/{name}"),
-                    scope: "global".into(),
-                    is_dir: path.is_dir(),
-                    name,
-                });
+                push_entry(&mut entries, format!("{std_name}/{name}"), "global", name, &path);
             }
         }
         entries.sort_by(|a, b| (&a.scope, &a.name).cmp(&(&b.scope, &b.name)));
@@ -867,7 +916,7 @@ fn standard_dest(rel: &str) -> Option<&str> {
 /// Where an entry lives and its name inside an installation.
 fn entry_src(rel: &str) -> CmdResult<(PathBuf, String)> {
     let dest = match standard_dest(rel) {
-        Some(d) if !rel.contains("..") && valid_name(d) => d.to_string(),
+        Some(d) if !rel.contains("..") && valid_dest(d) => d.to_string(),
         _ => return Err("invalid standards path".into()),
     };
     if rel.split_once('/').map(|(s, _)| s) == Some(SHARED) {
@@ -896,11 +945,11 @@ fn links_of(inst: &Path, std: &str) -> Vec<PathBuf> {
             .collect()
     } else {
         let dir = standards_dir().join(std);
-        visible_children(inst)
-            .into_iter()
-            .map(|(_, p)| p)
-            .filter(|p| points_into(p, &dir))
-            .collect()
+        let mut all: Vec<PathBuf> = visible_children(inst).into_iter().map(|(_, p)| p).collect();
+        if !inst.join(MERGED).is_symlink() {
+            links_under(&inst.join(MERGED), &mut all);
+        }
+        all.into_iter().filter(|p| points_into(p, &dir)).collect()
     }
 }
 
@@ -912,6 +961,18 @@ fn link_entries(inst: &Path, pairs: &[(PathBuf, String)], replace: bool) -> CmdR
     let mut blocked = vec![];
     for (src, name) in pairs {
         let dest = inst.join(name);
+        if let Some(a) = linked_ancestor(inst, &dest) {
+            // a folder on the way (like config/) is a link. One to the matching
+            // folder here is how whole folders used to be linked: swap it for
+            // per-file links quietly. Anything else is in the way.
+            let depth = dest.strip_prefix(&a).map_or(0, |r| r.iter().count());
+            let a_name = a.strip_prefix(inst).unwrap_or(&a).to_string_lossy().to_string();
+            if !src.ancestors().nth(depth).is_some_and(|s| links_to(&a, s)) && !blocked.contains(&a_name) {
+                blocked.push(a_name);
+            }
+            todo.push((src, dest));
+            continue;
+        }
         if links_to(&dest, src) {
             continue; // already linked
         }
@@ -924,6 +985,10 @@ fn link_entries(inst: &Path, pairs: &[(PathBuf, String)], replace: bool) -> CmdR
         return Ok(blocked);
     }
     for (src, dest) in todo {
+        if let Some(a) = linked_ancestor(inst, &dest) {
+            fs::remove_file(a).map_err(err)?; // just a link, nothing lost
+        }
+        fs::create_dir_all(dest.parent().unwrap()).map_err(err)?;
         if dest.is_symlink() {
             fs::remove_file(&dest).map_err(err)?; // just a link, nothing lost
         } else if dest.exists() {
@@ -981,6 +1046,55 @@ fn unlink_standard(name: String, installation: String, keep: bool) -> CmdResult<
         write_links(&std, &v)?;
     }
     detach(&links_of(&inst, &name), keep)
+}
+
+/// Moves files from an installation's config/ (`names` relative to it, like
+/// "fabric/indigo.properties") into standard `standard` and links them back,
+/// so every installation linked to it shares them. Where the standard already
+/// has one, that copy wins: returns those names and changes nothing unless
+/// `replace`, which sends the installation's own to the Trash.
+#[tauri::command(async)]
+fn share_config(installation: String, standard: String, names: Vec<String>, replace: bool) -> CmdResult<Vec<String>> {
+    let std = standard_dir(&standard)?;
+    let blocked = share_config_in(&game_dir(Some(&installation))?, &std, &names, replace)?;
+    if blocked.is_empty() || replace {
+        add_link(&std, &installation)?;
+    }
+    Ok(blocked)
+}
+
+fn share_config_in(inst: &Path, std: &Path, names: &[String], replace: bool) -> CmdResult<Vec<String>> {
+    let (cfg, shared) = (inst.join(MERGED), std.join(MERGED));
+    let mut pairs = vec![];
+    let mut blocked = vec![];
+    for n in names {
+        let (own, dst) = (cfg.join(n), shared.join(n));
+        if !valid_rel(n) || !own.is_file() {
+            return Err(format!("no config/{n} here"));
+        }
+        if linked_ancestor(inst, &own).is_some() {
+            return Err(format!("config/{n} is inside a linked folder — relink it under Standards first"));
+        }
+        if own.is_symlink() && !links_to(&own, &dst) {
+            return Err(format!("config/{n} is already linked from somewhere else"));
+        }
+        if dst.symlink_metadata().is_ok() && !links_to(&own, &dst) {
+            blocked.push(n.clone());
+        }
+        pairs.push((own, dst, format!("{MERGED}/{n}")));
+    }
+    if !blocked.is_empty() && !replace {
+        return Ok(blocked);
+    }
+    for (own, dst, _) in &pairs {
+        if dst.symlink_metadata().is_err() {
+            fs::create_dir_all(dst.parent().unwrap()).map_err(err)?;
+            fs::rename(own, dst).map_err(err)?; // same disk, so a plain move
+        }
+    }
+    let pairs: Vec<_> = pairs.into_iter().map(|(_, dst, name)| (dst, name)).collect();
+    link_entries(inst, &pairs, true)?;
+    Ok(blocked)
 }
 
 #[tauri::command(async)]
@@ -1180,6 +1294,8 @@ struct ConfigFile {
     path: String,
     size_bytes: u64,
     modified: u64,
+    /// the standard its top-level entry in config/ is linked from
+    linked: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -1204,6 +1320,7 @@ fn list_config(installation: Option<String>) -> CmdResult<ConfigOverview> {
     let dir = game.join("config");
     let mut paths = vec![];
     walk_files(&dir, &mut paths);
+    let stds = fs::canonicalize(standards_dir()).ok();
     let mut files: Vec<ConfigFile> = paths
         .iter()
         .map(|p| ConfigFile {
@@ -1211,6 +1328,9 @@ fn list_config(installation: Option<String>) -> CmdResult<ConfigOverview> {
             path: p.to_string_lossy().into(),
             size_bytes: fs::metadata(p).map(|m| m.len()).unwrap_or(0),
             modified: modified_secs(p),
+            linked: stds.as_ref().and_then(|s| {
+                Some(fs::canonicalize(p).ok()?.strip_prefix(s).ok()?.iter().next()?.to_string_lossy().into())
+            }),
         })
         .collect();
     files.sort_by_key(|f| f.rel.to_lowercase());
@@ -3431,6 +3551,63 @@ mod tests {
         fs::remove_dir_all(&root).unwrap();
     }
 
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
+    fn share_config_links_single_mods() {
+        let root = std::env::temp_dir().join(format!("mim-cfg-{}", uuid::Uuid::new_v4()));
+        let (std, a, b) = (root.join("standards/PvP"), root.join("a"), root.join("b"));
+        for (inst, v) in [(&a, "a"), (&b, "b")] {
+            fs::create_dir_all(inst.join("config/fabric")).unwrap();
+            fs::write(inst.join("config/sodium.json"), v).unwrap();
+            fs::write(inst.join("config/fabric/x.toml"), v).unwrap();
+        }
+        let sodium = vec!["sodium.json".to_string()];
+
+        // a shares sodium: moved into the standard, linked back, the rest untouched
+        assert!(share_config_in(&a, &std, &sodium, false).unwrap().is_empty());
+        assert!(links_to(&a.join("config/sodium.json"), &std.join("config/sodium.json")));
+        assert_eq!(fs::read_to_string(a.join("config/sodium.json")).unwrap(), "a");
+        assert!(!a.join("config/fabric").is_symlink());
+        assert!(share_config_in(&a, &std, &sodium, false).unwrap().is_empty()); // idempotent
+
+        // b has its own: reported, nothing touched
+        assert_eq!(share_config_in(&b, &std, &sodium, false).unwrap(), ["sodium.json"]);
+        assert_eq!(fs::read_to_string(b.join("config/sodium.json")).unwrap(), "b");
+        assert_eq!(fs::read_to_string(std.join("config/sodium.json")).unwrap(), "a");
+
+        // linking the standard into a fresh install makes config/ and links one file
+        let c = root.join("c");
+        fs::create_dir_all(&c).unwrap();
+        let pairs = vec![(std.join("config/sodium.json"), "config/sodium.json".to_string())];
+        link_entries(&c, &pairs, false).unwrap();
+        assert!(!c.join("config").is_symlink() && c.join("config/sodium.json").is_symlink());
+
+        // the old way, all of config/ linked: quietly becomes per-file links
+        let d = root.join("d");
+        fs::create_dir_all(&d).unwrap();
+        std::os::unix::fs::symlink(std.join("config"), d.join("config")).unwrap();
+        assert!(link_entries(&d, &pairs, false).unwrap().is_empty());
+        assert!(!d.join("config").is_symlink() && d.join("config/sodium.json").is_symlink());
+        assert!(std.join("config/sodium.json").is_file());
+
+        // one file deep in a folder: only that file is linked, its siblings stay put
+        fs::write(a.join("config/fabric/y.toml"), "own").unwrap();
+        assert!(share_config_in(&a, &std, &["fabric/x.toml".into()], false).unwrap().is_empty());
+        assert!(!a.join("config/fabric").is_symlink());
+        assert!(links_to(&a.join("config/fabric/x.toml"), &std.join("config/fabric/x.toml")));
+        assert!(a.join("config/fabric/y.toml").is_file() && !std.join("config/fabric/y.toml").exists());
+        let mut found = vec![];
+        links_under(&a.join("config"), &mut found);
+        assert_eq!(found.len(), 2);
+        let deep = vec![(std.join("config/fabric/x.toml"), "config/fabric/x.toml".to_string())];
+        assert!(link_entries(&c, &deep, false).unwrap().is_empty());
+        assert!(c.join("config/fabric/x.toml").is_symlink());
+
+        assert!(share_config_in(&a, &std, &["../x".into()], false).is_err());
+        assert!(valid_dest("config/a/b.json") && !valid_dest("config/../b") && !valid_dest("mods/x"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn thumbnails_shrink_and_cache() {
         let root = std::env::temp_dir().join(format!("mim-thumb-{}", uuid::Uuid::new_v4()));
@@ -3938,6 +4115,7 @@ pub fn run() {
             delete_standard,
             link_standard,
             unlink_standard,
+            share_config,
             set_custom_icon,
             delete_installation,
             reveal_path,
