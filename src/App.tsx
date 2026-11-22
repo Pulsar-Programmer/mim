@@ -30,6 +30,8 @@ import { ProgressBar, useProgress } from "./Progress";
 import { PacksView } from "./PacksView";
 import { UpdateButton } from "./UpdateButton";
 import { ConfigView } from "./ConfigView";
+import { LinkEditor } from "./LinkEditor";
+import { LinksDrawer } from "./LinksDrawer";
 import { Settings, applySettings, brief, loadSettings, saveSettings } from "./settings";
 import "./App.css";
 
@@ -203,6 +205,7 @@ function App() {
             refresh={refresh}
             notify={notify}
             onNew={() => setView("new")}
+            onStandards={() => setView("standards")}
           />
         )}
         {view === "new" && (
@@ -224,6 +227,7 @@ function App() {
             notify={notify}
             root={mcDir?.path ?? ""}
             go={(v: View) => setView(v)}
+            installations={installations}
           />
         )}
         {view === "saves" && <SavesView notify={notify} installations={installations} />}
@@ -255,13 +259,18 @@ function InstallationsView({
   refresh,
   notify,
   onNew,
+  onStandards,
 }: {
   installations: Installation[];
   refresh: () => void;
   notify: (m: string) => void;
   onNew: () => void;
+  onStandards: () => void;
 }) {
   const [confirming, setConfirming] = useState<string | null>(null);
+  const [standards = [], loadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [linking, setLinking] = useState<string | null>(null);
+  const linkingInst = installations.find((i) => i.name === linking);
 
   async function pickImage(inst: Installation) {
     const path = await openDialog({
@@ -288,20 +297,6 @@ function InstallationsView({
     try {
       await api.deleteInstallation(inst.name, true);
       notify(`Moved "${inst.name}" to Trash`);
-      refresh();
-    } catch (e) {
-      notify(String(e));
-    }
-  }
-
-  async function link(inst: Installation) {
-    try {
-      const [linked, skipped] = await api.linkInstallation(inst.name);
-      notify(
-        linked.length
-          ? `Linked ${linked.join(", ")}${skipped.length ? ` · kept local: ${skipped.join(", ")}` : ""}`
-          : brief("Nothing to link — folders already exist")
-      );
       refresh();
     } catch (e) {
       notify(String(e));
@@ -350,7 +345,7 @@ function InstallationsView({
                 {inst.mods_count > 0 && <span>{inst.mods_count} mods</span>}
                 <span>{timeAgo(inst.last_used)}</span>
               </div>
-              <div className="card-links" title="shared folders symlinked">
+              <button className="card-links" title="Links…" onClick={() => setLinking(inst.name)}>
                 {["resourcepacks", "saves", "screenshots"].map((d) => (
                   <span
                     key={d}
@@ -359,13 +354,19 @@ function InstallationsView({
                     {d.replace("resourcepacks", "packs")}
                   </span>
                 ))}
-              </div>
+                {(() => {
+                  const own = standards.filter((s) => !s.builtin && s.installations.includes(inst.name));
+                  return own.length > 0 && (
+                    <span className="dot linked std" title={own.map((s) => s.name).join(", ")}>
+                      {own.length === 1 ? own[0].name : `${own.length} standards`}
+                    </span>
+                  );
+                })()}
+              </button>
               <div className="card-actions">
                 <button onClick={() => api.revealPath(inst.path, false)}>Open</button>
                 <button onClick={() => pickImage(inst)}>Image</button>
-                {inst.linked.length < 3 && (
-                  <button onClick={() => link(inst)}>Link</button>
-                )}
+                <button onClick={() => setLinking(inst.name)}>Links</button>
                 <button className="danger" onClick={() => remove(inst)}>
                   {confirming === inst.name ? "Sure?" : "Delete"}
                 </button>
@@ -379,6 +380,20 @@ function InstallationsView({
           </div>
         )}
       </div>
+
+      {linkingInst && (
+        <LinksDrawer
+          inst={linkingInst}
+          standards={standards}
+          notify={notify}
+          onChanged={() => {
+            loadStandards();
+            refresh();
+          }}
+          onClose={() => setLinking(null)}
+          onManage={onStandards}
+        />
+      )}
     </>
   );
 }
@@ -824,49 +839,14 @@ function StandardsView({
   const [standards = [], load] = useCached<Standard[]>("standards", api.listStandards, notify);
   const [newName, setNewName] = useState("");
   const { armed, confirm } = useConfirm(notify, load);
-  // a link or unlink waiting on the user's answer
-  const [ask, setAsk] = useState<
-    | { kind: "blocked"; std: string; inst: string; items: string[] }
-    | { kind: "unlink"; std: string; inst: string }
-    | null
-  >(null);
+  // the link editor, open for one standard and installation
+  const [editing, setEditing] = useState<{ s: Standard; i: Installation } | null>(null);
 
   async function create() {
     if (!newName.trim()) return;
     try {
       await api.createStandard(newName);
       setNewName("");
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
-  }
-
-  async function link(s: Standard, inst: string, replace = false) {
-    const v = installations.find((i) => i.name === inst)?.game_version ?? null;
-    const rels = entriesFor(s, v).map((e) => e.rel_path);
-    try {
-      const inWay = await api.linkStandard(s.name, inst, rels, replace);
-      if (inWay.length && !replace) {
-        setAsk({ kind: "blocked", std: s.name, inst, items: inWay });
-        return;
-      }
-      setAsk(null);
-      notify(
-        `Linked "${s.name}" into ${inst}` +
-          (inWay.length ? ` · moved ${inWay.join(", ")} to Trash` : "")
-      );
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
-  }
-
-  async function unlink(s: Standard, inst: string, keep: boolean) {
-    try {
-      await api.unlinkStandard(s.name, inst, keep);
-      setAsk(null);
-      notify(keep ? brief(`Unlinked ${inst} — it keeps a copy`) : `Unlinked ${inst} and removed its links`);
       load();
     } catch (e) {
       notify(String(e));
@@ -884,14 +864,6 @@ function StandardsView({
     await api.revealPath(path, false);
     load();
   }
-
-  const list = (items: string[]) =>
-    items.map((n, k) => (
-      <span key={n}>
-        {k > 0 && ", "}
-        <code>{n}</code>
-      </span>
-    ));
 
   return (
     <>
@@ -972,72 +944,40 @@ function StandardsView({
           <div className="std-label">Linked installations</div>
           <div className="places">
             {installations.map((i) => {
-              const on = s.installations.includes(i.name);
-              const want = entriesFor(s, i.game_version).length;
-              // a new file in the standard, or something replaced a link with a real file
-              const stale = on && (s.live[i.name] ?? 0) < want;
+              const rels = entriesFor(s, i.game_version).map((e) => e.rel_path);
+              const want = rels.length;
+              const n = rels.filter((r) => s.linked[i.name]?.includes(r)).length;
               return (
                 <PlaceChip
                   key={i.name}
-                  className="toggle"
+                  className={`toggle ${n > 0 && n < want ? "partial" : ""}`}
                   place={{
                     key: i.name,
                     label: i.name,
                     inst: i,
-                    sub: stale ? `↻ ${s.live[i.name] ?? 0} of ${want} linked` : on ? "linked" : "not linked",
+                    sub: n === 0 ? "not linked" : n < want ? `${n} of ${want} linked` : "linked",
                   }}
-                  active={on}
-                  title={stale ? brief("Some files aren't linked — click to relink") : on ? "Unlink…" : "Link"}
-                  onClick={() =>
-                    stale || !on
-                      ? link(s, i.name)
-                      : setAsk({ kind: "unlink", std: s.name, inst: i.name })
-                  }
+                  active={n > 0}
+                  title="Choose what's linked…"
+                  onClick={() => setEditing({ s, i })}
                 />
               );
             })}
             {installations.length === 0 && <span className="hint">No installations yet.</span>}
           </div>
 
-          {ask?.std === s.name && ask.kind === "blocked" && (
-            <div className="std-ask warn">
-              <p>
-                <b>{ask.inst}</b> already has {list(ask.items)}. To link "{s.name}",{" "}
-                {ask.items.length === 1 ? "it has" : "they have"} to be removed — MIM moves{" "}
-                {ask.items.length === 1 ? "it" : "them"} to the Trash.
-              </p>
-              <div className="row-inline">
-                <button className="btn small danger" onClick={() => link(s, ask.inst, true)}>
-                  Move to Trash &amp; link
-                </button>
-                <button className="btn small" onClick={() => setAsk(null)}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-          {ask?.std === s.name && ask.kind === "unlink" && (
-            <div className="std-ask">
-              <p>
-                Unlink <b>{ask.inst}</b> from "{s.name}"? Do you want to remove the files from{" "}
-                {ask.inst}, or keep a copy of them there? Nothing in "{s.name}" is deleted either
-                way.
-              </p>
-              <div className="row-inline">
-                <button className="btn small" onClick={() => unlink(s, ask.inst, true)}>
-                  Keep a copy
-                </button>
-                <button className="btn small danger" onClick={() => unlink(s, ask.inst, false)}>
-                  Remove the files
-                </button>
-                <button className="btn small ghost" onClick={() => setAsk(null)}>
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
         </section>
       ))}
+
+      {editing && (
+        <LinkEditor
+          std={editing.s}
+          inst={editing.i}
+          notify={notify}
+          onClose={() => setEditing(null)}
+          onDone={load}
+        />
+      )}
     </>
   );
 }
@@ -1133,7 +1073,8 @@ const LOADER_NAMES: Record<Loader, string> = {
 
 const purgeLogs = async (installation: string | null = null) =>
   `Moved ${await api.purgeLogs(installation)} log items to Trash`;
-const purgeCache = async () => `Moved ${await api.purgeCache()} cache items to Trash`;
+const purgeCache = async (installation: string | null = null) =>
+  `Moved ${await api.purgeCache(installation)} cache items to Trash`;
 
 const CATEGORIES: [FolderCategory, string, string][] = [
   ["logs", "Logs", "Text records of what the game and launcher did. Useful for debugging crashes, safe to delete."],
@@ -1189,12 +1130,20 @@ function FolderView({
   notify,
   root,
   go,
+  installations,
 }: {
   notify: (m: string) => void;
   root: string;
   go: (v: View) => void;
+  installations: Installation[];
 }) {
-  const [items, load] = useCached<FolderItem[]>("folder", api.folderOverview, notify);
+  const [scope, setScope] = useState<string | null>(null);
+  const [items, load] = useCached<FolderItem[]>(
+    `folder:${scope}`,
+    () => api.folderOverview(scope),
+    notify
+  );
+  const dir = installations.find((i) => i.name === scope)?.path ?? root;
   const { armed, confirm } = useConfirm(notify, load);
   const [open, setOpen] = useState<Set<FolderCategory>>(new Set());
 
@@ -1230,10 +1179,19 @@ function FolderView({
             {items ? `${items.length} items · ${formatBytes(total)}` : "measuring…"}
           </p>
         </div>
-        <button className="btn" onClick={() => api.revealPath(root, false)} disabled={!root}>
+        <button className="btn" onClick={() => api.revealPath(dir, false)} disabled={!dir}>
           Open Folder
         </button>
       </header>
+
+      <PlacePicker
+        places={[
+          { key: "", label: "Minecraft folder", kind: "root", sub: "launcher & shared files" },
+          ...installations.map((i) => ({ key: i.name, label: i.name, inst: i, sub: "game folder" })),
+        ]}
+        value={scope ?? ""}
+        onChange={(k) => setScope(k || null)}
+      />
 
       {total > 0 && (
         <div className="size-map">
@@ -1290,18 +1248,18 @@ function FolderView({
                   </button>
                   <button
                     className="btn small danger"
-                    onClick={act(() => confirm("logs", () => purgeLogs()))}
+                    onClick={act(() => confirm(`logs:${scope}`, () => purgeLogs(scope)))}
                   >
-                    {armed === "logs" ? "Sure?" : "Purge"}
+                    {armed === `logs:${scope}` ? "Sure?" : "Purge"}
                   </button>
                 </div>
               )}
               {cat === "cache" && (
                 <button
                   className="btn small danger"
-                  onClick={act(() => confirm("cache", purgeCache))}
+                  onClick={act(() => confirm(`cache:${scope}`, () => purgeCache(scope)))}
                 >
-                  {armed === "cache" ? "Sure?" : "Purge"}
+                  {armed === `cache:${scope}` ? "Sure?" : "Purge"}
                 </button>
               )}
               {cat === "yours" && (

@@ -38,11 +38,19 @@ export interface Standard {
   /** the Minecraft folder's own shared folders (saves, packs, screenshots) */
   builtin: boolean;
   installations: string[];
-  /** installation -> number of its items that are live links into this standard */
-  live: Record<string, number>;
+  /** installation -> the entries (rel_path) that are live links in it */
+  linked: Record<string, string[]>;
   entries: StandardEntry[];
   /** image files at the standard's top level */
   images: string[];
+}
+
+export interface LinkState {
+  /** free: nothing there yet · own: the installation's own copy (linking trashes it) ·
+   * other: a link to somewhere else */
+  state: "linked" | "free" | "own" | "other";
+  /** for "other": the standard it's linked from */
+  from: string | null;
 }
 
 /** Entries that apply to a game version: global ones plus that version's folder. */
@@ -265,8 +273,10 @@ export const api = {
     invoke<LoaderVersion[]>("list_loader_versions", { loader, gameVersion }),
   createInstallation: (spec: InstallSpec) =>
     invoke<void>("create_installation", { spec }),
-  linkInstallation: (name: string) =>
-    invoke<[string[], string[]]>("link_installation", { name }),
+  /** Moves an installation's own saves/packs/screenshots into the Shared ones and
+   * links them. Returns what was renamed to keep both. */
+  mergeShared: (installation: string, folders: string[]) =>
+    invoke<string[]>("merge_shared", { installation, folders }),
   listStandards: () => invoke<Standard[]>("list_standards"),
   ensureStandardsDir: () => invoke<string>("ensure_standards_dir"),
   createStandard: (name: string) => invoke<string>("create_standard", { name }),
@@ -274,9 +284,13 @@ export const api = {
   /** Returns what's in the way; when non-empty and !replace, nothing was linked. */
   linkStandard: (name: string, installation: string, relPaths: string[], replace: boolean) =>
     invoke<string[]>("link_standard", { name, installation, relPaths, replace }),
-  /** keep: leave the installation a real copy instead of removing the files */
-  unlinkStandard: (name: string, installation: string, keep: boolean) =>
-    invoke<void>("unlink_standard", { name, installation, keep }),
+  /** keep: leave the installation a real copy instead of removing the files.
+   * relPaths: just those entries, otherwise all of it */
+  unlinkStandard: (name: string, installation: string, keep: boolean, relPaths?: string[]) =>
+    invoke<void>("unlink_standard", { name, installation, keep, relPaths }),
+  /** how each entry stands in the installation, in the order asked */
+  linkStates: (name: string, installation: string, relPaths: string[]) =>
+    invoke<LinkState[]>("link_states", { name, installation, relPaths }),
   setCustomIcon: (name: string, imagePath: string) =>
     invoke<string>("set_custom_icon", { name, imagePath }),
   listPacks: (installation: string | null) => invoke<PackList>("list_packs", { installation }),
@@ -331,8 +345,10 @@ export const api = {
   readLog: (path: string) => invoke<string>("read_log", { path }),
   purgeLogs: (installation: string | null = null) =>
     invoke<number>("purge_logs", { installation }),
-  folderOverview: () => invoke<FolderItem[]>("folder_overview"),
-  purgeCache: () => invoke<number>("purge_cache"),
+  folderOverview: (installation: string | null = null) =>
+    invoke<FolderItem[]>("folder_overview", { installation }),
+  purgeCache: (installation: string | null = null) =>
+    invoke<number>("purge_cache", { installation }),
   listProfiles: () => invoke<ProfilesOverview>("list_profiles"),
   relinkProfile: (id: string, dir: string) => invoke<void>("relink_profile", { id, dir }),
   /** returns the new folder */

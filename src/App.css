@@ -507,8 +507,27 @@ code {
 
 .card-links {
   display: flex;
-  gap: 6px;
-  margin-top: 8px;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin: 8px -5px 0;
+  padding: 2px 5px;
+  background: none;
+  border: none;
+  border-radius: 5px;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.card-links:hover {
+  background: var(--chip);
+}
+
+.dot.std {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .dot {
@@ -2946,28 +2965,163 @@ kbd {
   color: var(--faint);
 }
 
-.std-ask {
-  margin: -6px 0 12px;
-  padding: 10px 12px;
-  background: var(--bg);
-  border: 1px solid var(--line);
-  border-radius: 8px;
+/* partly linked: a half-drawn ring */
+.place.toggle.partial { box-shadow: 0 0 0 3px var(--accent-soft); border-style: dashed; }
+
+/* ---- link editor ---- */
+
+.le-dialog { width: min(600px, 92vw); }
+
+.le-pair { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+.le-pair .ava { width: 36px; height: 36px; border-radius: 10px; }
+.le-arrow { color: var(--faint); font-size: 15px; }
+
+.le-quick { display: flex; gap: 12px; }
+.le-quick .linklike:disabled { color: var(--faint); cursor: default; }
+
+.le-files { max-height: min(46vh, 380px); margin-bottom: 10px; }
+
+.le-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 0 12px;
+  cursor: pointer;
+  transition: background 0.1s;
+}
+
+.le-files > * + *,
+.le-group > * + * { border-top: 1px solid var(--line); }
+.le-row:hover { background: var(--panel); }
+.le-row input { accent-color: var(--accent); margin: 0; }
+/* pending changes get a faint wash; the pill says which */
+.le-row.add { background: #fdf7f3; }
+.le-row.trash { background: #fdf4f2; }
+.le-row.drop { background: #fdfaf1; }
+.le-row.drop .le-name { text-decoration: line-through; text-decoration-color: var(--faint); color: var(--muted); }
+.le-row.idle .le-name { color: var(--muted); }
+
+.le-row.folder { cursor: default; background: var(--bg); }
+.le-main { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; cursor: pointer; }
+
+.le-caret,
+.le-caret-gap { width: 16px; flex-shrink: 0; }
+.le-caret {
+  height: 22px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--muted);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  border-radius: 4px;
+  transition: transform 0.12s;
+}
+.le-caret.open { transform: rotate(90deg); }
+.le-caret:hover { color: var(--ink); background: var(--chip); }
+
+.le-ico { display: grid; color: var(--faint); }
+.le-ico.dir { color: #c8a45c; }
+
+.le-name {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.le-count { font-family: var(--mono); font-size: 10.5px; color: var(--faint); }
+
+.le-pill {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 99px;
+  white-space: nowrap;
+  color: var(--muted);
+  background: var(--chip);
+}
+.le-pill.linked { color: #4c7139; background: #e4eedb; }
+.le-pill.add { color: var(--accent); background: var(--accent-soft); }
+.le-pill.trash { color: var(--danger); background: #f6dcd6; }
+.le-pill.drop { color: #8a6418; background: #f6ecd2; }
+.le-pill.idle { background: none; color: var(--faint); }
+
+.le-row.skeleton {
+  cursor: default;
+  background: linear-gradient(90deg, var(--card), var(--panel), var(--card)) 0 0 / 200% 100%;
+  animation: le-shimmer 1.1s linear infinite;
+}
+@keyframes le-shimmer { to { background-position: -200% 0; } }
+
+.le-empty { padding: 18px 14px; font-size: 13px; color: var(--muted); }
+.le-others { margin: 0 0 12px; font-size: 12px; }
+
+.le-review { display: flex; flex-direction: column; gap: 10px; margin-bottom: 18px; }
+
+.le-sec {
+  padding: 11px 14px 12px;
   font-size: 12.5px;
   line-height: 1.55;
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  animation: share-in 0.16s ease-out backwards;
+}
+.le-sec:nth-child(2) { animation-delay: 0.03s; }
+.le-sec:nth-child(3) { animation-delay: 0.06s; }
+.le-sec:nth-child(4) { animation-delay: 0.09s; }
+.le-sec.add h3 { color: var(--accent); }
+.le-sec.drop h3 { color: #8a6418; }
+.le-sec.trash { border-color: #efc9c0; background: #fdf6f4; }
+.le-sec h3 { margin: 0 0 6px; font-size: 13px; }
+.le-sec.trash h3 { color: var(--danger); }
+.le-sec p { margin: 8px 0 0; color: var(--muted); }
+
+.le-list { display: flex; flex-wrap: wrap; gap: 5px; }
+.le-list code {
+  padding: 1px 7px;
+  font-size: 11.5px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 5px;
 }
 
-.std-ask.warn {
-  border-color: var(--danger);
+.le-seg {
+  display: flex;
+  margin-top: 10px;
+  padding: 3px;
+  gap: 3px;
+  background: var(--chip);
+  border-radius: 9px;
 }
-
-.std-ask p {
-  margin-bottom: 10px;
+.le-seg button {
+  flex: 1;
+  padding: 6px 10px;
+  font-family: var(--body);
+  font-size: 12.5px;
+  color: var(--muted);
+  background: none;
+  border: none;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
 }
+.le-seg button.on { color: var(--ink); background: var(--card); box-shadow: 0 1px 3px rgba(33, 30, 22, 0.12); }
 
-/* plenty of room: buttons stay one line, wrap as a row only when narrow */
-.std-ask .row-inline { flex-wrap: wrap; gap: 8px; }
-.std-ask .btn { white-space: nowrap; width: auto; }
-.std-ask .btn.ghost { margin-left: auto; }
+.le-foot { align-items: center; }
+.le-sum { display: flex; gap: 10px; margin-right: auto; font-family: var(--mono); font-size: 12px; }
+.le-sum .add { color: var(--accent); }
+.le-sum .drop { color: #8a6418; }
+.le-sum .trash { color: var(--danger); }
+
+.btn.danger.solid { color: #fff; background: var(--danger); border-color: var(--danger); font-weight: 600; }
+.btn.danger.solid:hover { color: #fff; filter: brightness(1.06); }
 
 /* ---- sidebar collapse: shrink to nothing (no stray edge at any zoom) ---- */
 
@@ -3134,6 +3288,57 @@ kbd {
 .file-chip.on {
   border-color: var(--accent);
   background: var(--accent-soft);
+}
+
+/* ---- links drawer: one installation, everything it can link ---- */
+
+.links-title {
+  min-width: 0;
+}
+
+.links-title .drawer-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.links-intro {
+  margin: 18px 0 14px;
+}
+
+.links-drawer .based-list.busy {
+  opacity: 0.6;
+  pointer-events: none;
+  transition: opacity 0.12s;
+}
+
+.links-drawer .based-files {
+  padding-left: 12px;
+}
+
+.links-drawer .file-chip {
+  color: var(--ink);
+  transition: border-color 0.12s, background 0.12s;
+}
+
+.links-drawer .file-chip:not(.on):hover {
+  border-color: var(--muted);
+}
+
+.link-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--line);
+  flex-shrink: 0;
+}
+
+.link-dot.on {
+  background: #7fa650;
+}
+
+.links-ask {
+  margin: 0 12px 12px;
 }
 
 /* ---- options: groups flow into columns on wide windows ---- */
