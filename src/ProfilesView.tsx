@@ -31,7 +31,7 @@ export function ProfilesView({
     if (typeof dir !== "string") return;
     run(async () => {
       await api.relinkProfile(p.id, dir);
-      return `${p.name} now uses ${dir.split("/").pop()}`;
+      return `${p.name} now uses ${dir.split(/[\\/]/).pop()}`;
     });
   }
 
@@ -111,7 +111,7 @@ export function ProfilesView({
                   onClick={() =>
                     run(async () => {
                       const to = await api.moveProfile(p.id);
-                      return `Moved to installations/${to.split("/").pop()}`;
+                      return `Moved to installations/${to.split(/[\\/]/).pop()}`;
                     })
                   }
                 >

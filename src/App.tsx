@@ -442,7 +442,7 @@ function NewInstallView({
         s.images.map((p) => ({
           path: p,
           src: convertFileSrc(p),
-          label: `${p.split("/").pop()} · ${s.builtin ? "standards folder" : s.name}`,
+          label: `${p.split(/[\\/]/).pop()} · ${s.builtin ? "standards folder" : s.name}`,
         }))
       ),
     ],
@@ -687,7 +687,7 @@ function NewInstallView({
               ))}
               {external && (
                 <button className="image-pick file active" title={external}>
-                  {external.split("/").pop()}
+                  {external.split(/[\\/]/).pop()}
                 </button>
               )}
               <button

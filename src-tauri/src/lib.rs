@@ -18,10 +18,59 @@ fn mc_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os(MC_DIR_ENV) {
         return PathBuf::from(dir);
     }
-    // macOS: ~/Library/Application Support/minecraft
-    dirs::data_dir()
-        .expect("no data dir")
-        .join("minecraft")
+    // where the official launcher keeps it on each OS
+    if cfg!(windows) {
+        dirs::config_dir().expect("no AppData").join(".minecraft") // %APPDATA%\.minecraft
+    } else if cfg!(target_os = "macos") {
+        dirs::data_dir().expect("no data dir").join("minecraft") // ~/Library/Application Support/minecraft
+    } else {
+        dirs::home_dir().expect("no home dir").join(".minecraft")
+    }
+}
+
+/// A subprocess that doesn't flash a console window on Windows.
+fn command(program: impl AsRef<std::ffi::OsStr>) -> std::process::Command {
+    #[allow(unused_mut)]
+    let mut cmd = std::process::Command::new(program);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000); // CREATE_NO_WINDOW
+    cmd
+}
+
+/// Symlinks `dst` to `src` (relative targets resolve from `dst`'s folder).
+#[cfg(unix)]
+fn symlink(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(src, dst)
+}
+
+/// Windows needs Developer Mode (or admin) for real symlinks; folders fall
+/// back to junctions, which need neither. Files have no such fallback.
+#[cfg(windows)]
+fn symlink(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> std::io::Result<()> {
+    use std::os::windows::fs::{symlink_dir, symlink_file};
+    let (src, dst) = (PathBuf::from(src.as_ref().to_string_lossy().replace('/', "\\")), dst.as_ref());
+    let resolved = dst.parent().map_or(src.clone(), |d| d.join(&src));
+    if !resolved.is_dir() {
+        return symlink_file(&src, dst).map_err(|e| {
+            std::io::Error::new(e.kind(), format!("{e} — turn on Developer Mode in Windows Settings so MIM can link files"))
+        });
+    }
+    if symlink_dir(&src, dst).is_ok() {
+        return Ok(());
+    }
+    let ok = command("cmd").arg("/C").arg("mklink").arg("/J").arg(dst).arg(&resolved).status()?.success();
+    ok.then_some(()).ok_or_else(|| std::io::Error::other(format!("couldn't link {}", dst.display())))
+}
+
+/// Removes a symlink or junction itself, never what it points at. (Windows
+/// removes links to folders with remove_dir.)
+fn remove_link(p: &Path) -> std::io::Result<()> {
+    fs::remove_file(p).or_else(|_| fs::remove_dir(p))
+}
+
+/// `p` as a "/"-separated string, the form the frontend and rel paths use.
+fn slash_path(p: &Path) -> String {
+    p.iter().map(|c| c.to_string_lossy()).collect::<Vec<_>>().join("/")
 }
 
 /// Canonical path, or an error if it's outside the minecraft folder.
@@ -415,7 +464,7 @@ fn find_java() -> Option<PathBuf> {
     for root in [Some(mc_dir()), dirs::data_dir().map(|d| d.join("minecraft"))].into_iter().flatten() {
         let mut files = vec![];
         walk_files(&root.join("runtime"), &mut files);
-        javas.extend(files.into_iter().filter(|f| f.ends_with("bin/java")));
+        javas.extend(files.into_iter().filter(|f| f.ends_with("bin/java") || f.ends_with("bin/java.exe")));
     }
     // each runtime's Home has a `release` file with JAVA_VERSION="21.0.3"
     let major = |java: &PathBuf| {
@@ -429,7 +478,7 @@ fn find_java() -> Option<PathBuf> {
         .max_by_key(|(m, _)| *m)
         .map(|(_, j)| j)
         .or_else(|| {
-            let ok = std::process::Command::new("java").arg("-version").output().is_ok_and(|o| o.status.success());
+            let ok = command("java").arg("-version").output().is_ok_and(|o| o.status.success());
             ok.then(|| "java".into())
         })
 }
@@ -473,7 +522,7 @@ async fn install_forge(loader: &str, game: &str, ver: &str, p: &Progress) -> Cmd
 fn run_forge_installer(name: &str, java: &Path, jar: &Path, mc: &Path, app: Option<tauri::AppHandle>) -> CmdResult<()> {
     use std::io::BufRead;
     let p = Progress::new(app);
-    let mut child = std::process::Command::new(java)
+    let mut child = command(java)
         .arg("-jar")
         .arg(jar)
         .arg("--installClient")
@@ -626,7 +675,7 @@ fn link_shared_dirs(inst: &Path) -> CmdResult<(Vec<String>, Vec<String>)> {
             skipped.push(d.to_string());
             continue;
         }
-        std::os::unix::fs::symlink(&target, &link).map_err(err)?;
+        symlink(&target, &link).map_err(err)?;
         linked.push(d.to_string());
     }
     Ok((linked, skipped))
@@ -743,7 +792,7 @@ fn push_entry(entries: &mut Vec<StandardEntry>, rel: String, scope: &str, name: 
         walk_files(path, &mut files);
         files.sort();
         for f in files {
-            let r = f.strip_prefix(path).unwrap_or(&f).to_string_lossy().to_string();
+            let r = slash_path(f.strip_prefix(path).unwrap_or(&f));
             if valid_rel(&r) {
                 entries.push(StandardEntry {
                     rel_path: format!("{rel}/{r}"),
@@ -895,7 +944,11 @@ fn add_link(dir: &Path, inst: &str) -> CmdResult<()> {
 }
 
 fn points_into(p: &Path, dir: &Path) -> bool {
-    fs::read_link(p).is_ok_and(|t| t.starts_with(dir))
+    // junctions read back as verbatim \\?\C:\... paths
+    fs::read_link(p).is_ok_and(|t| {
+        let t = t.to_string_lossy();
+        Path::new(t.strip_prefix(r"\\?\").unwrap_or(&t)).starts_with(dir)
+    })
 }
 
 /// `link` is a symlink that ends up at `src` (however the link was written,
@@ -966,7 +1019,7 @@ fn link_entries(inst: &Path, pairs: &[(PathBuf, String)], replace: bool) -> CmdR
             // folder here is how whole folders used to be linked: swap it for
             // per-file links quietly. Anything else is in the way.
             let depth = dest.strip_prefix(&a).map_or(0, |r| r.iter().count());
-            let a_name = a.strip_prefix(inst).unwrap_or(&a).to_string_lossy().to_string();
+            let a_name = slash_path(a.strip_prefix(inst).unwrap_or(&a));
             if !src.ancestors().nth(depth).is_some_and(|s| links_to(&a, s)) && !blocked.contains(&a_name) {
                 blocked.push(a_name);
             }
@@ -986,15 +1039,15 @@ fn link_entries(inst: &Path, pairs: &[(PathBuf, String)], replace: bool) -> CmdR
     }
     for (src, dest) in todo {
         if let Some(a) = linked_ancestor(inst, &dest) {
-            fs::remove_file(a).map_err(err)?; // just a link, nothing lost
+            remove_link(&a).map_err(err)?; // just a link, nothing lost
         }
         fs::create_dir_all(dest.parent().unwrap()).map_err(err)?;
         if dest.is_symlink() {
-            fs::remove_file(&dest).map_err(err)?; // just a link, nothing lost
+            remove_link(&dest).map_err(err)?; // just a link, nothing lost
         } else if dest.exists() {
             trash::delete(&dest).map_err(err)?;
         }
-        std::os::unix::fs::symlink(src, &dest).map_err(err)?;
+        symlink(src, &dest).map_err(err)?;
     }
     Ok(blocked)
 }
@@ -1004,7 +1057,7 @@ fn link_entries(inst: &Path, pairs: &[(PathBuf, String)], replace: bool) -> CmdR
 fn detach(links: &[PathBuf], keep: bool) -> CmdResult<()> {
     for p in links {
         let target = fs::canonicalize(p).map_err(err)?;
-        fs::remove_file(p).map_err(err)?;
+        remove_link(p).map_err(err)?;
         if keep {
             copy_recursive(&target, p).map_err(err)?;
         }
@@ -1324,7 +1377,7 @@ fn list_config(installation: Option<String>) -> CmdResult<ConfigOverview> {
     let mut files: Vec<ConfigFile> = paths
         .iter()
         .map(|p| ConfigFile {
-            rel: p.strip_prefix(&dir).unwrap_or(p).to_string_lossy().into(),
+            rel: slash_path(p.strip_prefix(&dir).unwrap_or(p)),
             path: p.to_string_lossy().into(),
             size_bytes: fs::metadata(p).map(|m| m.len()).unwrap_or(0),
             modified: modified_secs(p),
@@ -1394,20 +1447,33 @@ fn delete_installation(name: String, remove_profile: bool) -> CmdResult<()> {
 
 #[tauri::command]
 fn reveal_path(path: String, select: bool) -> CmdResult<()> {
-    let mut cmd = std::process::Command::new("open");
     if select {
-        cmd.arg("-R");
+        tauri_plugin_opener::reveal_item_in_dir(&path).map_err(err)
+    } else {
+        tauri_plugin_opener::open_path(&path, None::<&str>).map_err(err)
     }
-    cmd.arg(&path).spawn().map_err(err)?;
-    Ok(())
 }
 
 #[tauri::command]
 fn open_launcher() -> CmdResult<()> {
-    std::process::Command::new("open")
-        .args(["-a", "Minecraft"])
-        .spawn()
-        .map_err(err)?;
+    let mut cmd = if cfg!(target_os = "macos") {
+        let mut c = command("open");
+        c.args(["-a", "Minecraft"]);
+        c
+    } else if cfg!(windows) {
+        let legacy = PathBuf::from(r"C:\Program Files (x86)\Minecraft Launcher\MinecraftLauncher.exe");
+        if legacy.exists() {
+            command(legacy)
+        } else {
+            // the Microsoft Store launcher
+            let mut c = command("explorer.exe");
+            c.arg(r"shell:AppsFolder\Microsoft.4297127D64EC6_8wekyb3d8bbwe!Minecraft");
+            c
+        }
+    } else {
+        command("minecraft-launcher")
+    };
+    cmd.spawn().map_err(|e| format!("Couldn't open the Minecraft Launcher: {e}"))?;
     Ok(())
 }
 
@@ -1647,12 +1713,10 @@ fn sort_logs(installation: Option<String>) -> CmdResult<usize> {
 fn read_log(path: String) -> CmdResult<String> {
     let p = inside_mc(&path)?;
     let bytes = if p.extension().is_some_and(|e| e == "gz") {
-        std::process::Command::new("gzip")
-            .arg("-dc")
-            .arg(&p)
-            .output()
-            .map_err(err)?
-            .stdout
+        use std::io::Read;
+        let mut v = vec![];
+        flate2::read::MultiGzDecoder::new(fs::File::open(&p).map_err(err)?).read_to_end(&mut v).map_err(err)?;
+        v
     } else {
         fs::read(&p).map_err(err)?
     };
@@ -2286,14 +2350,9 @@ fn import_world(source: String, installation: Option<String>) -> CmdResult<Strin
     let world = if src.is_dir() {
         find_world(&src)
     } else {
-        let ok = std::process::Command::new("ditto")
-            .args(["-x", "-k"])
-            .arg(&src)
-            .arg(&tmp)
-            .status()
-            .map_err(err)?
-            .success();
-        if !ok {
+        let unzip = || zip::ZipArchive::new(fs::File::open(&src)?)?.extract(&tmp);
+        if unzip().is_err() {
+            let _ = fs::remove_dir_all(&tmp);
             return Err("couldn't unzip that file".into());
         }
         find_world(&tmp)
@@ -2321,18 +2380,23 @@ fn backup_world(path: String, dest: String) -> CmdResult<()> {
     if !world.join("level.dat").exists() {
         return Err("not a world".into());
     }
-    let ok = std::process::Command::new("ditto")
-        .args(["-c", "-k", "--sequesterRsrc", "--keepParent"])
-        .arg(&world)
-        .arg(&dest)
-        .status()
-        .map_err(err)?
-        .success();
-    if ok {
-        Ok(())
-    } else {
-        Err("zipping the world failed".into())
+    zip_dir(&world, Path::new(&dest)).map_err(|e| format!("zipping the world failed: {e}"))
+}
+
+/// Zips `dir` into `dest`, with `dir`'s own folder at the top (like ditto --keepParent).
+fn zip_dir(dir: &Path, dest: &Path) -> zip::result::ZipResult<()> {
+    let parent = dir.parent().unwrap_or(dir);
+    let mut files = vec![];
+    walk_files(dir, &mut files);
+    let mut zw = zip::ZipWriter::new(fs::File::create(dest)?);
+    for f in files {
+        let size = fs::metadata(&f)?.len();
+        let opts = zip::write::SimpleFileOptions::default().large_file(size > u32::MAX as u64);
+        zw.start_file(slash_path(f.strip_prefix(parent).unwrap_or(&f)), opts)?;
+        std::io::copy(&mut fs::File::open(&f)?, &mut zw)?;
     }
+    zw.finish()?;
+    Ok(())
 }
 
 /// Moves a world, mod, or screenshot to the Trash — nothing else.
@@ -3448,11 +3512,19 @@ fn restore_profile_in(mc: &Path, id: &str) -> CmdResult<()> {
 /// The launcher rewrites launcher_profiles.json when it quits, undoing edits.
 fn launcher_running() -> bool {
     std::env::var_os(MC_DIR_ENV).is_none() // a sample folder isn't the launcher's
-        && std::process::Command::new("pgrep")
-            .args(["-f", "Minecraft.app/Contents/MacOS"])
-            .stdout(std::process::Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success())
+        && if cfg!(windows) {
+            command("tasklist").args(["/NH", "/FO", "CSV"]).output().is_ok_and(|o| {
+                let out = String::from_utf8_lossy(&o.stdout).to_lowercase();
+                out.contains("\"minecraftlauncher.exe\"") || out.contains("\"minecraft.exe\"")
+            })
+        } else {
+            let pattern = if cfg!(target_os = "macos") { "Minecraft.app/Contents/MacOS" } else { "minecraft-launcher" };
+            command("pgrep")
+                .args(["-f", pattern])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        }
 }
 
 fn launcher_closed() -> CmdResult<()> {
@@ -3528,7 +3600,7 @@ mod tests {
 
         // clear the way (a symlink, so replace just removes it — no Trash in tests)
         fs::remove_file(inst.join("options.txt")).unwrap();
-        std::os::unix::fs::symlink("/nowhere", inst.join("options.txt")).unwrap();
+        symlink("/nowhere", inst.join("options.txt")).unwrap();
         link_entries(&inst, &pairs, true).unwrap();
         fs::write(std.join("options.txt"), "fov:70").unwrap(); // live edit
         assert_eq!(fs::read_to_string(inst.join("options.txt")).unwrap(), "fov:70");
@@ -3537,7 +3609,7 @@ mod tests {
 
         // a relative link (how Essential writes them) still counts as linked
         fs::remove_file(inst.join("servers.dat")).unwrap();
-        std::os::unix::fs::symlink("../standards/PvP/1.21.10/servers.dat", inst.join("servers.dat"))
+        symlink("../standards/PvP/1.21.10/servers.dat", inst.join("servers.dat"))
             .unwrap();
         assert!(link_entries(&inst, &pairs, false).unwrap().is_empty());
 
@@ -3585,7 +3657,7 @@ mod tests {
         // the old way, all of config/ linked: quietly becomes per-file links
         let d = root.join("d");
         fs::create_dir_all(&d).unwrap();
-        std::os::unix::fs::symlink(std.join("config"), d.join("config")).unwrap();
+        symlink(std.join("config"), d.join("config")).unwrap();
         assert!(link_entries(&d, &pairs, false).unwrap().is_empty());
         assert!(!d.join("config").is_symlink() && d.join("config/sodium.json").is_symlink());
         assert!(std.join("config/sodium.json").is_file());
@@ -3811,6 +3883,20 @@ mod tests {
     }
 
     #[test]
+    fn zips_and_unzips_a_world() {
+        let root = std::env::temp_dir().join(format!("mim-zip-{}", uuid::Uuid::new_v4()));
+        let world = root.join("My World");
+        fs::create_dir_all(world.join("region")).unwrap();
+        fs::write(world.join("level.dat"), b"lvl").unwrap();
+        fs::write(world.join("region/r.0.0.mca"), "x".repeat(5000)).unwrap();
+        zip_dir(&world, &root.join("w.zip")).unwrap();
+        zip::ZipArchive::new(fs::File::open(root.join("w.zip")).unwrap()).unwrap().extract(root.join("out")).unwrap();
+        assert_eq!(find_world(&root.join("out")), Some(root.join("out/My World")));
+        assert_eq!(fs::read(root.join("out/My World/region/r.0.0.mca")).unwrap().len(), 5000);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn reads_mod_metadata_from_jar() {
         let dir = std::env::temp_dir().join(format!("mim-mod-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(dir.join("assets")).unwrap();
@@ -3822,13 +3908,12 @@ mod tests {
         fs::write(dir.join("assets/b.png"), b"big").unwrap();
         fs::write(dir.join("big.txt"), "x".repeat(5000)).unwrap(); // deflated entry
         let jar = dir.join("sodium.jar");
-        let ok = std::process::Command::new("zip")
-            .current_dir(&dir)
-            .args(["-q", "-r", "sodium.jar", "fabric.mod.json", "assets", "big.txt"])
-            .status()
-            .unwrap()
-            .success();
-        assert!(ok);
+        let mut zw = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        for f in ["fabric.mod.json", "assets/b.png", "big.txt"] {
+            zw.start_file(f, zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut zw, &fs::read(dir.join(f)).unwrap()).unwrap();
+        }
+        zw.finish().unwrap();
         let m = read_mod(&jar);
         assert_eq!(m.name, "Sodium");
         assert_eq!(m.version.as_deref(), Some("0.6.0"));
