@@ -4641,8 +4641,8 @@ mod tests {
     #[test]
     fn rename_follows_everywhere() {
         let root = std::env::temp_dir().join(format!("mim-rn-{}", uuid::Uuid::new_v4()));
-        let inst = root.join("installations/Old");
-        let std = root.join("standards/Base");
+        let inst = root.join("installations").join("Old");
+        let std = root.join("standards").join("Base");
         fs::create_dir_all(inst.join(".mim")).unwrap();
         fs::create_dir_all(&std).unwrap();
         fs::write(std.join("options.txt"), "fov:1").unwrap();
@@ -4654,7 +4654,7 @@ mod tests {
 
         assert!(rename_installation("Old".into(), "Shared".into()).is_err());
         rename_installation("Old".into(), " New ".into()).unwrap();
-        let moved = root.join("installations/New");
+        let moved = root.join("installations").join("New");
         assert!(!inst.exists() && fs::read_to_string(moved.join("options.txt")).unwrap() == "fov:1");
         let p = read_profiles().unwrap();
         assert_eq!(p["profiles"]["t"]["name"], "New");
