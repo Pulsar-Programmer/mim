@@ -124,6 +124,7 @@ export function LinkWizard({
   const [texts, setTexts] = useState<Record<string, string | null>>({}); // hash -> text (null: unreadable)
 
   const [stdName, setStdName] = useState("");
+  const nameInput = useRef<HTMLInputElement>(null);
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<string[]>([]);
@@ -200,12 +201,6 @@ export function LinkWizard({
     setScan(null);
     setArmed(false);
     setWholeDirs(new Set());
-    if (!stdName) {
-      const taken = new Set(customStds.map((s) => s.name.toLowerCase()));
-      let n = "Linked";
-      for (let k = 2; taken.has(n.toLowerCase()); k++) n = `Linked ${k}`;
-      setStdName(n);
-    }
     try {
       const list = await api.scanLinkables([...picked]);
       if (id !== scanId.current) return;
@@ -384,10 +379,17 @@ export function LinkWizard({
   // a folder linked from some standard can't merge into Shared; it's left alone
   const mergeable = (l: Linkable, inst: string) =>
     !l.copies.some((c) => c.installation === inst && c.link && c.link !== "Shared");
-  const canLink = ticked.length > 0 && (files.length === 0 || nameOk) && !busy && !reading;
+  const nameBlank = !stdName.trim();
+  // a blank name keeps Link clickable, so the click can say what's missing
+  const canLink = ticked.length > 0 && (files.length === 0 || nameOk || nameBlank) && !busy && !reading;
 
   async function apply() {
     if (!canLink) return;
+    if (files.length && nameBlank) {
+      notify("Name this standard before linking");
+      nameInput.current?.focus();
+      return;
+    }
     if (replaced.length && !armed) {
       setArmed(true); // second click confirms
       return;
@@ -832,8 +834,10 @@ export function LinkWizard({
                 <label className="lw-via" title={existing ? "Adds to this standard" : "A new standard: a folder linked into each installation"}>
                   Save to
                   <input
-                    className={`search ${nameOk ? "" : "bad"}`}
+                    ref={nameInput}
+                    className={`search ${nameOk || nameBlank ? "" : "bad"}`}
                     list="lw-stds"
+                    placeholder="Name this standard"
                     value={stdName}
                     onChange={(e) => {
                       setStdName(e.target.value);
