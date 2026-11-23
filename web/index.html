@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MIM: Minecraft Installation Manager</title>
+<meta name="description" content="Create, link, and upgrade your Minecraft installations in one desktop app. Free for macOS, Windows, and Linux.">
+<meta name="theme-color" content="#3f2f5f">
+<meta property="og:title" content="MIM: Minecraft Installation Manager">
+<meta property="og:description" content="Create, link, and upgrade your Minecraft installations in one desktop app.">
+<meta property="og:type" content="website">
+<link rel="icon" href="/img/icon.png">
+<link rel="apple-touch-icon" href="/img/icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Literata:opsz,wght@7..72,400;7..72,600&family=Pixelify+Sans:wght@500;700&display=swap">
+<style>
+:root {
+  --night: #3f2f5f; --plum: #6e4567; --rose: #9f5961; --coral: #e57f5f; --peach: #f6b27a;
+  --sun: #ffe29a; --cream: #fff3dc; --grass: #6cb84a;
+  --dirt: #6f4a30; --stone: #55535e; --deep: #2b2337; --bedrock: #1a1522;
+  --pixel: "Pixelify Sans", ui-monospace, monospace;
+  --read: "Literata", Georgia, serif;
+  --gutter: clamp(16px, 4vw, 48px);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body { margin: 0; background: var(--bedrock); color: var(--cream); font: 400 1.0625rem/1.65 var(--read); overflow-x: hidden; }
+img { display: block; max-width: 100%; height: auto; }
+a { color: inherit; text-underline-offset: 3px; }
+:focus-visible { outline: 3px solid var(--sun); outline-offset: 3px; }
+h1, h2, h3 { font-family: var(--pixel); font-weight: 700; margin: 0; text-wrap: balance; }
+h2 { font-size: clamp(2rem, 4.4vw, 3.25rem); line-height: 1.05; }
+p { margin: 0; }
+.wrap { width: min(1180px, 100%); margin-inline: auto; padding-inline: var(--gutter); }
+.skip { position: absolute; left: -999px; background: var(--sun); color: var(--deep); padding: 8px 14px; z-index: 5; }
+.skip:focus { left: 8px; top: 8px; }
+
+/* sky */
+.sky {
+  position: relative; z-index: 1; isolation: isolate; padding-bottom: clamp(70px, 10vw, 130px);
+  background: linear-gradient(var(--night) 0 17%, #553863 17% 31%, var(--plum) 31% 43%, #875061 43% 53%, var(--rose) 53% 62%, #c1645d 62% 70%, var(--coral) 70% 79%, #ee9569 79% 88%, var(--peach) 88%);
+}
+.horizon {
+  position: absolute; inset: auto 0 0; height: 288px; z-index: -1;
+  background: url(/img/horizon.png) repeat-x left bottom / 1280px 288px; image-rendering: pixelated;
+}
+nav { display: flex; align-items: center; justify-content: space-between; padding-block: 18px; }
+.brand { display: flex; align-items: center; gap: 10px; font: 700 1.5rem var(--pixel); text-decoration: none; }
+.brand img { width: 34px; height: 34px; }
+.navlinks { display: flex; gap: clamp(14px, 3vw, 28px); font-size: .975rem; }
+.navlinks a { text-decoration: none; }
+.navlinks a:hover { text-decoration: underline; }
+
+.hero { position: relative; padding-block: clamp(36px, 6vw, 76px) clamp(40px, 5vw, 60px); }
+.hero h1 { font-size: clamp(3rem, 7.2vw, 6rem); line-height: .95; max-width: calc(100% - clamp(104px, 19vw, 228px) - 56px); position: relative; z-index: 1; }
+.lede { margin-top: 22px; max-width: 35em; font-size: clamp(1.1rem, 1.7vw, 1.3rem); position: relative; z-index: 1; }
+.sun {
+  position: absolute; z-index: 0; right: var(--gutter); top: clamp(30px, 5vw, 64px);
+  width: clamp(104px, 19vw, 228px); aspect-ratio: 1; background: var(--sun);
+  box-shadow: 0 0 0 clamp(8px, 1.3vw, 16px) #ffc978, 0 0 0 clamp(16px, 2.6vw, 32px) #ffc97833;
+  animation: rise 1.5s steps(14) both;
+}
+@keyframes rise { from { transform: translateY(190px); opacity: 0; } 25% { opacity: 1; } to { transform: none; } }
+
+.cta { margin-top: 32px; display: flex; flex-wrap: wrap; align-items: center; gap: 14px 22px; position: relative; z-index: 1; }
+.btn {
+  display: inline-flex; flex-direction: column; padding: 13px 26px 12px; background: var(--sun); color: var(--deep);
+  font: 700 1.4rem/1.1 var(--pixel); text-decoration: none; box-shadow: 0 6px 0 #b9794c, 0 6px 0 2px var(--deep), 0 0 0 2px var(--deep);
+  transition: transform .08s ease-out, box-shadow .08s ease-out;
+}
+.btn small { font: 400 .85rem/1.3 var(--read); margin-top: 3px; }
+.btn:hover { background: #fff0c2; }
+.btn:active { transform: translateY(5px); box-shadow: 0 1px 0 #b9794c, 0 1px 0 2px var(--deep), 0 0 0 2px var(--deep); }
+.alt { font-size: .975rem; }
+
+.shot { box-shadow: 0 0 0 3px var(--deep), 10px 10px 0 #1a152259; background: #faf9f5; }
+.hero-shot { position: relative; z-index: 2; margin-bottom: calc(-1 * clamp(130px, 19vw, 250px)); }
+
+/* layers */
+.layer { position: relative; padding-block: clamp(70px, 9vw, 120px); }
+.layer::before { content: ""; position: absolute; inset: -16px 0 auto; height: 16px; background-repeat: repeat-x; background-size: 320px 16px; image-rendering: pixelated; }
+.dirt { background: var(--dirt) url(/img/speck-dirt.png) 0 0 / 128px; image-rendering: auto; padding-top: clamp(190px, 21vw, 260px); }
+.stone { background: var(--stone) url(/img/speck-stone.png) 0 0 / 128px; }
+.stone::before { background-image: url(/img/edge-stone.png); }
+.deep { background: var(--deep) url(/img/speck-deep.png) 0 0 / 128px; }
+.deep::before { background-image: url(/img/edge-deep.png); }
+
+.split { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); gap: clamp(32px, 5vw, 72px); align-items: center; }
+.split.flip { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
+.split.flip .shot { order: -1; }
+.copy p { margin-top: 18px; max-width: 32em; }
+.loaders { list-style: none; display: flex; flex-wrap: wrap; gap: 8px; margin: 24px 0 0; padding: 0; font: 500 1.1rem var(--pixel); }
+.loaders li { padding: 4px 12px; background: #fff3dc1f; box-shadow: inset 0 0 0 2px #fff3dc66; }
+
+.library { margin-top: clamp(70px, 9vw, 110px); }
+.library > p { margin-top: 14px; max-width: 36em; }
+.items { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 30px clamp(24px, 4vw, 52px); margin: 40px 0 0; }
+.items dt { font: 700 1.3rem/1.2 var(--pixel); color: var(--sun); }
+.items dd { margin: 4px 0 0; font-size: 1rem; line-height: 1.55; }
+
+/* downloads */
+#download h2 { max-width: 15em; }
+#download .sub { margin-top: 14px; }
+.platforms { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: clamp(14px, 2vw, 22px); margin-top: 40px; align-items: start; }
+.os { padding: 24px; background: #3a2f4a; box-shadow: inset 0 0 0 2px #5a4d6d; }
+.os.mine { background: #4a3a5e; box-shadow: inset 0 0 0 3px var(--sun); }
+.os h3 { font-size: 1.75rem; line-height: 1.1; }
+.os .yours { display: none; font-size: .875rem; color: var(--sun); }
+.os.mine .yours { display: block; }
+.os ul { list-style: none; margin: 16px 0 0; padding: 0; }
+.os li + li { margin-top: 8px; }
+.get {
+  display: flex; justify-content: space-between; gap: 10px; align-items: baseline; padding: 9px 13px; background: var(--cream); color: var(--deep);
+  font-weight: 600; font-size: .975rem; text-decoration: none; box-shadow: 0 3px 0 #b7a78e; transition: transform .08s ease-out, box-shadow .08s ease-out;
+}
+.get span { font-weight: 400; font-size: .85rem; white-space: nowrap; }
+.get:hover { background: var(--sun); }
+.get:active { transform: translateY(3px); box-shadow: none; }
+.os .note { margin-top: 16px; font-size: .9rem; line-height: 1.5; color: #e4d9cf; }
+.os code { font-size: .82rem; background: #1a152280; padding: 1px 5px; overflow-wrap: anywhere; }
+.after { margin-top: 28px; max-width: 46em; font-size: 1rem; }
+
+footer { position: relative; background: var(--bedrock); padding-block: 34px 40px; font-size: .9rem; color: #c9bfca; }
+footer::before { content: ""; position: absolute; inset: -16px 0 auto; height: 16px; background: url(/img/edge-bedrock.png) repeat-x 0 0 / 320px 16px; image-rendering: pixelated; }
+.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 10px 32px; }
+
+@media (max-width: 900px) {
+  .split, .split.flip { grid-template-columns: minmax(0, 1fr); }
+  .split.flip .shot { order: 0; }
+  .items { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .platforms { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 560px) {
+  .items { grid-template-columns: minmax(0, 1fr); }
+  .navlinks a:not(:last-child) { display: none; }
+  .sun { top: 8px; opacity: .92; }
+  .hero h1 { padding-top: 128px; max-width: none; }
+  .horizon { height: 144px; background-size: 640px 144px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  .sun { animation: none; }
+  .btn, .get { transition: none; }
+}
+</style>
+</head>
+<body>
+<a class="skip" href="#download">Skip to downloads</a>
+
+<header class="sky">
+  <div class="wrap">
+    <nav aria-label="Main">
+      <a class="brand" href="/"><img src="/img/icon.png" alt="" width="34" height="34">MIM</a>
+      <div class="navlinks">
+        <a href="#link">Features</a>
+        <a href="https://github.com/Pulsar-Programmer/mim">GitHub</a>
+        <a href="#download">Download</a>
+      </div>
+    </nav>
+    <div class="hero">
+      <div class="sun" aria-hidden="true"></div>
+      <h1>Keep every Minecraft setup in order</h1>
+      <p class="lede">MIM creates, links, and upgrades your installations, then keeps them working with the official launcher.</p>
+      <div class="cta">
+        <a class="btn" id="primary" href="#download">Download MIM<small id="primary-note">macOS, Windows, and Linux</small></a>
+        <a class="alt" id="alt" href="#download">All downloads</a>
+      </div>
+    </div>
+    <img class="shot hero-shot" src="/img/app-installations.webp" width="1680" height="1200" fetchpriority="high"
+      alt="MIM's Installations page showing six Minecraft installations with their versions, mod loaders, mod counts, and linked folders.">
+  </div>
+  <div class="horizon" aria-hidden="true"></div>
+</header>
+
+<main>
+  <section class="layer dirt" id="link">
+    <div class="wrap split">
+      <div class="copy">
+        <h2>Share what should match</h2>
+        <p>Link saves, resource packs, screenshots, settings, and configs across installations. Change a linked file once and every install that shares it sees the change.</p>
+        <p>Already have a pile of installs? MIM compares them side by side and lets you decide which version of each file to keep before anything is saved.</p>
+      </div>
+      <img class="shot" src="/img/app-link.webp" width="1680" height="1200" loading="lazy"
+        alt="MIM's Link Existing page, where you pick installations to compare and link.">
+    </div>
+  </section>
+
+  <section class="layer stone" id="install">
+    <div class="wrap">
+      <div class="split flip">
+        <div class="copy">
+          <h2>Set up a new install fast</h2>
+          <p>Name it, pick a version and loader, and add mods and resource packs from Modrinth. It shows up in the official launcher, ready to play.</p>
+          <ul class="loaders" aria-label="Supported loaders">
+            <li>Vanilla</li><li>Fabric</li><li>Forge</li><li>NeoForge</li>
+          </ul>
+        </div>
+        <img class="shot" src="/img/app-new.webp" width="1680" height="1200" loading="lazy"
+          alt="MIM's New Install form with fields for name, Minecraft version, loader, mods, resource packs, and image.">
+      </div>
+
+      <div class="library">
+        <h2>Your whole Minecraft folder</h2>
+        <p>Everything that usually means digging through hidden folders has its own page.</p>
+        <dl class="items">
+          <div><dt>Upgrades</dt><dd>Move an install and its mods to a newer Minecraft.</dd></div>
+          <div><dt>Mods</dt><dd>See what each install runs and update it.</dd></div>
+          <div><dt>Saves</dt><dd>Browse your worlds across every install.</dd></div>
+          <div><dt>Shader packs</dt><dd>Pick shaders with screenshots from Modrinth.</dd></div>
+          <div><dt>Resource packs</dt><dd>Manage packs and share them between installs.</dd></div>
+          <div><dt>Options and config</dt><dd>Compare and edit settings per game folder.</dd></div>
+          <div><dt>Servers</dt><dd>Edit server lists and copy servers between installs.</dd></div>
+          <div><dt>Screenshots</dt><dd>Find every screenshot in one gallery.</dd></div>
+          <div><dt>Launcher profiles</dt><dd>Put away old profiles and restore them anytime.</dd></div>
+        </dl>
+      </div>
+    </div>
+  </section>
+
+  <section class="layer deep" id="download">
+    <div class="wrap">
+      <h2>Download MIM</h2>
+      <p class="sub">Free for desktop. <span id="version">Always the latest release.</span></p>
+      <div class="platforms">
+        <article class="os" data-os="mac">
+          <h3>macOS</h3><span class="yours">Your computer</span>
+          <ul>
+            <li><a class="get" href="/download/mac-arm">Apple silicon <span>.dmg</span></a></li>
+            <li><a class="get" href="/download/mac-intel">Intel <span>.dmg</span></a></li>
+          </ul>
+          <p class="note">Open the disk image and drag MIM to Applications.</p>
+        </article>
+        <article class="os" data-os="win">
+          <h3>Windows</h3><span class="yours">Your computer</span>
+          <ul>
+            <li><a class="get" href="/download/win-x64">Intel or AMD <span>.exe</span></a></li>
+            <li><a class="get" href="/download/win-arm">ARM <span>.exe</span></a></li>
+          </ul>
+          <p class="note">If SmartScreen appears, choose More info, then Run anyway. Linking single files needs Developer Mode. Folders work without it.</p>
+        </article>
+        <article class="os" data-os="linux">
+          <h3>Linux</h3><span class="yours">Your computer</span>
+          <ul>
+            <li><a class="get" href="/download/linux-x64-appimage">x86-64 <span>AppImage</span></a></li>
+            <li><a class="get" href="/download/linux-x64-deb">x86-64 <span>.deb</span></a></li>
+            <li><a class="get" href="/download/linux-arm-appimage">ARM64 <span>AppImage</span></a></li>
+            <li><a class="get" href="/download/linux-arm-deb">ARM64 <span>.deb</span></a></li>
+          </ul>
+          <p class="note">For an AppImage, run <code>chmod +x MIM_*.AppImage</code> first. For Debian or Ubuntu, run <code>sudo apt install ./MIM_*.deb</code>.</p>
+        </article>
+      </div>
+      <p class="after">MIM updates itself from inside the app. Looking for an older version? See <a href="https://github.com/Pulsar-Programmer/mim/releases">all releases on GitHub</a>.</p>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span>MIM, the Minecraft Installation Manager</span>
+    <span>Not affiliated with or endorsed by Mojang or Microsoft.</span>
+  </div>
+</footer>
+
+<script>
+(async () => {
+  const OPTIONS = {
+    mac: [["Apple silicon", "mac-arm"], ["Intel", "mac-intel"]],
+    win: [["Intel or AMD", "win-x64"], ["ARM", "win-arm"]],
+    linux: [["x86-64 AppImage", "linux-x64-appimage"], ["ARM64 AppImage", "linux-arm-appimage"]],
+  };
+  const NAMES = { mac: "macOS", win: "Windows", linux: "Linux" };
+  const ua = navigator.userAgent;
+  const touchMac = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1; // iPadOS reports itself as a Mac
+  const phone = touchMac || /Android|iPhone|iPad|iPod/.test(ua);
+  const os = phone ? null : /Mac/.test(ua) ? "mac" : /Win/.test(ua) ? "win" : /Linux|X11/.test(ua) ? "linux" : null;
+
+  fetch("/api/download").then((r) => r.json()).then(({ version }) => {
+    if (version) document.getElementById("version").textContent = `Version ${version}.`;
+  }).catch(() => {});
+
+  const primary = document.getElementById("primary");
+  const note = document.getElementById("primary-note");
+  const alt = document.getElementById("alt");
+  if (phone) {
+    primary.firstChild.textContent = "See desktop downloads";
+    note.textContent = "MIM runs on computers, not phones or tablets";
+    alt.hidden = true;
+    return;
+  }
+  if (!os) return;
+  document.querySelector(`[data-os="${os}"]`).classList.add("mine");
+
+  // Only Chromium reports the CPU; elsewhere the first option is the default and the other stays one click away.
+  let arm = os === "mac";
+  try {
+    const { architecture } = await navigator.userAgentData.getHighEntropyValues(["architecture"]);
+    if (architecture) arm = architecture === "arm";
+  } catch {}
+  if (os === "linux" && /aarch64|arm64/i.test(ua + navigator.platform)) arm = true;
+  const [first, second] = OPTIONS[os];
+  const [pick, other] = (os === "mac") === arm ? [first, second] : [second, first];
+  primary.href = `/download/${pick[1]}`;
+  primary.firstChild.textContent = `Download for ${NAMES[os]}`;
+  note.textContent = pick[0];
+  alt.href = `/download/${other[1]}`;
+  alt.textContent = `Need ${other[0]}?`;
+})();
+</script>
+</body>
+</html>
