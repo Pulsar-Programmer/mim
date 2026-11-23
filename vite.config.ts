@@ -8,6 +8,9 @@ const host = process.env.TAURI_DEV_HOST;
 export default defineConfig(async () => ({
   plugins: [react()],
 
+  // web/ is a separate Next.js site: keep it out of the desktop app's dependency scan.
+  optimizeDeps: { entries: ["index.html"] },
+
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //
   // 1. prevent Vite from obscuring rust errors
@@ -26,7 +29,7 @@ export default defineConfig(async () => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**", "**/sample-minecraft/**"],
+      ignored: ["**/src-tauri/**", "**/sample-minecraft/**", "**/web/**"],
     },
   },
 }));
