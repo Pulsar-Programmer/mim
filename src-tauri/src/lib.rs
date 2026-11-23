@@ -4237,13 +4237,15 @@ async fn install_mrpack(
 /// Imports whatever the links point at into an installation, matching its
 /// game version and loader, and pulls in required dependencies.
 #[tauri::command]
-async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: String) -> CmdResult<ImportReport> {
-    import_in(&links, &installation, &Progress::new(Some(app))).await
+async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: String, only_packs: bool) -> CmdResult<ImportReport> {
+    import_in(&links, &installation, only_packs, &Progress::new(Some(app))).await
 }
 
-async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdResult<ImportReport> {
+/// `only_packs` takes resource packs and reports anything else as skipped.
+async fn import_in(links: &[String], installation: &str, only_packs: bool, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
-    let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
+    // a shared mods folder's newest version says nothing about this one's packs
+    let (game, loader) = if only_packs { (game, loader) } else { newest_version(game, loader, mods_sharing(&dir)) };
     let mut report = ImportReport::default();
     let mut titles = vec![];
     let mut queue = vec![];
@@ -4256,6 +4258,10 @@ async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdRes
                 continue;
             }
         };
+        if only_packs && info.kind != "resourcepack" && info.kind != "collection" {
+            report.skipped.push(format!("{} (not a resource pack)", info.title));
+            continue;
+        }
         titles.push(info.title.clone());
         if info.kind == "modpack" {
             install_mrpack(&info.projects[0], &dir, &game, &loader, &mut report, p).await?;
@@ -4291,10 +4297,14 @@ async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdRes
             break;
         }
         let projects = send_json(http().get(format!("{MR}/v2/projects")).query(&[("ids", json!(ids).to_string())])).await?;
-        let jobs: Vec<_> = projects
+        let (projects, others): (Vec<_>, Vec<_>) = projects
             .as_array()
             .cloned()
             .unwrap_or_default()
+            .into_iter()
+            .partition(|p| !only_packs || p["project_type"] == "resourcepack");
+        report.skipped.extend(others.iter().map(|p| format!("{} (not a resource pack)", p["title"].as_str().unwrap_or("?"))));
+        let jobs: Vec<_> = projects
             .into_iter()
             .map(|p| {
                 let has = p["id"].as_str().is_some_and(|id| have.contains(id));
@@ -5620,6 +5630,25 @@ mod tests {
         assert!(!allowed_host("https://cdn.modrinth.com.evil.io/x.jar"));
     }
 
+    // hits the real Modrinth API in a temp folder: cargo test modrinth_packs -- --ignored
+    #[test]
+    #[ignore]
+    fn modrinth_packs_only() {
+        let root = std::env::temp_dir().join(format!("mim-mr-{}", uuid::Uuid::new_v4()));
+        let inst = root.join("installations/Test");
+        fs::create_dir_all(&inst).unwrap();
+        let profile = json!({"profiles": {"t": {"gameDir": inst.to_string_lossy(), "lastVersionId": "1.21.1"}}});
+        fs::write(root.join("launcher_profiles.json"), profile.to_string()).unwrap();
+        std::env::set_var(MC_DIR_ENV, &root);
+        let links = ["https://modrinth.com/resourcepack/faithful-32x".to_string(), "https://modrinth.com/mod/sodium".to_string()];
+        let r = tauri::async_runtime::block_on(import_in(&links, "Test", true, &Progress::new(None))).unwrap();
+        assert_eq!(r.added.len(), 1, "{r:?}");
+        assert!(r.skipped.iter().any(|s| s.contains("not a resource pack")), "{r:?}");
+        assert_eq!(fs::read_dir(inst.join("resourcepacks")).unwrap().count(), 1);
+        assert!(!inst.join("mods").exists());
+        let _ = fs::remove_dir_all(&root);
+    }
+
     // hits the real Modrinth API in a temp folder: cargo test modrinth_e2e -- --ignored
     #[test]
     #[ignore]
@@ -5632,15 +5661,15 @@ mod tests {
         std::env::set_var(MC_DIR_ENV, &root);
 
         // Mod Menu requires Fabric API and Placeholder API, which should come along
-        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/mod/modmenu".into()], "Test", &Progress::new(None))).unwrap();
+        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/mod/modmenu".into()], "Test", false, &Progress::new(None))).unwrap();
         assert!(r.added.iter().any(|t| t == "Fabric API"), "{:?}", r.added);
-        let again = tauri::async_runtime::block_on(import_in(&["modmenu".into()], "Test", &Progress::new(None))).unwrap();
+        let again = tauri::async_runtime::block_on(import_in(&["modmenu".into()], "Test", false, &Progress::new(None))).unwrap();
         assert!(again.added.is_empty() && again.skipped[0].contains("already"), "{:?}", again.skipped);
         // already newest, so nothing to update
         let u = tauri::async_runtime::block_on(update_in("Test", &Progress::new(None))).unwrap();
         assert!(u.added.is_empty() && u.skipped.is_empty(), "{:?}", u.added);
         // a CurseForge link to a mod that's on Modrinth too
-        let cf = tauri::async_runtime::block_on(import_in(&["https://www.curseforge.com/minecraft/mc-mods/sodium".into()], "Test", &Progress::new(None))).unwrap();
+        let cf = tauri::async_runtime::block_on(import_in(&["https://www.curseforge.com/minecraft/mc-mods/sodium".into()], "Test", false, &Progress::new(None))).unwrap();
         assert_eq!(cf.added, ["Sodium"]);
         let files: Vec<_> = fs::read_dir(inst.join("mods")).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(files.len(), 4, "{files:?}");
@@ -5657,7 +5686,7 @@ mod tests {
         assert!(u.added.iter().any(|n| n.starts_with("sodium")) && !inst.join("mods/sodium-old.jar").exists(), "{u:?}");
 
         // a modpack: files from the index plus its overrides
-        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/modpack/fabulously-optimized".into()], "Test", &Progress::new(None))).unwrap();
+        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/modpack/fabulously-optimized".into()], "Test", false, &Progress::new(None))).unwrap();
         assert!(r.added.len() > 10 && inst.join("config").is_dir(), "{:?}", r.skipped);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -5672,7 +5701,7 @@ mod tests {
         let profile = json!({"profiles": {"t": {"gameDir": inst.to_string_lossy(), "lastVersionId": "fabric-loader-0.16.14-1.20.1"}}});
         fs::write(root.join("launcher_profiles.json"), profile.to_string()).unwrap();
         std::env::set_var(MC_DIR_ENV, &root);
-        tauri::async_runtime::block_on(import_in(&["sodium".into()], "Old", &Progress::new(None))).unwrap();
+        tauri::async_runtime::block_on(import_in(&["sodium".into()], "Old", false, &Progress::new(None))).unwrap();
         fs::write(inst.join("mods/homemade.jar"), b"not on modrinth").unwrap();
 
         let scan = tauri::async_runtime::block_on(scan_upgrade_in("Old", &Progress::new(None))).unwrap();

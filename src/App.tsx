@@ -580,9 +580,20 @@ function NewInstallView({
   );
   // how each picked item comes in; unset means link for folders, copy for files
   const [modes, setModes] = useState<Record<string, "link" | "copy">>({});
-  const isCopied = (e: { rel_path: string; is_dir: boolean }) => (modes[e.rel_path] ?? (e.is_dir ? "link" : "copy")) === "copy";
-  const flipCopy = (e: { rel_path: string; is_dir: boolean }) =>
+  // open means on: imports need a real folder, so resource packs come in as
+  // copies. `modes` is left alone, so closing the section restores each choice.
+  const [packLinks, setPackLinks] = useState<string[]>([""]);
+  const [packsOpen, setPacksOpen] = useState(false);
+  const wantedPacks = packsOpen ? packLinks.filter((l) => l.trim()) : [];
+  const forcedCopy = (e: { name: string }) =>
+    packsOpen && (e.name === "resourcepacks" || e.name.startsWith("resourcepacks/"));
+  const isCopied = (e: { name: string; rel_path: string; is_dir: boolean }) =>
+    forcedCopy(e) || (modes[e.rel_path] ?? (e.is_dir ? "link" : "copy")) === "copy";
+  const flipCopy = (e: { name: string; rel_path: string; is_dir: boolean }) => {
+    // linking packs means sharing them, which is the section being off
+    if (forcedCopy(e)) setPacksOpen(false);
     setModes((m) => ({ ...m, [e.rel_path]: isCopied(e) ? "link" : "copy" }));
+  };
   const [imagePath, setImagePath] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   // standards show as one checkbox each; expanding one lets you pick single files
@@ -705,14 +716,20 @@ function NewInstallView({
       if (imagePath) {
         await api.setCustomIcon(name.trim(), imagePath).catch(() => {});
       }
-      if (loader !== "vanilla" && wanted.length) {
+      const mods = loader !== "vanilla" ? wanted : [];
+      if (mods.length || wantedPacks.length) {
         setBusy("Importing from Modrinth…");
-        try {
-          const r = await api.importLinks(wanted, name.trim());
-          notify(`Installed "${name.trim()}" · ${reportSummary(r)}`);
-        } catch (e) {
-          notify(`Installed "${name.trim()}", but the import failed: ${e}`);
+        const notes: string[] = [];
+        for (const [list, onlyPacks] of [[mods, false], [wantedPacks, true]] as [string[], boolean][]) {
+          if (!list.length) continue;
+          const what = onlyPacks ? "resource packs" : "mods";
+          try {
+            notes.push(`${what}: ${reportSummary(await api.importLinks(list, name.trim(), onlyPacks))}`);
+          } catch (e) {
+            notes.push(`${what} failed: ${e}`);
+          }
         }
+        notify(`Installed "${name.trim()}" · ${notes.join(" · ")}`);
         return onDone();
       }
       notify(brief(`Installed "${name.trim()}" — it's in your launcher`));
@@ -847,6 +864,46 @@ function NewInstallView({
               </div>
             </details>
           )}
+
+          <details
+            className="field mods-from"
+            open={packsOpen}
+            onToggle={(e) => setPacksOpen(e.currentTarget.open)}
+          >
+            <summary>
+              With resource packs
+              <span className="optional">
+                {packsOpen ? (wantedPacks.length ? `${wantedPacks.length} to add` : "on") : "optional"}
+              </span>
+            </summary>
+            <div className="mods-from-body">
+              {packLinks.map((l, i) => (
+                <LinkField
+                  key={i}
+                  value={l}
+                  loader={loader}
+                  gameVersion={gameVersion}
+                  onlyPacks
+                  onChange={(v) => setPackLinks((prev) => prev.map((x, j) => (j === i ? v : x)))}
+                  onRemove={
+                    packLinks.length > 1
+                      ? () => setPackLinks((prev) => prev.filter((_, j) => j !== i))
+                      : undefined
+                  }
+                />
+              ))}
+              <div className="mods-from-foot">
+                <button className="linklike" onClick={() => setPackLinks((prev) => [...prev, ""])}>
+                  + another link
+                </button>
+              </div>
+              <p className="hint">
+                A resource pack or collection
+                <span className="more"> — your shared packs are copied in, so these stay with this install.
+                Switching them back to linked closes this section.</span>
+              </p>
+            </div>
+          </details>
 
           <div className="field">
             <span>Image</span>
@@ -1266,6 +1323,7 @@ function LinkField({
   value,
   loader,
   gameVersion,
+  onlyPacks,
   onChange,
   onRemove,
   onResolved,
@@ -1273,9 +1331,10 @@ function LinkField({
   value: string;
   loader: Loader;
   gameVersion: string;
+  onlyPacks?: boolean;
   onChange: (v: string) => void;
   onRemove?: () => void;
-  onResolved: (info: LinkInfo) => void;
+  onResolved?: (info: LinkInfo) => void;
 }) {
   const [info, setInfo] = useState<LinkInfo | string | null>(null);
   useEffect(() => {
@@ -1286,7 +1345,7 @@ function LinkField({
         .resolveLink(value)
         .then((i) => {
           setInfo(i);
-          onResolved(i);
+          onResolved?.(i);
         })
         .catch((e) => setInfo(String(e)));
     }, 400);
@@ -1300,12 +1359,14 @@ function LinkField({
     ? [
         ok.kind === "collection" && `${ok.projects.length} projects`,
         ok.note,
+        onlyPacks && !["resourcepack", "collection"].includes(ok.kind) && "not a resource pack",
         ok.kind !== "collection" &&
           ok.game_versions.length > 0 &&
           !ok.game_versions.includes(gameVersion) &&
           `no ${gameVersion} version`,
         ok.kind !== "collection" &&
           ok.loaders.length > 0 &&
+          !onlyPacks &&
           ["mod", "modpack"].includes(ok.kind) &&
           !ok.loaders.includes(loader) &&
           `not made for ${loader}`,
@@ -1317,7 +1378,7 @@ function LinkField({
         <input
           value={value}
           onChange={(e) => onChange(e.target.value)}
-          placeholder="Paste a Modrinth link"
+          placeholder={onlyPacks ? "Paste a Modrinth resource pack link" : "Paste a Modrinth link"}
         />
         {onRemove && (
           <button className="link-remove" onClick={onRemove} title="Remove this link">

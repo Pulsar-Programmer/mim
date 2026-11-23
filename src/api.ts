@@ -474,8 +474,8 @@ export const api = {
     invoke<number>("add_mods", { installation, files }),
   resolveLink: (link: string) => invoke<LinkInfo>("resolve_link", { link }),
   /** mod, collection or modpack links, matched to the installation's version and loader */
-  importLinks: (links: string[], installation: string) =>
-    invoke<ImportReport>("import_links", { links, installation }),
+  importLinks: (links: string[], installation: string, onlyPacks = false) =>
+    invoke<ImportReport>("import_links", { links, installation, onlyPacks }),
   updateMods: (installation: string) => invoke<ImportReport>("update_mods", { installation }),
   /** which newer game versions every enabled mod has a build for */
   scanUpgrade: (installation: string) => invoke<UpgradeScan>("scan_upgrade", { installation }),
