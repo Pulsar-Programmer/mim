@@ -4773,7 +4773,6 @@ button.lw-pick { padding-left: 11px; cursor: pointer; }
 
 /* ---- launcher profiles ---- */
 
-.pf { max-width: 920px; }
 .pf .page-head { margin-bottom: 20px; }
 .pf-section + .pf-section { margin-top: 26px; }
 .pf-section h2 { font-size: 15px; margin: 0 0 8px; }
