@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   api,
+  chooseRemoval,
   formatBytes,
   ImportReport,
   Installation,
@@ -68,6 +69,12 @@ export function ModsView({
   const mixedVersions =
     new Set(section?.members.map((m) => `${m.game_version}/${m.loader}`)).size > 1;
   const linkedFolder = !!installations.find((i) => i.name === current)?.mods_link;
+  // a shared section imports into its shared folder, for one member's version
+  const importers = (section?.members.length ? section.members : section?.inst ? [section.inst] : []).filter(
+    (m, n, all) => all.findIndex((o) => o.game_version === m.game_version && o.loader === m.loader) === n
+  );
+  const [importFor, setImportFor] = useState<string | null>(null);
+  const importTo = importers.find((m) => m.name === importFor)?.name ?? importers[0]?.name;
 
   const [mods = [], reload] = useCached<Mod[]>(
     `mods:${current}`,
@@ -132,14 +139,15 @@ export function ModsView({
   }
 
   async function fromModrinth(kind: "import" | "update") {
-    if (!current) return;
+    const target = kind === "import" ? importTo : current;
+    if (!target) return;
     setBusy(kind);
     setReport(null);
     try {
       const r =
         kind === "import"
-          ? await api.importLinks(splitLinks(link), current)
-          : await api.updateMods(current);
+          ? await api.importLinks(splitLinks(link), target)
+          : await api.updateMods(target);
       notify(reportSummary(r, kind === "import" ? "Added" : "Updated"));
       if (r.skipped.length) setReport(r);
       if (kind === "import") setLink("");
@@ -211,7 +219,7 @@ export function ModsView({
       <div className="options-layout">
 
         <section className="options-editor">
-          {current ? (
+          {importTo ? (
             <form
               className="options-toolbar import-row"
               onSubmit={(e) => {
@@ -225,6 +233,21 @@ export function ModsView({
                 value={link}
                 onChange={(e) => setLink(e.target.value)}
               />
+              {importers.length > 1 && (
+                <select
+                  className="sort"
+                  value={importTo}
+                  onChange={(e) => setImportFor(e.target.value)}
+                  title="Which version's builds to download into this shared folder"
+                  aria-label="Download builds for"
+                >
+                  {importers.map((m) => (
+                    <option key={m.name} value={m.name}>
+                      {m.game_version ?? m.name} {m.loader ?? ""}
+                    </option>
+                  ))}
+                </select>
+              )}
               <button className="btn" disabled={!link.trim() || !!busy}>
                 {busy === "import" ? "Importing…" : "Import"}
               </button>
@@ -333,8 +356,9 @@ export function ModsView({
                     title={linkedFolder ? "This mods folder is linked — unlink it first" : undefined}
                     onClick={() =>
                       confirm(m.path, async () => {
-                        if (!(await okToChangeShared([m.path], `Removing ${m.name}`))) return `Kept ${m.name}`;
-                        await api.trashItem(m.path);
+                        const keep = await chooseRemoval([m.path], m.name);
+                        if (keep === null) return `Kept ${m.name}`;
+                        await api.trashItem(m.path, keep);
                         return `Moved ${m.name} to Trash`;
                       })
                     }

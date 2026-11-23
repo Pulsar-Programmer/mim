@@ -1660,21 +1660,51 @@ fn shared_without(items: &[String], gone: &[String], listed: &[String]) -> Vec<S
     out
 }
 
+/// Swaps a folder link for a real folder of links to what's inside it, so one
+/// item in it can change without touching the rest.
+fn expand_link(link: &Path) -> std::io::Result<()> {
+    let real = fs::canonicalize(link)?;
+    let name = link.file_name().unwrap_or_default().to_string_lossy();
+    let staged = link.with_file_name(format!(".{name}.mim-expand"));
+    let built = fs::create_dir(&staged).and_then(|_| {
+        fs::read_dir(&real)?.try_for_each(|e| {
+            let e = e?;
+            symlink(e.path(), staged.join(e.file_name()))
+        })
+    });
+    if let Err(e) = built {
+        let _ = fs::remove_dir_all(&staged); // only links; doesn't follow them
+        return Err(e);
+    }
+    remove_link(link)?;
+    fs::rename(&staged, link).inspect_err(|_| {
+        let _ = symlink(&real, link);
+        let _ = fs::remove_dir_all(&staged);
+    })
+}
+
 /// Removes every installation's links to these entries; with `keep`, each
-/// becomes a real copy. Changes nothing if one has an entry through a whole
-/// linked folder.
-fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool) -> CmdResult<()> {
+/// becomes a real copy. An entry reached through a whole linked folder splits
+/// that folder first, unless the entry is about to vanish (`source_goes`) and
+/// nobody wants a copy: then the folder link can simply stay.
+fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool, source_goes: bool) -> CmdResult<()> {
     let mut links = vec![];
     for i in insts {
         for (src, dest) in pairs {
             let (state, link) = link_state(i, src, dest);
-            if state.state == "linked" {
-                if link != i.join(dest) {
-                    let inst = i.file_name().unwrap_or_default().to_string_lossy();
-                    return Err(format!("{inst} has {dest} inside a linked folder — unlink that first"));
-                }
-                links.push(link);
+            if state.state != "linked" {
+                continue;
             }
+            let item = i.join(dest);
+            if link != item {
+                if !keep && source_goes {
+                    continue;
+                }
+                while let Some(folder) = linked_ancestor(i, &item) {
+                    expand_link(&folder).map_err(err)?;
+                }
+            }
+            links.push(item);
         }
     }
     detach(&links, keep)
@@ -1707,7 +1737,7 @@ fn remove_from_standard(name: String, rel_paths: Vec<String>, keep: bool) -> Cmd
     }
     let names = installation_names();
     let dirs: Vec<PathBuf> = names.iter().map(|n| installations_dir().join(n)).collect();
-    free_entries(&dirs, &pairs, keep)?;
+    free_entries(&dirs, &pairs, keep, !shared)?;
     if shared {
         let listed: Vec<String> = shared_entries().into_iter().map(|e| e.name).collect();
         let items = shared_without(&read_shared_in(&standards_dir()), &gone, &listed);
@@ -3417,8 +3447,24 @@ fn write_zip(dir: &Path, dest: &Path) -> zip::result::ZipResult<()> {
 
 /// Moves a world, mod, or screenshot to the Trash — nothing else.
 #[tauri::command(async)]
-fn trash_item(path: String) -> CmdResult<()> {
-    trash::delete(trash_target(&mc_dir(), &path)?).map_err(err)
+fn trash_item(path: String, keep: bool) -> CmdResult<()> {
+    trash::delete(release_item(&mc_dir(), &path, keep)?).map_err(err)
+}
+
+/// Readies an original for the Trash: installations using it get their own
+/// copy with `keep`, otherwise lose it too. Removing a link frees nothing.
+fn release_item(mc: &Path, path: &str, keep: bool) -> CmdResult<PathBuf> {
+    let p = trash_target(mc, path)?;
+    if !p.is_symlink() {
+        let (Some(name), Some(folder)) = (p.file_name(), p.parent().and_then(|d| d.file_name())) else {
+            return Err("bad path".into());
+        };
+        let rel = format!("{}/{}", folder.to_string_lossy(), name.to_string_lossy());
+        let mut games = vec![mc.to_path_buf()];
+        games.extend(visible_children(&mc.join("installations")).into_iter().map(|(_, g)| g));
+        free_entries(&games, &[(p.clone(), rel)], keep, true)?;
+    }
+    Ok(p)
 }
 
 /// What removing `path` may touch. Reached through a linked folder it's the
@@ -3450,35 +3496,20 @@ fn shared_with(paths: Vec<String>, follow_links: bool) -> Vec<String> {
 fn shared_with_in(mc: &Path, paths: &[String], follow_links: bool) -> Vec<String> {
     let mut games = vec![("the Minecraft folder".to_string(), mc.to_path_buf())];
     games.extend(visible_children(&mc.join("installations")));
-    let mut seen = std::collections::HashSet::new();
     let mut who = std::collections::BTreeSet::new();
-    for p in paths.iter().map(Path::new) {
-        if p.is_symlink() {
-            let (Some(name), Some(parent)) = (p.file_name(), p.parent()) else { continue };
-            let (Some(folder), Some(own)) = (parent.file_name(), parent.parent().map(canon)) else { continue };
-            if follow_links {
-                let real = canon(p);
-                let others: Vec<_> = games
-                    .iter()
-                    .filter(|(_, g)| canon(g) != own && canon(&g.join(folder).join(name)) == real)
-                    .map(|(n, _)| n.clone())
-                    .collect();
-                if others.is_empty() {
-                    who.insert("the linked standard".to_string());
-                }
-                who.extend(others);
-            }
-            continue;
-        }
-        let Some(parent) = p.parent().filter(|d| seen.insert(d.to_path_buf())) else { continue };
+    for p in paths.iter().map(Path::new).filter(|p| follow_links || !p.is_symlink()) {
+        let (Some(name), Some(parent)) = (p.file_name(), p.parent()) else { continue };
         let (Some(folder), Some(own)) = (parent.file_name(), parent.parent().map(canon)) else { continue };
-        let real = canon(parent);
-        let others: Vec<_> =
-            games.iter().filter(|(_, g)| canon(g) != own && canon(&g.join(folder)) == real).collect();
-        if others.is_empty() && parent.is_symlink() {
+        let real = canon(p);
+        let others: Vec<_> = games
+            .iter()
+            .filter(|(_, g)| canon(g) != own && canon(&g.join(folder).join(name)) == real)
+            .map(|(n, _)| n.clone())
+            .collect();
+        if others.is_empty() && (p.is_symlink() || parent.is_symlink()) {
             who.insert("the linked standard".to_string());
         }
-        who.extend(others.into_iter().map(|(n, _)| n.clone()));
+        who.extend(others);
     }
     who.into_iter().collect()
 }
@@ -5131,7 +5162,7 @@ mod tests {
         assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
         assert!(share_in(&a, &std, &["nothing".into()], false).is_err());
         // removing it from the standard leaves the installation a real copy
-        free_entries(&[a.clone()], &[(std.join("journeymap"), "journeymap".into())], true).unwrap();
+        free_entries(&[a.clone()], &[(std.join("journeymap"), "journeymap".into())], true, true).unwrap();
         assert!(!a.join("journeymap").is_symlink());
         assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
         fs::remove_dir_all(a.join("journeymap")).unwrap();
@@ -5890,15 +5921,22 @@ mod tests {
         let opt = (std.join("options.txt"), "options.txt".to_string());
         let inner = (std.join("config/x.json"), "config/x.json".to_string());
 
-        // a file inside a whole linked folder stops the batch before anything changes
-        assert!(free_entries(&[a.clone()], &[opt.clone(), inner], false).is_err());
-        assert!(a.join("options.txt").is_symlink());
+        // deleting a file inside a whole linked folder leaves the folder link alone
+        free_entries(&[a.clone()], &[inner.clone()], false, true).unwrap();
+        assert!(a.join("config").is_symlink());
+        // keeping a copy splits it: that file is real, the rest stay linked
+        fs::write(std.join("config/y.json"), "y").unwrap();
+        free_entries(&[a.clone()], &[inner], true, true).unwrap();
+        assert!(!a.join("config").is_symlink() && !a.join("config/x.json").is_symlink());
+        assert_eq!(fs::read_to_string(a.join("config/x.json")).unwrap(), "x");
+        assert!(links_to(&a.join("config/y.json"), &std.join("config/y.json")));
+        assert!(!a.join(".config.mim-expand").exists());
 
-        free_entries(&[a.clone()], &[opt.clone()], false).unwrap();
+        free_entries(&[a.clone()], &[opt.clone()], false, true).unwrap();
         assert!(a.join("options.txt").symlink_metadata().is_err());
         assert!(std.join("options.txt").exists());
         symlink(std.join("options.txt"), a.join("options.txt")).unwrap();
-        free_entries(&[a.clone()], &[opt], true).unwrap();
+        free_entries(&[a.clone()], &[opt], true, true).unwrap();
         assert!(!a.join("options.txt").is_symlink());
         assert_eq!(fs::read_to_string(a.join("options.txt")).unwrap(), "o");
 
@@ -5969,6 +6007,36 @@ mod tests {
         assert_eq!(trash_target(&root, &at(root.join("mods/own.jar"))).unwrap(), root.join("mods/own.jar"));
         // a link that is the item itself can go: the original stays
         assert_eq!(trash_target(&root, &at(root.join("mods/link.jar"))).unwrap(), root.join("mods/link.jar"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn removing_an_original_copies_or_drops_for_its_users() {
+        let root = temp_root("release-item");
+        let saves = root.join("saves");
+        fs::create_dir_all(saves.join("W")).unwrap();
+        fs::write(saves.join("W/level.dat"), "w").unwrap();
+        fs::create_dir_all(saves.join("Other")).unwrap();
+        for i in ["A", "B"] {
+            fs::create_dir_all(root.join("installations").join(i)).unwrap();
+            symlink(&saves, root.join("installations").join(i).join("saves")).unwrap();
+        }
+        let (a, b) = (root.join("installations/A/saves"), root.join("installations/B/saves"));
+        let w = saves.join("W").to_string_lossy().to_string();
+        assert_eq!(shared_with_in(&root, &[w.clone()], false), vec!["A".to_string(), "B".to_string()]);
+
+        // deleting everywhere: the folder links stay as they are
+        assert_eq!(release_item(&root, &w, false).unwrap(), saves.join("W"));
+        assert!(a.is_symlink() && b.is_symlink());
+
+        // leaving copies: each gets its own, and the other world stays linked
+        release_item(&root, &w, true).unwrap();
+        for d in [&a, &b] {
+            assert!(!d.is_symlink() && !d.join("W").is_symlink());
+            assert_eq!(fs::read_to_string(d.join("W/level.dat")).unwrap(), "w");
+            assert!(d.join("Other").is_symlink());
+        }
+        assert!(saves.join("W/level.dat").is_file());
         fs::remove_dir_all(&root).unwrap();
     }
 
