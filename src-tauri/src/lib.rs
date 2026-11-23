@@ -334,8 +334,8 @@ struct ItemLink {
 }
 
 /// What installations can share whole, so the views can group them.
-const INSTANCE_ITEMS: [&str; 8] =
-    ["mods", "resourcepacks", "saves", "screenshots", "options.txt", "servers.dat", "config", "logs"];
+const INSTANCE_ITEMS: [&str; 9] =
+    ["mods", "resourcepacks", "shaderpacks", "saves", "screenshots", "options.txt", "servers.dat", "config", "logs"];
 
 /// Any real file under `dir`, not counting links.
 fn has_own_file(dir: &Path) -> bool {
@@ -3277,6 +3277,7 @@ struct ServerList {
     exists: bool,
     servers: Vec<Server>,
     backup: Vec<Server>,
+    archived: Vec<Server>,
 }
 
 #[tauri::command(async)]
@@ -3299,6 +3300,7 @@ fn list_servers() -> Vec<ServerList> {
                 exists: p.exists(),
                 servers: read_servers(&p),
                 backup: read_servers(&dir.join("servers.dat_old")),
+                archived: read_archived(&dir).unwrap_or_default(),
                 path: p.to_string_lossy().into(),
                 installation: inst,
             })
@@ -3314,10 +3316,83 @@ fn write_servers(installation: Option<String>, servers: Vec<Server>) -> CmdResul
     if servers.iter().any(|s| s.ip.trim().is_empty()) {
         return Err("every server needs an address".into());
     }
-    if p.exists() {
+    store_servers(&dir, &servers)
+}
+
+fn store_servers(dir: &Path, servers: &[Server]) -> CmdResult<()> {
+    let p = dir.join("servers.dat");
+    // a reorder loses nothing, so it must not push a removed server out of the backup
+    let sorted = |l: &[Server]| {
+        let mut v: Vec<String> = l.iter().map(|s| serde_json::to_string(s).unwrap_or_default()).collect();
+        v.sort();
+        v
+    };
+    if p.exists() && sorted(&read_servers(&p)) != sorted(servers) {
         fs::copy(&p, dir.join("servers.dat_old")).map_err(err)?;
     }
-    fs::write(&p, servers_nbt(&servers)).map_err(err)
+    fs::write(&p, servers_nbt(servers)).map_err(err)
+}
+
+/// Minecraft would drop unknown entries from servers.dat, so archived servers
+/// sit in a hidden file beside the real one and follow a linked list.
+fn archive_file(dir: &Path) -> PathBuf {
+    let p = dir.join("servers.dat");
+    fs::canonicalize(&p).unwrap_or(p).with_file_name(".servers_archived.json")
+}
+
+fn read_archived(dir: &Path) -> CmdResult<Vec<Server>> {
+    match fs::read_to_string(archive_file(dir)) {
+        Ok(t) => serde_json::from_str(&t).map_err(|e| format!("archived servers file is damaged: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(err(e)),
+    }
+}
+
+fn write_archived(dir: &Path, servers: &[Server]) -> CmdResult<()> {
+    let p = archive_file(dir);
+    let tmp = p.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(servers).map_err(err)?).map_err(err)?;
+    fs::rename(&tmp, &p).map_err(err)
+}
+
+fn take_server(list: &mut Vec<Server>, s: &Server) -> CmdResult<Server> {
+    let ip = s.ip.trim().to_lowercase();
+    let i = list
+        .iter()
+        .position(|x| x == s)
+        .or_else(|| list.iter().position(|x| x.ip.trim().to_lowercase() == ip))
+        .ok_or("that server is no longer in the list")?;
+    Ok(list.remove(i))
+}
+
+/// Writes the list gaining the server first: a failure leaves a duplicate, never a loss.
+fn set_server_archived_in(dir: &Path, server: &Server, archived: bool) -> CmdResult<()> {
+    let mut active = read_servers(&dir.join("servers.dat"));
+    let mut stored = read_archived(dir)?;
+    if archived {
+        let s = take_server(&mut active, server)?;
+        stored.push(s);
+        write_archived(dir, &stored)?;
+        store_servers(dir, &active)
+    } else {
+        let s = take_server(&mut stored, server)?;
+        active.push(s);
+        store_servers(dir, &active)?;
+        write_archived(dir, &stored)
+    }
+}
+
+#[tauri::command(async)]
+fn set_server_archived(installation: Option<String>, server: Server, archived: bool) -> CmdResult<()> {
+    set_server_archived_in(&scope_dir(installation.as_deref())?, &server, archived)
+}
+
+#[tauri::command(async)]
+fn delete_archived_server(installation: Option<String>, server: Server) -> CmdResult<()> {
+    let dir = scope_dir(installation.as_deref())?;
+    let mut stored = read_archived(&dir)?;
+    take_server(&mut stored, &server)?;
+    write_archived(&dir, &stored)
 }
 
 /// Swaps servers.dat and servers.dat_old, so a restore can itself be undone.
@@ -4341,14 +4416,19 @@ async fn install_mrpack(
 /// Imports whatever the links point at into an installation, matching its
 /// game version and loader, and pulls in required dependencies.
 #[tauri::command]
-async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: String, only_packs: bool) -> CmdResult<ImportReport> {
-    import_in(&links, &installation, only_packs, &Progress::new(Some(app))).await
+async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: String, only: Option<String>) -> CmdResult<ImportReport> {
+    import_in(&links, &installation, only.as_deref(), &Progress::new(Some(app))).await
 }
 
-/// `only_packs` takes resource packs and reports anything else as skipped.
-async fn import_in(links: &[String], installation: &str, only_packs: bool, p: &Progress) -> CmdResult<ImportReport> {
+/// `only` ("resourcepack" or "shader") takes that kind and reports anything else as skipped.
+async fn import_in(links: &[String], installation: &str, only: Option<&str>, p: &Progress) -> CmdResult<ImportReport> {
     // a shared mods folder's newest version says nothing about this one's packs
-    let (dir, game, loader) = if only_packs { inst_target(installation)? } else { import_target(installation)? };
+    let (dir, game, loader) = if only.is_some() && !installation.starts_with("standards/") {
+        inst_target(installation)?
+    } else {
+        import_target(installation)?
+    };
+    let only_label = if only == Some("shader") { "shader" } else { "resource pack" };
     let mut report = ImportReport::default();
     let mut titles = vec![];
     let mut queue = vec![];
@@ -4361,8 +4441,8 @@ async fn import_in(links: &[String], installation: &str, only_packs: bool, p: &P
                 continue;
             }
         };
-        if only_packs && info.kind != "resourcepack" && info.kind != "collection" {
-            report.skipped.push(format!("{} (not a resource pack)", info.title));
+        if only.is_some_and(|k| info.kind != k && info.kind != "collection") {
+            report.skipped.push(format!("{} (not a {only_label})", info.title));
             continue;
         }
         titles.push(info.title.clone());
@@ -4405,8 +4485,8 @@ async fn import_in(links: &[String], installation: &str, only_packs: bool, p: &P
             .cloned()
             .unwrap_or_default()
             .into_iter()
-            .partition(|p| !only_packs || p["project_type"] == "resourcepack");
-        report.skipped.extend(others.iter().map(|p| format!("{} (not a resource pack)", p["title"].as_str().unwrap_or("?"))));
+            .partition(|p| only.is_none_or(|k| p["project_type"] == k));
+        report.skipped.extend(others.iter().map(|p| format!("{} (not a {only_label})", p["title"].as_str().unwrap_or("?"))));
         let jobs: Vec<_> = projects
             .into_iter()
             .map(|p| {
@@ -4823,6 +4903,405 @@ fn list_screenshots() -> Vec<Screenshot> {
     }
     out.sort_by(|a, b| b.modified.cmp(&a.modified));
     out
+}
+
+// ---------------------------------------------------------------------------
+// Shader packs — read-only, with screenshots from each pack's Modrinth gallery
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct ShaderPack {
+    file: String,
+    path: String,
+    is_dir: bool,
+    size_bytes: u64,
+    modified: u64,
+}
+
+#[derive(Serialize)]
+struct ShaderList {
+    dir: String,
+    /// the folder is a link to a shared one
+    linked: bool,
+    /// the pack Iris or OptiFine has on
+    active: Option<String>,
+    /// the settings files that choice lives in; none until a shader mod has run
+    configs: Vec<String>,
+    packs: Vec<ShaderPack>,
+}
+
+#[derive(Serialize)]
+struct ShaderImage {
+    url: String,
+    raw_url: String,
+    title: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ShaderInfo {
+    title: String,
+    description: String,
+    icon: Option<String>,
+    page: String,
+    downloads: u64,
+    images: Vec<ShaderImage>,
+}
+
+fn shader_packs(dir: &Path) -> Vec<ShaderPack> {
+    let mut out = vec![];
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        let (p, file) = (e.path(), e.file_name().to_string_lossy().to_string());
+        if file.starts_with('.') || !(p.is_dir() || file.to_lowercase().ends_with(".zip")) {
+            continue;
+        }
+        out.push(ShaderPack {
+            is_dir: p.is_dir(),
+            size_bytes: entry_size(&p),
+            modified: modified_secs(&p),
+            path: p.to_string_lossy().into(),
+            file,
+        });
+    }
+    out.sort_by_key(|p| p.file.to_lowercase());
+    out
+}
+
+const IRIS_CONFIG: &str = "config/iris.properties";
+const OPTIFINE_CONFIG: &str = "optionsshaders.txt";
+
+/// A value as java.util.Properties writes it, which both Iris and OptiFine read.
+fn prop_escape(v: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in v.chars().enumerate() {
+        match c {
+            ' ' if i == 0 => out.push_str("\\ "),
+            '\\' | '=' | ':' | '#' | '!' => {
+                out.push('\\');
+                out.push(c);
+            }
+            c if c.is_ascii() => out.push(c),
+            c => {
+                let mut units = [0; 2];
+                for u in c.encode_utf16(&mut units) {
+                    out.push_str(&format!("\\u{u:04X}"));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn prop_unescape(v: &str) -> String {
+    let units: Vec<char> = v.chars().collect();
+    let mut utf16: Vec<u16> = vec![];
+    let mut i = 0;
+    while i < units.len() {
+        if units[i] != '\\' || i + 1 == units.len() {
+            let mut b = [0; 2];
+            utf16.extend_from_slice(units[i].encode_utf16(&mut b));
+            i += 1;
+            continue;
+        }
+        i += 1;
+        if units[i] == 'u' && i + 4 < units.len() {
+            let hex: String = units[i + 1..i + 5].iter().collect();
+            if let Ok(u) = u16::from_str_radix(&hex, 16) {
+                utf16.push(u);
+                i += 5;
+                continue;
+            }
+        }
+        let c = match units[i] {
+            't' => '\t',
+            'n' => '\n',
+            'r' => '\r',
+            'f' => '\u{c}',
+            c => c,
+        };
+        let mut b = [0; 2];
+        utf16.extend_from_slice(c.encode_utf16(&mut b));
+        i += 1;
+    }
+    String::from_utf16_lossy(&utf16)
+}
+
+fn prop_split(line: &str) -> Option<(&str, &str)> {
+    let t = line.trim_start();
+    if t.is_empty() || t.starts_with(['#', '!']) {
+        return None;
+    }
+    let at = t.find(['=', ':'])?;
+    Some((t[..at].trim_end(), t[at + 1..].trim_start()))
+}
+
+fn prop_get(text: &str, key: &str) -> Option<String> {
+    text.lines().filter_map(prop_split).find(|(k, _)| *k == key).map(|(_, v)| prop_unescape(v))
+}
+
+/// Changes one key and leaves every other line, comments included, alone.
+fn prop_set(text: &str, key: &str, value: &str) -> String {
+    let line = format!("{key}={}", prop_escape(value));
+    let mut found = false;
+    let mut out: Vec<String> = text
+        .lines()
+        .map(|l| {
+            if !found && prop_split(l).is_some_and(|(k, _)| k == key) {
+                found = true;
+                line.clone()
+            } else {
+                l.to_string()
+            }
+        })
+        .collect();
+    if !found {
+        out.push(line);
+    }
+    out.join("\n") + "\n"
+}
+
+fn active_shader(game: &Path) -> Option<String> {
+    if let Ok(t) = fs::read_to_string(game.join(IRIS_CONFIG)) {
+        return (prop_get(&t, "enableShaders").as_deref() != Some("false"))
+            .then(|| prop_get(&t, "shaderPack"))
+            .flatten()
+            .filter(|p| !p.is_empty());
+    }
+    let t = fs::read_to_string(game.join(OPTIFINE_CONFIG)).ok()?;
+    prop_get(&t, "shaderPack").filter(|p| !p.is_empty() && p != "OFF" && p != "(internal)")
+}
+
+fn set_shader_in(game: &Path, file: Option<&str>) -> CmdResult<()> {
+    if file.is_some_and(|f| f.is_empty() || f.contains(['/', '\\', '\n', '\r'])) {
+        return Err("That isn't a shader pack name".into());
+    }
+    let mut wrote = false;
+    for rel in [IRIS_CONFIG, OPTIFINE_CONFIG] {
+        let p = game.join(rel);
+        let Ok(text) = fs::read_to_string(&p) else { continue };
+        let next = if rel == IRIS_CONFIG {
+            let t = prop_set(&text, "enableShaders", if file.is_some() { "true" } else { "false" });
+            file.map_or(t.clone(), |f| prop_set(&t, "shaderPack", f))
+        } else {
+            prop_set(&text, "shaderPack", file.unwrap_or("OFF"))
+        };
+        let name = p.file_name().unwrap_or_default().to_string_lossy();
+        fs::copy(&p, p.with_file_name(format!("{name}.bak"))).map_err(err)?;
+        fs::write(&p, next).map_err(err)?;
+        wrote = true;
+    }
+    if wrote {
+        Ok(())
+    } else {
+        Err("Launch this instance once with Iris or OptiFine, then pick a shader here".into())
+    }
+}
+
+#[tauri::command(async)]
+fn list_shaders(installation: Option<String>) -> CmdResult<ShaderList> {
+    let game = scope_dir(installation.as_deref())?;
+    let dir = game.join("shaderpacks");
+    Ok(ShaderList {
+        linked: dir.is_symlink(),
+        active: active_shader(&game),
+        configs: [IRIS_CONFIG, OPTIFINE_CONFIG]
+            .iter()
+            .map(|r| game.join(r))
+            .filter(|p| p.exists())
+            .map(|p| p.to_string_lossy().into())
+            .collect(),
+        packs: shader_packs(&dir),
+        dir: dir.to_string_lossy().into(),
+    })
+}
+
+#[tauri::command(async)]
+fn set_shader(installation: Option<String>, file: Option<String>) -> CmdResult<()> {
+    set_shader_in(&scope_dir(installation.as_deref())?, file.as_deref())
+}
+
+#[tauri::command(async)]
+fn add_shaders(installation: Option<String>, files: Vec<String>) -> CmdResult<usize> {
+    copy_in(&scope_dir(installation.as_deref())?.join("shaderpacks"), &files, ".zip")
+}
+
+/// `ComplementaryReimagined_r5.5.1.zip` → `Complementary Reimagined`
+fn shader_query(file: &str) -> String {
+    let stem = file.strip_suffix(".zip").unwrap_or(file);
+    let mut spaced = String::new();
+    let mut lower = false;
+    for c in stem.chars() {
+        if lower && c.is_uppercase() {
+            spaced.push(' ');
+        }
+        lower = c.is_lowercase();
+        spaced.push(if c.is_alphanumeric() { c } else { ' ' });
+    }
+    let words: Vec<&str> = spaced.split_whitespace().take_while(|w| !w.chars().any(|c| c.is_ascii_digit())).collect();
+    words.join(" ")
+}
+
+/// The search hit this file is named after, if any. Hashes come first; this
+/// catches packs downloaded from a creator's own site.
+// ponytail: filename-prefix heuristic, a fork named after its parent shows the parent's gallery
+fn shader_hit<'a>(file: &str, hits: &'a [Value]) -> Option<&'a Value> {
+    let norm = |s: &str| s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase();
+    let name = norm(file.strip_suffix(".zip").unwrap_or(file));
+    let score = |h: &Value| {
+        ["title", "slug"]
+            .iter()
+            .flat_map(|k| {
+                let full = norm(h[k].as_str().unwrap_or(""));
+                let short = full.trim_end_matches("shaders").trim_end_matches("shader").to_string();
+                [full, short]
+            })
+            .filter(|c| c.len() >= 3 && name.starts_with(c.as_str()))
+            .map(|c| c.len())
+            .max()
+    };
+    hits.iter().filter_map(|h| Some((score(h)?, h))).max_by_key(|(s, _)| *s).map(|(_, h)| h)
+}
+
+fn shader_info(project: &Value) -> ShaderInfo {
+    let mut gallery: Vec<&Value> = project["gallery"].as_array().into_iter().flatten().collect();
+    gallery.sort_by_key(|g| (!g["featured"].as_bool().unwrap_or(false), g["ordering"].as_i64().unwrap_or(0)));
+    let images = gallery
+        .into_iter()
+        .filter_map(|g| {
+            let url = g["url"].as_str().filter(|u| allowed_host(u))?;
+            let raw = g["raw_url"].as_str().filter(|u| allowed_host(u)).unwrap_or(url);
+            Some(ShaderImage { url: url.into(), raw_url: raw.into(), title: g["title"].as_str().map(String::from) })
+        })
+        .collect();
+    ShaderInfo {
+        title: project["title"].as_str().unwrap_or("").into(),
+        description: project["description"].as_str().unwrap_or("").into(),
+        icon: project["icon_url"].as_str().filter(|u| allowed_host(u)).map(String::from),
+        page: format!("https://modrinth.com/shader/{}", project["slug"].as_str().unwrap_or("")),
+        downloads: project["downloads"].as_u64().unwrap_or(0),
+        images,
+    }
+}
+
+/// Modrinth details for every shader pack, keyed by file name. Packs it doesn't know are left out.
+#[tauri::command]
+async fn shader_gallery() -> CmdResult<std::collections::HashMap<String, ShaderInfo>> {
+    use std::collections::HashMap;
+    let (packs, hashes) = tauri::async_runtime::spawn_blocking(|| {
+        let mut seen = std::collections::HashSet::new();
+        let packs: Vec<ShaderPack> = instance_dirs(&mc_dir(), "shaderpacks")
+            .iter()
+            .flat_map(|(_, d)| shader_packs(d))
+            .filter(|p| seen.insert(p.file.clone()))
+            .collect();
+        let hashes = par_map(&packs, |p| {
+            if p.is_dir { None } else { fs::read(&p.path).ok().map(|b| sha512_hex(&b)) }
+        });
+        (packs, hashes)
+    })
+    .await
+    .map_err(err)?;
+
+    let known: Vec<&String> = hashes.iter().flatten().collect();
+    let found = if known.is_empty() {
+        Value::Null
+    } else {
+        send_json(http().post(format!("{MR}/v2/version_files")).json(&json!({"hashes": known, "algorithm": "sha512"}))).await?
+    };
+
+    let mut project_of: HashMap<String, String> = HashMap::new(); // file → project
+    for (p, hash) in packs.iter().zip(&hashes) {
+        if let Some(id) = hash.as_ref().and_then(|h| found[h]["project_id"].as_str()) {
+            project_of.insert(p.file.clone(), id.into());
+            continue;
+        }
+        let query = shader_query(&p.file);
+        if query.is_empty() {
+            continue;
+        }
+        let hits = send_json(http().get(format!("{MR}/v2/search")).query(&[
+            ("query", query.as_str()),
+            ("limit", "5"),
+            ("facets", r#"[["project_type:shader"]]"#),
+        ]))
+        .await
+        .unwrap_or(Value::Null);
+        let hit = hits["hits"].as_array().and_then(|h| shader_hit(&p.file, h));
+        if let Some(id) = hit.and_then(|h| h["project_id"].as_str()) {
+            project_of.insert(p.file.clone(), id.into());
+        }
+    }
+    if project_of.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let mut ids: Vec<&String> = project_of.values().collect();
+    ids.sort();
+    ids.dedup();
+    let projects = send_json(http().get(format!("{MR}/v2/projects")).query(&[("ids", json!(ids).to_string())])).await?;
+    let projects: HashMap<&str, &Value> =
+        projects.as_array().into_iter().flatten().filter_map(|p| Some((p["id"].as_str()?, p))).collect();
+    Ok(project_of
+        .iter()
+        .filter_map(|(file, id)| Some((file.clone(), shader_info(projects.get(id.as_str())?))))
+        .collect())
+}
+
+#[cfg(test)]
+mod shader_tests {
+    use super::*;
+
+    #[test]
+    fn shader_names_find_their_project() {
+        assert_eq!(shader_query("ComplementaryReimagined_r5.5.1.zip"), "Complementary Reimagined");
+        assert_eq!(shader_query("BSL_v8.4.zip"), "BSL");
+        let hits = [
+            json!({"title": "Rethinking Voxels", "slug": "rethinking-voxels"}),
+            json!({"title": "Complementary Shaders - Reimagined", "slug": "complementary-reimagined"}),
+            json!({"title": "BSL Shaders", "slug": "bsl-shaders"}),
+        ];
+        let slug = |f: &str| shader_hit(f, &hits).map(|h| h["slug"].as_str().unwrap().to_string());
+        assert_eq!(slug("ComplementaryReimagined_r5.5.1.zip").as_deref(), Some("complementary-reimagined"));
+        assert_eq!(slug("BSL_v8.4.zip").as_deref(), Some("bsl-shaders"));
+        assert_eq!(slug("Sildurs Vibrant.zip"), None);
+    }
+
+    #[test]
+    fn shader_choice_round_trips_and_keeps_other_settings() {
+        let game = std::env::temp_dir().join(format!("mim-shader-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(game.join("config")).unwrap();
+        assert!(set_shader_in(&game, Some("A.zip")).is_err()); // no shader mod has run yet
+        fs::write(game.join(IRIS_CONFIG), "#comment\nenableShaders=false\nmaxShadowRenderDistance=32\n").unwrap();
+        fs::write(game.join(OPTIFINE_CONFIG), "shaderPack=OFF\nantialiasingLevel=2\n").unwrap();
+        assert_eq!(active_shader(&game), None);
+
+        let name = "Déjà Vu: v1=2 #!.zip";
+        set_shader_in(&game, Some(name)).unwrap();
+        assert_eq!(active_shader(&game).as_deref(), Some(name));
+        let iris = fs::read_to_string(game.join(IRIS_CONFIG)).unwrap();
+        assert!(iris.contains("#comment") && iris.contains("maxShadowRenderDistance=32") && iris.contains("enableShaders=true"));
+        assert!(iris.is_ascii()); // Properties files are Latin-1 with \\u escapes
+        let optifine = fs::read_to_string(game.join(OPTIFINE_CONFIG)).unwrap();
+        assert!(optifine.contains("antialiasingLevel=2"));
+        assert_eq!(prop_get(&optifine, "shaderPack").as_deref(), Some(name));
+        assert!(game.join("config/iris.properties.bak").exists());
+
+        set_shader_in(&game, None).unwrap();
+        assert_eq!(active_shader(&game), None);
+        assert_eq!(prop_get(&fs::read_to_string(game.join(OPTIFINE_CONFIG)).unwrap(), "shaderPack").as_deref(), Some("OFF"));
+        assert!(set_shader_in(&game, Some("../evil.zip")).is_err());
+        fs::remove_dir_all(&game).unwrap();
+    }
+
+    #[test]
+    fn shader_gallery_puts_featured_first_and_drops_foreign_hosts() {
+        let info = shader_info(&json!({"slug": "x", "gallery": [
+            {"url": "https://cdn.modrinth.com/a.png", "ordering": 0},
+            {"url": "https://evil.example/b.png", "featured": true, "ordering": 0},
+            {"url": "https://cdn.modrinth.com/c.png", "featured": true, "ordering": 5},
+        ]}));
+        let urls: Vec<&str> = info.images.iter().map(|i| i.url.as_str()).collect();
+        assert_eq!(urls, ["https://cdn.modrinth.com/c.png", "https://cdn.modrinth.com/a.png"]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -5922,6 +6401,37 @@ mod tests {
     }
 
     #[test]
+    fn archives_servers_and_reorders_without_losing_the_backup() {
+        let dir = std::env::temp_dir().join(format!("mim-archive-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let srv = |n: &str| Server { name: n.into(), ip: format!("{n}.net"), icon: None, accept_textures: None, hidden: false };
+        let (a, b, c) = (srv("a"), srv("b"), srv("c"));
+        fs::write(dir.join("servers.dat"), servers_nbt(&[a.clone(), b.clone(), c.clone()])).unwrap();
+
+        set_server_archived_in(&dir, &b, true).unwrap();
+        assert_eq!(read_servers(&dir.join("servers.dat")), [a.clone(), c.clone()]);
+        assert_eq!(read_archived(&dir).unwrap(), [b.clone()]);
+        assert_eq!(read_servers(&dir.join("servers.dat_old")).len(), 3);
+
+        // a reorder keeps the backup that still holds the full list
+        store_servers(&dir, &[c.clone(), a.clone()]).unwrap();
+        assert_eq!(read_servers(&dir.join("servers.dat")), [c.clone(), a.clone()]);
+        assert_eq!(read_servers(&dir.join("servers.dat_old")).len(), 3);
+
+        set_server_archived_in(&dir, &b, false).unwrap();
+        assert_eq!(read_servers(&dir.join("servers.dat")), [c.clone(), a.clone(), b.clone()]);
+        assert!(read_archived(&dir).unwrap().is_empty());
+        assert!(set_server_archived_in(&dir, &b, false).is_err());
+
+        // a damaged archive is refused rather than overwritten
+        fs::write(archive_file(&dir), "not json").unwrap();
+        assert!(set_server_archived_in(&dir, &a, true).is_err());
+        assert_eq!(fs::read_to_string(archive_file(&dir)).unwrap(), "not json");
+        assert_eq!(read_servers(&dir.join("servers.dat")).len(), 3);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn zips_and_unzips_a_world() {
         let root = std::env::temp_dir().join(format!("mim-zip-{}", uuid::Uuid::new_v4()));
         let world = root.join("My World");
@@ -5991,7 +6501,7 @@ mod tests {
         fs::write(root.join("launcher_profiles.json"), profile.to_string()).unwrap();
         std::env::set_var(MC_DIR_ENV, &root);
         let links = ["https://modrinth.com/resourcepack/faithful-32x".to_string(), "https://modrinth.com/mod/sodium".to_string()];
-        let r = tauri::async_runtime::block_on(import_in(&links, "Test", true, &Progress::new(None))).unwrap();
+        let r = tauri::async_runtime::block_on(import_in(&links, "Test", Some("resourcepack"), &Progress::new(None))).unwrap();
         assert_eq!(r.added.len(), 1, "{r:?}");
         assert!(r.skipped.iter().any(|s| s.contains("not a resource pack")), "{r:?}");
         assert_eq!(fs::read_dir(inst.join("resourcepacks")).unwrap().count(), 1);
@@ -6011,15 +6521,15 @@ mod tests {
         std::env::set_var(MC_DIR_ENV, &root);
 
         // Mod Menu requires Fabric API and Placeholder API, which should come along
-        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/mod/modmenu".into()], "Test", false, &Progress::new(None))).unwrap();
+        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/mod/modmenu".into()], "Test", None, &Progress::new(None))).unwrap();
         assert!(r.added.iter().any(|t| t == "Fabric API"), "{:?}", r.added);
-        let again = tauri::async_runtime::block_on(import_in(&["modmenu".into()], "Test", false, &Progress::new(None))).unwrap();
+        let again = tauri::async_runtime::block_on(import_in(&["modmenu".into()], "Test", None, &Progress::new(None))).unwrap();
         assert!(again.added.is_empty() && again.skipped[0].contains("already"), "{:?}", again.skipped);
         // already newest, so nothing to update
         let u = tauri::async_runtime::block_on(update_in("Test", &Progress::new(None))).unwrap();
         assert!(u.added.is_empty() && u.skipped.is_empty(), "{:?}", u.added);
         // a CurseForge link to a mod that's on Modrinth too
-        let cf = tauri::async_runtime::block_on(import_in(&["https://www.curseforge.com/minecraft/mc-mods/sodium".into()], "Test", false, &Progress::new(None))).unwrap();
+        let cf = tauri::async_runtime::block_on(import_in(&["https://www.curseforge.com/minecraft/mc-mods/sodium".into()], "Test", None, &Progress::new(None))).unwrap();
         assert_eq!(cf.added, ["Sodium"]);
         let files: Vec<_> = fs::read_dir(inst.join("mods")).unwrap().flatten().map(|e| e.file_name()).collect();
         assert_eq!(files.len(), 4, "{files:?}");
@@ -6036,7 +6546,7 @@ mod tests {
         assert!(u.added.iter().any(|n| n.starts_with("sodium")) && !inst.join("mods/sodium-old.jar").exists(), "{u:?}");
 
         // a modpack: files from the index plus its overrides
-        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/modpack/fabulously-optimized".into()], "Test", false, &Progress::new(None))).unwrap();
+        let r = tauri::async_runtime::block_on(import_in(&["https://modrinth.com/modpack/fabulously-optimized".into()], "Test", None, &Progress::new(None))).unwrap();
         assert!(r.added.len() > 10 && inst.join("config").is_dir(), "{:?}", r.skipped);
         fs::remove_dir_all(&root).unwrap();
     }
@@ -6051,7 +6561,7 @@ mod tests {
         let profile = json!({"profiles": {"t": {"gameDir": inst.to_string_lossy(), "lastVersionId": "fabric-loader-0.16.14-1.20.1"}}});
         fs::write(root.join("launcher_profiles.json"), profile.to_string()).unwrap();
         std::env::set_var(MC_DIR_ENV, &root);
-        tauri::async_runtime::block_on(import_in(&["sodium".into()], "Old", false, &Progress::new(None))).unwrap();
+        tauri::async_runtime::block_on(import_in(&["sodium".into()], "Old", None, &Progress::new(None))).unwrap();
         fs::write(inst.join("mods/homemade.jar"), b"not on modrinth").unwrap();
 
         let scan = tauri::async_runtime::block_on(scan_upgrade_in("Old", &Progress::new(None))).unwrap();
@@ -6676,6 +7186,8 @@ pub fn run() {
             write_options,
             list_servers,
             write_servers,
+            set_server_archived,
+            delete_archived_server,
             restore_servers_backup,
             ping_server,
             import_world,
@@ -6699,6 +7211,10 @@ pub fn run() {
             set_packs,
             add_packs,
             list_screenshots,
+            list_shaders,
+            set_shader,
+            add_shaders,
+            shader_gallery,
             purge_cache,
             list_profiles,
             relink_profile,
