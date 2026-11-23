@@ -421,11 +421,10 @@ export const api = {
    * neither replace nor merge settled it, nothing changed. */
   addToStandard: (standard: string, from: string | null, names: string[], replace: boolean, merge: boolean) =>
     invoke<string[]>("add_to_standard", { standard, from, names, replace, merge }),
-  /** Takes an item off Shared's list; its files stay. */
-  removeSharedItem: (name: string) => invoke<void>("remove_shared_item", { name }),
-  /** Moves an item to the Trash; installations using it keep their own copy. */
-  removeFromStandard: (name: string, relPath: string) =>
-    invoke<void>("remove_from_standard", { name, relPath }),
+  /** Takes items out of a standard. Installations using them keep a copy with `keep`,
+   * otherwise lose them. A standard's files go to the Trash; Shared's stay put. */
+  removeFromStandard: (name: string, relPaths: string[], keep: boolean) =>
+    invoke<void>("remove_from_standard", { name, relPaths, keep }),
   /** Gives an installation its own copy of entries instead of links. */
   copyStandard: (name: string, installation: string, relPaths: string[]) =>
     invoke<void>("copy_standard", { name, installation, relPaths }),

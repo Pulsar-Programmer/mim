@@ -1642,57 +1642,84 @@ fn add_copied(here: &Path, std: &Path, names: &[String], replace: bool) -> CmdRe
     Ok(blocked)
 }
 
-/// Takes an item off Shared's list. Files stay where they are.
-#[tauri::command(async)]
-fn remove_shared_item(name: String) -> CmdResult<()> {
-    if let Some(i) = installation_names().iter().find(|i| {
-        let inst = installations_dir().join(i);
-        links_of(&inst, SHARED).iter().any(|l| l.strip_prefix(&inst).is_ok_and(|r| {
-            let r = slash_path(r);
-            r == name || r.starts_with(&format!("{name}/"))
-        }))
-    }) {
-        return Err(format!("{i} still links {name} — unlink it first"));
-    }
-    let mut items = read_shared_in(&standards_dir());
-    items.retain(|n| *n != name && !n.starts_with(&format!("{name}/")));
-    write_shared_in(&standards_dir(), &items)
-}
-
-/// Each installation linking this entry gets a real copy instead. Changes
-/// nothing if one only has it through a whole linked folder.
-fn free_entry(insts: &[PathBuf], src: &Path, dest: &str) -> CmdResult<()> {
-    let mut links = vec![];
-    for i in insts {
-        let (state, link) = link_state(i, src, dest);
-        if state.state == "linked" {
-            if link != i.join(dest) {
-                return Err(format!("{dest} is inside a linked folder — unlink that first"));
-            }
-            links.push(link);
+/// Shared's list without `gone`. A listed folder losing only some files
+/// becomes the rest of its files (`listed`: every entry now shown).
+fn shared_without(items: &[String], gone: &[String], listed: &[String]) -> Vec<String> {
+    let mut out = vec![];
+    for n in items {
+        let under = format!("{n}/");
+        if gone.contains(n) || gone.iter().any(|g| n.starts_with(&format!("{g}/"))) {
+            continue;
+        }
+        if gone.iter().any(|g| g.starts_with(&under)) {
+            out.extend(listed.iter().filter(|l| l.starts_with(&under) && !gone.contains(l)).cloned());
+        } else {
+            out.push(n.clone());
         }
     }
-    detach(&links, true)
+    out
 }
 
-/// Moves one item out of a standard to the Trash. Installations using it keep
-/// their own copy.
-#[tauri::command(async)]
-fn remove_from_standard(name: String, rel_path: String) -> CmdResult<()> {
-    if name == SHARED {
-        return Err("Shared items come off the list instead".into());
+/// Removes every installation's links to these entries; with `keep`, each
+/// becomes a real copy. Changes nothing if one has an entry through a whole
+/// linked folder.
+fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool) -> CmdResult<()> {
+    let mut links = vec![];
+    for i in insts {
+        for (src, dest) in pairs {
+            let (state, link) = link_state(i, src, dest);
+            if state.state == "linked" {
+                if link != i.join(dest) {
+                    let inst = i.file_name().unwrap_or_default().to_string_lossy();
+                    return Err(format!("{inst} has {dest} inside a linked folder — unlink that first"));
+                }
+                links.push(link);
+            }
+        }
     }
-    let (src, dest) = entry_of(&name, &rel_path)?;
-    if dest == MERGED || is_version_name(&dest) {
-        return Err(format!("can't remove all of {dest}"));
+    detach(&links, keep)
+}
+
+/// Takes items out of a standard. Installations linking them keep a real copy
+/// with `keep`, otherwise lose the link. A standard's own files go to the
+/// Trash; Shared's stay in the Minecraft folder and just leave its list.
+#[tauri::command(async)]
+fn remove_from_standard(name: String, rel_paths: Vec<String>, keep: bool) -> CmdResult<()> {
+    let shared = name == SHARED;
+    let (mut pairs, mut gone) = (vec![], vec![]);
+    for r in &rel_paths {
+        if shared {
+            let item = r
+                .strip_prefix(&format!("{SHARED}/"))
+                .filter(|n| shared_item_ok(n))
+                .ok_or(format!("can't remove {r}"))?;
+            gone.push(item.to_string());
+            // listed but not in the folder: nothing can link it
+            if mc_dir().join(item).symlink_metadata().is_err() {
+                continue;
+            }
+        }
+        let (src, dest) = entry_of(&name, r)?;
+        if !shared && (dest == MERGED || is_version_name(&dest)) {
+            return Err(format!("can't remove all of {dest}"));
+        }
+        pairs.push((src, dest));
     }
     let names = installation_names();
     let dirs: Vec<PathBuf> = names.iter().map(|n| installations_dir().join(n)).collect();
-    free_entry(&dirs, &src, &dest)?;
+    free_entries(&dirs, &pairs, keep)?;
+    if shared {
+        let listed: Vec<String> = shared_entries().into_iter().map(|e| e.name).collect();
+        let items = shared_without(&read_shared_in(&standards_dir()), &gone, &listed);
+        return write_shared_in(&standards_dir(), &items);
+    }
     for (n, d) in names.iter().zip(&dirs) {
         forget_if_unlinked(&name, d, n)?;
     }
-    trash::delete(src).map_err(err)
+    for (src, _) in pairs {
+        trash::delete(src).map_err(err)?;
+    }
+    Ok(())
 }
 
 /// Gives an installation its own copy of standard entries instead of a link.
@@ -5104,7 +5131,7 @@ mod tests {
         assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
         assert!(share_in(&a, &std, &["nothing".into()], false).is_err());
         // removing it from the standard leaves the installation a real copy
-        free_entry(&[a.clone()], &std.join("journeymap"), "journeymap").unwrap();
+        free_entries(&[a.clone()], &[(std.join("journeymap"), "journeymap".into())], true).unwrap();
         assert!(!a.join("journeymap").is_symlink());
         assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
         fs::remove_dir_all(a.join("journeymap")).unwrap();
@@ -5850,6 +5877,40 @@ mod tests {
         fs::remove_dir_all(&mc).unwrap();
     }
 
+    #[test]
+    fn removing_entries_keeps_or_drops_links() {
+        let root = temp_root("remove-entries");
+        let (std, a) = (root.join("std"), root.join("a"));
+        fs::create_dir_all(std.join("config")).unwrap();
+        fs::create_dir_all(&a).unwrap();
+        fs::write(std.join("config/x.json"), "x").unwrap();
+        fs::write(std.join("options.txt"), "o").unwrap();
+        symlink(std.join("options.txt"), a.join("options.txt")).unwrap();
+        symlink(std.join("config"), a.join("config")).unwrap();
+        let opt = (std.join("options.txt"), "options.txt".to_string());
+        let inner = (std.join("config/x.json"), "config/x.json".to_string());
+
+        // a file inside a whole linked folder stops the batch before anything changes
+        assert!(free_entries(&[a.clone()], &[opt.clone(), inner], false).is_err());
+        assert!(a.join("options.txt").is_symlink());
+
+        free_entries(&[a.clone()], &[opt.clone()], false).unwrap();
+        assert!(a.join("options.txt").symlink_metadata().is_err());
+        assert!(std.join("options.txt").exists());
+        symlink(std.join("options.txt"), a.join("options.txt")).unwrap();
+        free_entries(&[a.clone()], &[opt], true).unwrap();
+        assert!(!a.join("options.txt").is_symlink());
+        assert_eq!(fs::read_to_string(a.join("options.txt")).unwrap(), "o");
+
+        let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            shared_without(&v(&["saves", "config"]), &v(&["config/a"]), &v(&["saves", "config/a", "config/b"])),
+            v(&["saves", "config/b"])
+        );
+        assert_eq!(shared_without(&v(&["saves", "logs"]), &v(&["logs"]), &[]), v(&["saves"]));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     fn temp_root(tag: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!("mim-{tag}-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
@@ -6081,7 +6142,6 @@ pub fn run() {
             link_folder,
             share_config,
             add_to_standard,
-            remove_shared_item,
             remove_from_standard,
             copy_standard,
             list_items,

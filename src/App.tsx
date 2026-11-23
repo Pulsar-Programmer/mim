@@ -12,7 +12,6 @@ import {
   GameVersion,
   LoaderVersion,
   Standard,
-  StandardEntry,
   entriesFor,
   LogEntry,
   FolderItem,
@@ -33,7 +32,7 @@ import { UpdateButton } from "./UpdateButton";
 import { ConfigView } from "./ConfigView";
 import { LinkEditor } from "./LinkEditor";
 import { AddToStandard } from "./AddToStandard";
-import { StandardFiles, StandardSummary } from "./StandardFiles";
+import { RemoveFromStandard, StandardFiles, StandardSummary } from "./StandardFiles";
 import { LinksDrawer } from "./LinksDrawer";
 import { LinkWizard } from "./LinkWizard";
 import { UpgradeDrawer } from "./UpgradeDrawer";
@@ -1088,6 +1087,7 @@ function StandardsView({
   const [renaming, setRenaming] = useState<string | null>(null);
   // the file browser: a standard's name, null for all of them, undefined when closed
   const [viewing, setViewing] = useState<string | null | undefined>(undefined);
+  const [removing, setRemoving] = useState<{ s: Standard; rels: string[] } | null>(null);
 
   async function rename(s: Standard, to: string) {
     if (renaming !== s.name) return; // Enter already handled it before the blur
@@ -1102,23 +1102,12 @@ function StandardsView({
     }
   }
 
-  async function removeItem(name: string) {
-    try {
-      await api.removeSharedItem(name);
-      load();
-    } catch (e) {
-      notify(String(e));
-    }
+  // nothing is lost taking an unlinked item off Shared's list, so no need to ask
+  function removeItems(s: Standard, rels: string[]) {
+    if (s.builtin && !Object.values(s.linked).flat().some((r) => rels.includes(r)))
+      api.removeFromStandard(s.name, rels, true).then(load, (e) => notify(String(e)));
+    else setRemoving({ s, rels });
   }
-
-  const removeEntry = (s: Standard, rel: string, name: string) =>
-    confirm(`rm:${rel}`, async () => {
-      await api.removeFromStandard(s.name, rel);
-      return brief(`Moved ${name} to Trash — installations using it keep a copy`);
-    });
-
-  const removeAny = (s: Standard, e: StandardEntry) =>
-    s.builtin ? removeItem(e.name) : removeEntry(s, e.rel_path, e.name);
 
   async function create() {
     if (!newName.trim()) return;
@@ -1152,7 +1141,7 @@ function StandardsView({
         </div>
         <div className="row-inline">
           <button className="btn" onClick={() => setViewing(null)}>
-            View All Files
+            Edit All Files
           </button>
           <button className="btn" onClick={openFolder}>
             Open Folder
@@ -1204,11 +1193,9 @@ function StandardsView({
               </span>
             </div>
             <div className="row-inline std-actions">
-              {s.entries.length > 0 && (
-                <button className="btn small" onClick={() => setViewing(s.name)}>
-                  View Files
-                </button>
-              )}
+              <button className="btn small" onClick={() => setViewing(s.name)}>
+                Edit Files
+              </button>
               <button className="btn small" onClick={() => api.revealPath(s.path, false)}>
                 Open
               </button>
@@ -1225,7 +1212,7 @@ function StandardsView({
             </div>
           </div>
 
-          <StandardSummary s={s} armed={armed} onRemove={removeAny} onAdd={() => setAdding(s)} onView={() => setViewing(s.name)} />
+          <StandardSummary s={s} onRemove={removeItems} onAdd={() => setAdding(s)} onView={() => setViewing(s.name)} />
 
           <div className="std-label">Linked installations</div>
           <StandardLinks s={s} installations={installations} onEdit={(i) => setEditing({ s, i })} />
@@ -1237,8 +1224,7 @@ function StandardsView({
           standards={standards}
           installations={installations}
           initial={viewing}
-          armed={armed}
-          onRemove={removeAny}
+          onRemove={removeItems}
           onAdd={setAdding}
           onEdit={(s, i) => setEditing({ s, i })}
           onClose={() => setViewing(undefined)}
@@ -1250,6 +1236,15 @@ function StandardsView({
           inst={editing.i}
           notify={notify}
           onClose={() => setEditing(null)}
+          onDone={load}
+        />
+      )}
+      {removing && (
+        <RemoveFromStandard
+          s={removing.s}
+          rels={removing.rels}
+          notify={notify}
+          onClose={() => setRemoving(null)}
           onDone={load}
         />
       )}

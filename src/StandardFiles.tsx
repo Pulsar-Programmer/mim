@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Installation, Standard, StandardEntry } from "./api";
+import { api, Installation, Standard } from "./api";
 import { buildTree, CARET, DIR, FILE, leaves, plural, TreeNode } from "./LinkEditor";
+import { Modal } from "./Modal";
 import { StandardAvatar } from "./Places";
 
 /** How many top-level items a standard's card shows before "+N more". */
@@ -24,14 +25,12 @@ const who = (names: string[]) =>
 /** A standard's card: its top-level items, with folders folded into a count. */
 export function StandardSummary({
   s,
-  armed,
   onRemove,
   onAdd,
   onView,
 }: {
   s: Standard;
-  armed: string | null;
-  onRemove: (s: Standard, e: StandardEntry) => void;
+  onRemove: (s: Standard, rels: string[]) => void;
   onAdd: () => void;
   onView: () => void;
 }) {
@@ -47,10 +46,10 @@ export function StandardSummary({
           >
             {n.name}
             {n.entry.is_dir ? "/" : ""}
-            <RemoveButton s={s} e={n.entry} armed={armed} onRemove={onRemove} />
+            <RemoveButton s={s} name={n.name} rels={[n.entry.rel_path]} onRemove={onRemove} />
           </span>
         ) : (
-          <button key={n.path} className="std-file std-folder" title={`View ${n.name}/`} onClick={onView}>
+          <button key={n.path} className="std-file std-folder" title={`Edit ${n.name}/`} onClick={onView}>
             {n.name}/ <span className="std-file-n">{leaves(n).length}</span>
           </button>
         )
@@ -69,25 +68,140 @@ export function StandardSummary({
 
 function RemoveButton({
   s,
-  e,
-  armed,
+  name,
+  rels,
   onRemove,
 }: {
   s: Standard;
-  e: StandardEntry;
-  armed: string | null;
-  onRemove: (s: Standard, e: StandardEntry) => void;
+  name: string;
+  rels: string[];
+  onRemove: (s: Standard, rels: string[]) => void;
 }) {
-  const isArmed = armed === `rm:${e.rel_path}`;
   return (
     <button
-      className={`std-file-x ${isArmed ? "armed" : ""}`}
-      aria-label={s.builtin ? `Take ${e.name} off Shared` : `Remove ${e.name} from ${s.name}`}
-      title={s.builtin ? "Take off the list — its files stay" : "Move to Trash — installations using it keep their own copy"}
-      onClick={() => onRemove(s, e)}
+      className="std-file-x"
+      aria-label={`Remove ${name} from ${s.name}`}
+      title="Remove…"
+      onClick={() => onRemove(s, rels)}
     >
-      {isArmed ? "Sure?" : "×"}
+      ×
     </button>
+  );
+}
+
+/** Spells out what removing items does before doing it. */
+export function RemoveFromStandard({
+  s,
+  rels,
+  notify,
+  onClose,
+  onDone,
+}: {
+  s: Standard;
+  rels: string[];
+  notify: (m: string) => void;
+  onClose: () => void;
+  onDone: () => void;
+}) {
+  const [keep, setKeep] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const names = s.entries.filter((e) => rels.includes(e.rel_path)).map((e) => e.name);
+  const users = Object.entries(s.linked)
+    .filter(([, linked]) => linked.some((r) => rels.includes(r)))
+    .map(([n]) => n)
+    .sort((a, b) => a.localeCompare(b));
+  const what = names.length === 1 ? names[0] : plural(names.length, "item");
+  const them = names.length === 1 ? "it" : "them";
+  const dropsLinks = users.length > 0 && !keep;
+
+  async function remove() {
+    setBusy(true);
+    setError("");
+    try {
+      await api.removeFromStandard(s.name, rels, keep);
+      notify(
+        `Removed ${what} from ${s.name}` +
+          (users.length ? (keep ? " · installations kept copies" : ` · gone from ${plural(users.length, "installation")}`) : "")
+      );
+      onDone();
+      onClose();
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  }
+
+  return (
+    <Modal className="share-dialog le-dialog" label={`Remove from ${s.name}`} locked={busy} onClose={onClose}>
+      <div className="share-body">
+        <header className="share-head">
+          <div>
+            <h2>Remove {what} from {s.name}?</h2>
+            <p className="hint">
+              {s.builtin
+                ? `The original stays in the Minecraft folder. It just stops being shared.`
+                : `${s.name}'s ${names.length === 1 ? "copy goes" : "copies go"} to the Trash, so you can put ${them} back.`}
+            </p>
+          </div>
+        </header>
+        <div className="le-review">
+          <section className={`le-sec ${s.builtin && !dropsLinks ? "" : "trash"}`}>
+            <h3>{plural(names.length, "item")}</h3>
+            <span className="le-list">
+              {names.slice(0, 8).map((n) => (
+                <code key={n}>{n}</code>
+              ))}
+              {names.length > 8 && <code>+{names.length - 8} more</code>}
+            </span>
+          </section>
+          {users.length > 0 ? (
+            <section className={`le-sec drop ${keep ? "" : "trash"}`}>
+              <h3>Linked in {plural(users.length, "installation")}</h3>
+              <span className="le-list">
+                {users.map((u) => (
+                  <code key={u}>{u}</code>
+                ))}
+              </span>
+              <div className="le-seg" role="radiogroup" aria-label="What happens in these installations">
+                <button role="radio" aria-checked={keep} className={keep ? "on" : ""} onClick={() => setKeep(true)}>
+                  Leave copies there
+                </button>
+                <button role="radio" aria-checked={!keep} className={keep ? "" : "on"} onClick={() => setKeep(false)}>
+                  Delete there too
+                </button>
+              </div>
+              <p>
+                {keep
+                  ? `Each one keeps its own separate copy, no longer tied to ${s.name}.`
+                  : s.builtin
+                    ? `They lose ${them}. Only the Minecraft folder still has ${them}.`
+                    : `They lose ${them}. The Trash holds the only copy.`}
+              </p>
+            </section>
+          ) : (
+            <p className="hint">No installation links {names.length === 1 ? "this" : "these"}.</p>
+          )}
+          {error && (
+            <p className="sf-error" role="alert">
+              {error}
+            </p>
+          )}
+        </div>
+        <footer className="share-foot le-foot">
+          <button className="btn" onClick={onClose} disabled={busy}>
+            Cancel
+          </button>
+          <button
+            className={`btn ${s.builtin && !dropsLinks ? "primary" : "danger solid"}`}
+            onClick={remove}
+            disabled={busy}
+          >
+            {busy ? "Working…" : s.builtin ? "Remove" : "Move to Trash"}
+          </button>
+        </footer>
+      </div>
+    </Modal>
   );
 }
 
@@ -96,7 +210,6 @@ export function StandardFiles({
   standards,
   installations,
   initial,
-  armed,
   onRemove,
   onAdd,
   onEdit,
@@ -106,8 +219,7 @@ export function StandardFiles({
   installations: Installation[];
   /** the standard to open on; null for all of them */
   initial: string | null;
-  armed: string | null;
-  onRemove: (s: Standard, e: StandardEntry) => void;
+  onRemove: (s: Standard, rels: string[]) => void;
   onAdd: (s: Standard) => void;
   onEdit: (s: Standard, i: Installation) => void;
   onClose: () => void;
@@ -162,14 +274,17 @@ export function StandardFiles({
       const linkedIn = new Set(ls.flatMap((r) => users.get(r) ?? [])).size;
       return (
         <div key={key} className="le-group">
-          <button className="le-row folder sf-folder" style={pad} aria-expanded={open} onClick={() => toggle(key)}>
-            <span className={`le-caret ${open ? "open" : ""}`}>{CARET}</span>
-            <span className="le-ico dir">{DIR}</span>
-            <span className="le-name">{n.name}/</span>
-            <span className="le-count">
-              {plural(ls.length, "file")} · {linkedIn ? `in ${plural(linkedIn, "installation")}` : "not linked"}
-            </span>
-          </button>
+          <div className="sf-folder-row">
+            <button className="le-row folder sf-folder" style={pad} aria-expanded={open} onClick={() => toggle(key)}>
+              <span className={`le-caret ${open ? "open" : ""}`}>{CARET}</span>
+              <span className="le-ico dir">{DIR}</span>
+              <span className="le-name">{n.name}/</span>
+              <span className="le-count">
+                {plural(ls.length, "file")} · {linkedIn ? `in ${plural(linkedIn, "installation")}` : "not linked"}
+              </span>
+            </button>
+            <RemoveButton s={s} name={`${n.name}/`} rels={ls} onRemove={onRemove} />
+          </div>
           {open && n.kids.map((c) => row(s, c, depth + 1))}
         </div>
       );
@@ -193,7 +308,7 @@ export function StandardFiles({
         <span className={`sf-who ${names.length ? "" : "none"}`} title={names.join(", ") || undefined}>
           {who(names)}
         </span>
-        <RemoveButton s={s} e={e} armed={armed} onRemove={onRemove} />
+        <RemoveButton s={s} name={e.name} rels={[e.rel_path]} onRemove={onRemove} />
       </div>
     );
   };
@@ -207,7 +322,7 @@ export function StandardFiles({
     >
       <div className="share-body">
         <header className="sf-head">
-          <h2>Files</h2>
+          <h2>Edit files</h2>
           <input
             className="search"
             type="search"
@@ -270,7 +385,10 @@ export function StandardFiles({
                 <section key={s.name}>
                   {!current && (
                     <h3 className="sf-group">
-                      {s.name} <span className="le-count">{plural(count, "item")}</span>
+                      {s.name} <span className="le-count">{plural(count, "item")}</span>{" "}
+                      <button className="linklike" onClick={() => onAdd(s)}>
+                        add files
+                      </button>
                     </h3>
                   )}
                   {tree.map((n) => row(s, n, 0))}
