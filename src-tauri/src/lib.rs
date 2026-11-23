@@ -5742,7 +5742,7 @@ mod tests {
         assert_eq!(entry_inside(&root, &link).unwrap(), a.join("x.jar"));
         assert!(shared_with_in(&root, &[link.clone()]).is_empty());
         let off = toggle_entry(entry_inside(&root, &link).unwrap()).unwrap();
-        assert!(off.ends_with("A/mods/x.jar.disabled") && a.join("x.jar.disabled").is_symlink());
+        assert!(Path::new(&off).ends_with("A/mods/x.jar.disabled") && a.join("x.jar.disabled").is_symlink());
         assert!(std.join("x.jar").is_file() && b.join("x.jar").exists());
         toggle_entry(entry_inside(&root, &off).unwrap()).unwrap();
         assert!(a.join("x.jar").is_symlink());
@@ -5762,7 +5762,7 @@ mod tests {
         }
         let via = |i: &str| root.join("installations").join(i).join("mods/x.jar").to_string_lossy().to_string();
         assert_eq!(shared_with_in(&root, &[via("A")]), vec!["B".to_string()]);
-        fs::remove_file(root.join("installations/B/mods")).unwrap();
+        remove_link(&root.join("installations/B/mods")).unwrap();
         assert_eq!(shared_with_in(&root, &[via("A")]), vec!["the linked standard".to_string()]);
         fs::remove_dir_all(&root).unwrap();
     }
