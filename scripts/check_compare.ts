@@ -37,6 +37,14 @@ const jc = compare([j1, j2], "m.json");
 assert.deepEqual(jc.conflicts, ["l"]);
 assert.deepEqual(JSON.parse(mergeText([j1, j2], jc, "m.json", 0, { l: 1 })!), { a: { x: 1, y: 2, z: 3 }, l: [2] });
 
+// resolving: take one clash, leave out one new setting, keep what only the target has
+const into = "x:1\ny:old\nmine:1\n", other = "x:1\ny:new\nadd:1\nskip:2\n";
+const rc = compare([into, other], "options.txt");
+assert.equal(mergeText([into, other], rc, "options.txt", 0, { y: 1 }, new Set(["skip"])), "x:1\ny:new\nmine:1\nadd:1\n");
+
+// resolving can also drop a setting only the saved file has
+assert.equal(mergeText([into, other], rc, "options.txt", 0, { y: 1 }, new Set(["mine"])), "x:1\ny:new\nadd:1\nskip:2\n");
+
 // unreadable stays unknown
 assert.equal(compare(["a=1", null], "a.properties").kind, "unknown");
 assert.ok(sameValue("1", "1.0") && !sameValue("1", "2") && !sameValue("true", "1"));

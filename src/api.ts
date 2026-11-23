@@ -428,6 +428,10 @@ export const api = {
   listConfig: (installation: string | null) => invoke<ConfigOverview>("list_config", { installation }),
   readConfig: (path: string) => invoke<string>("read_config", { path }),
   writeConfig: (path: string, text: string) => invoke<void>("write_config", { path, text }),
+  /** saves a resolved file through any link; the old version goes to the Trash */
+  writeMerged: (path: string, text: string) => invoke<void>("write_merged", { path, text }),
+  /** every place that could hold a copy of this file */
+  diffSources: (dest: string) => invoke<OptionsSource[]>("diff_sources", { dest }),
   /** Moves config/ entries into a standard and links them back. Returns the ones the
    * standard already has; when non-empty and !replace, nothing changed. */
   shareConfig: (installation: string, standard: string, names: string[], replace: boolean) =>

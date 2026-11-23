@@ -3,6 +3,7 @@ import { api, Installation, OptionEntry, OptionsSource, Standard } from "./api";
 import { sameValue } from "./compare";
 import { instancePlaces, PlacePicker, stdScope } from "./Places";
 import { useCached } from "./hooks";
+import { ResolveDialog, ResolveDraft } from "./Resolve";
 
 // ---- grouping & labels ----------------------------------------------------
 
@@ -66,7 +67,7 @@ function words(s: string): string {
   return w.charAt(0).toUpperCase() + w.slice(1);
 }
 
-function labelOf(key: string): string {
+export function labelOf(key: string): string {
   if (key.startsWith("key_key.")) return words(key.slice(8));
   if (key.startsWith("key_")) return words(key.slice(4));
   if (key.startsWith("soundCategory_")) return words(key.slice(14));
@@ -227,7 +228,7 @@ function Editor({ k, value, onChange }: { k: string; value: string; onChange: (v
 }
 
 const nameOf = (s: OptionsSource) => (s.kind === "base" ? "Shared" : s.label);
-const show = (k: string, v: string | undefined) =>
+export const show = (k: string, v: string | undefined) =>
   v === undefined ? "not set" : k.startsWith("key_") ? keyLabel(v) : v;
 
 // ---- view -----------------------------------------------------------------
@@ -277,7 +278,13 @@ export function OptionsView({
   const [edits, setEdits] = useState<Map<string, string>>(new Map());
   const [query, setQuery] = useState("");
   const [diffOnly, setDiffOnly] = useState(false);
-  useEffect(() => setEdits(new Map()), [source?.path]);
+  const [resolving, setResolving] = useState(false);
+  // resolved but unsaved; the Save bar writes it, and switching place drops it
+  const [draft, setDraft] = useState<ResolveDraft | null>(null);
+  useEffect(() => {
+    setEdits(new Map());
+    setDraft(null);
+  }, [source?.path]);
 
   const mine = useMemo(() => new Map(entries ?? []), [entries]);
   const theirs = useMemo(() => new Map(other ? (otherEntries ?? []) : []), [other, otherEntries]);
@@ -324,6 +331,14 @@ export function OptionsView({
   async function save() {
     if (!source || !entries) return;
     try {
+      if (draft) {
+        await api.writeMerged(draft.path, draft.text);
+        notify(`Saved ${draft.changes} resolved change${draft.changes === 1 ? "" : "s"} · old version in Trash`);
+        setDraft(null);
+        reload();
+        reloadOther();
+        return;
+      }
       const added = [...edits].filter(([k]) => !mine.has(k));
       await api.writeOptions(source.path, [...entries.map(([k, v]) => [k, edits.get(k) ?? v] as OptionEntry), ...added]);
       notify(`Saved ${edits.size} change${edits.size === 1 ? "" : "s"} · backup at options.txt.bak`);
@@ -417,11 +432,19 @@ export function OptionsView({
                     only differences <span className="count">{diffKeys.length}</span>
                   </label>
                 )}
-                {comparing && diffKeys.length > 0 && (
+                {comparing && diffKeys.length > 0 && !draft && (
                   <button className="linklike" onClick={takeAll} title="Stages them — nothing is saved until Save">
                     take all {diffKeys.length} from {nameOf(other!)}
                   </button>
                 )}
+                <button
+                  className={`btn small ${draft ? "primary" : ""}`}
+                  disabled={edits.size > 0}
+                  title={edits.size ? "Save or revert your edits first" : "Compare this file with another and pick what to keep"}
+                  onClick={() => setResolving(true)}
+                >
+                  {draft ? `Resolved · ${draft.changes}` : "Resolve"}
+                </button>
                 <button className="linklike" onClick={() => source && api.revealPath(source.path)}>
                   reveal file
                 </button>
@@ -432,7 +455,7 @@ export function OptionsView({
                 </p>
               )}
 
-              <div className={`opt-groups ${comparing ? "comparing" : ""}`}>
+              <div className={`opt-groups ${comparing ? "comparing" : ""}`} inert={!!draft}>
                 {grouped.map(([g, ks]) => (
                   <div key={g} className="opt-group">
                     <h3>{g}</h3>
@@ -492,19 +515,35 @@ export function OptionsView({
         </section>
       </div>
 
-      {edits.size > 0 && (
+      {(edits.size > 0 || draft) && (
         <div className="save-bar">
           <span>
-            {edits.size} unsaved change{edits.size === 1 ? "" : "s"} to <b>{source && nameOf(source)}</b>
+            {draft?.changes ?? edits.size} unsaved {draft ? "resolved " : ""}change{(draft?.changes ?? edits.size) === 1 ? "" : "s"} to <b>{source && nameOf(source)}</b>
           </span>
           <span className="hint">close Minecraft first or it'll overwrite them</span>
-          <button className="linklike" onClick={() => setEdits(new Map())}>
+          <button
+            className="linklike"
+            onClick={() => {
+              setEdits(new Map());
+              setDraft(null);
+            }}
+          >
             revert
           </button>
           <button className="btn primary" onClick={save}>
             Save
           </button>
         </div>
+      )}
+      {resolving && source && (
+        <ResolveDialog
+          dest="options.txt"
+          into={keyOf(source)}
+          from={other && keyOf(other)}
+          onClose={() => setResolving(false)}
+          draft={draft ?? undefined}
+          onStage={setDraft}
+        />
       )}
     </>
   );

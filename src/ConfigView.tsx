@@ -12,6 +12,7 @@ import {
 import { brief } from "./settings";
 import { useCached } from "./hooks";
 import { instancePlaces, PlacePicker, StandardAvatar } from "./Places";
+import { canDiff, ResolveDialog, ResolveDraft, stdKey } from "./Resolve";
 
 /**
  * Folders mods make right in the game folder instead of config/. `mod` is
@@ -500,6 +501,11 @@ function ShareDialog({
   const [fresh, setFresh] = useState<string | null>(null);
   const [naming, setNaming] = useState<string | null>(standards.length ? null : "");
   const [busy, setBusy] = useState(false);
+  const [diffing, setDiffing] = useState<string | null>(null);
+  // resolved files, written only by Share; picking another standard or unticking drops them
+  const [drafts, setDrafts] = useState<Record<string, ResolveDraft>>({});
+  useEffect(() => setDrafts({}), [std]);
+  useEffect(() => setDrafts((d) => Object.fromEntries(Object.entries(d).filter(([r]) => picked.has(r)))), [picked]);
   const free = files.filter((f) => !f.linked);
   const rels = [...picked];
   const chosen = standards.find((s) => s.name === std);
@@ -507,6 +513,7 @@ function ShareDialog({
   const inWay = rels.filter((r) =>
     chosen?.entries.some((e) => e.scope === "global" && e.name === `config/${r}`)
   );
+  const resolved = inWay.flatMap((r) => drafts[r] ?? []);
 
   function commitName() {
     const n = naming?.trim();
@@ -526,9 +533,11 @@ function ShareDialog({
         notify(`"${std}" already has ${blocked.join(", ")} — pick again to use its copy`);
         return onDone();
       }
+      for (const d of resolved) await api.writeMerged(d.path, d.text);
       notify(
         `Shared ${rels.length === 1 ? rels[0] : `${rels.length} files`} through "${std}"` +
-          (inWay.length ? ` · ${installation}'s own ${inWay.length === 1 ? "copy" : "copies"} moved to Trash` : "")
+          (inWay.length ? ` · ${installation}'s own ${inWay.length === 1 ? "copy" : "copies"} moved to Trash` : "") +
+          (resolved.length ? ` · ${resolved.length} resolved` : "")
       );
       onDone();
     } catch (e) {
@@ -554,6 +563,7 @@ function ShareDialog({
   const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
   return (
+    <>
     <dialog
       ref={ref}
       className="share-dialog"
@@ -660,7 +670,12 @@ function ShareDialog({
         {inWay.length > 0 && (
           <p className="share-note">
             "{std}" already has {inWay.map((r) => <code key={r}>{r}</code>)}. Its copy will be used
-            here, and {installation}'s own goes to the Trash.
+            here, and {installation}'s own goes to the Trash.{" "}
+            {inWay.filter(canDiff).map((r) => (
+              <button key={r} className={`btn small ${drafts[r] ? "primary" : ""}`} onClick={() => setDiffing(r)}>
+                {drafts[r] ? `${r} resolved · ${drafts[r].changes}` : `Resolve ${r}`}
+              </button>
+            ))}
           </p>
         )}
 
@@ -673,12 +688,28 @@ function ShareDialog({
               ? "Pick a file"
               : !std
                 ? "Pick a standard"
-                : inWay.length === rels.length
+                : resolved.length
+                  ? `Share and save ${resolved.length} resolved`
+                  : inWay.length === rels.length
                   ? `Use ${std}'s copy`
                   : `Share ${plural(rels.length, "file")} to ${std}`}
           </button>
         </footer>
       </div>
     </dialog>
+    {diffing && chosen && (
+      <ResolveDialog
+        dest={`config/${diffing}`}
+        into={stdKey(chosen)}
+        from={installation}
+        onClose={() => setDiffing(null)}
+        draft={drafts[diffing]}
+        onStage={(d) => {
+          const { [diffing]: _, ...rest } = drafts;
+          setDrafts(d ? { ...rest, [diffing]: d } : rest);
+        }}
+      />
+    )}
+    </>
   );
 }

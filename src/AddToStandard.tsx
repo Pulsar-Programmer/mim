@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api, Installation, Standard } from "./api";
+import { canDiff, ResolveDialog, ResolveDraft, stdKey } from "./Resolve";
 
 /** The + on a standard: pick what's in a game folder, or type a path. */
 export function AddToStandard({
@@ -24,11 +25,15 @@ export function AddToStandard({
   const [find, setFind] = useState("");
   const [clash, setClash] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  const [diffing, setDiffing] = useState<string | null>(null);
+  // resolved clashes; written only once the add has gone through
+  const [drafts, setDrafts] = useState<Record<string, ResolveDraft>>({});
 
   useEffect(() => {
     setItems(null);
     setWant(new Set());
     setClash([]);
+    setDrafts({});
     api
       .listItems(from || null)
       .then(setItems)
@@ -47,6 +52,8 @@ export function AddToStandard({
   const isDir = (n: string) => items?.some(([x, d]) => x === n && d) ?? false;
   const source = from || "the Minecraft folder";
   const fromFolderToShared = std.builtin && !from;
+  const resolved = Object.values(drafts);
+  const allResolved = clash.length > 0 && clash.every((n) => drafts[n]);
 
   async function add(replace = false, merge = false) {
     if (!names.length || busy) return;
@@ -56,9 +63,12 @@ export function AddToStandard({
       if (inWay.length && !replace) {
         setClash(inWay);
       } else {
+        // after the add: replacing copies the source over the standard's file
+        for (const d of resolved) await api.writeMerged(d.path, d.text);
         notify(
           `Added ${names.length === 1 ? names[0] : `${names.length} items`} to ${std.name}` +
-            (from ? ` · ${from} now links to it` : "")
+            (from ? ` · ${from} now links to it` : "") +
+            (resolved.length ? ` · ${resolved.length} resolved` : "")
         );
         onDone();
         ref.current?.close();
@@ -74,9 +84,11 @@ export function AddToStandard({
     next.has(n) ? next.delete(n) : next.add(n);
     setWant(next);
     setClash([]);
+    setDrafts({});
   };
 
   return (
+    <>
     <dialog
       ref={ref}
       className="share-dialog le-dialog"
@@ -140,6 +152,7 @@ export function AddToStandard({
             onChange={(e) => {
               setTyped(e.target.value);
               setClash([]);
+              setDrafts({});
             }}
             onKeyDown={(e) => e.key === "Enter" && add()}
           />
@@ -151,15 +164,28 @@ export function AddToStandard({
               {std.name} already has <code>{clash.join(", ")}</code>.
             </p>
             <div className="row-inline">
+              {clash.filter((n) => !isDir(n) && canDiff(n)).map((n) => (
+                <button
+                  key={n}
+                  className={`btn small ${drafts[n] ? "primary" : ""}`}
+                  disabled={busy}
+                  onClick={() => setDiffing(n)}
+                >
+                  {drafts[n] ? `${n} resolved · ${drafts[n].changes}` : `Resolve ${n}`}
+                </button>
+              ))}
               {from && clash.some(isDir) && (
                 <button className="btn small primary" disabled={busy} onClick={() => add(false, true)}>
                   Merge folders, keep both
                 </button>
               )}
-              <button className="btn small danger" disabled={busy} onClick={() => add(true)}>
-                {from ? `Use ${std.name}'s, Trash ${from}'s` : `Replace ${std.name}'s`}
-              </button>
+              {!allResolved && (
+                <button className="btn small danger" disabled={busy} onClick={() => add(true)}>
+                  {from ? `Use ${std.name}'s, Trash ${from}'s` : `Replace ${std.name}'s`}
+                </button>
+              )}
             </div>
+            {resolved.length > 0 && <p className="hint">Resolved files aren't saved until you finish adding.</p>}
           </div>
         )}
 
@@ -167,11 +193,25 @@ export function AddToStandard({
           <button className="btn" onClick={() => ref.current?.close()} disabled={busy}>
             Cancel
           </button>
-          <button className="btn primary" onClick={() => add()} disabled={!names.length || busy}>
-            {busy ? "Working…" : names.length ? `Add ${names.length}` : "Add"}
+          <button className="btn primary" onClick={() => add(allResolved)} disabled={!names.length || busy}>
+            {busy ? "Working…" : allResolved ? `Add and save ${resolved.length} resolved` : names.length ? `Add ${names.length}` : "Add"}
           </button>
         </footer>
       </div>
     </dialog>
+    {diffing && (
+      <ResolveDialog
+        dest={diffing}
+        into={stdKey(std)}
+        from={from}
+        onClose={() => setDiffing(null)}
+        draft={drafts[diffing]}
+        onStage={(d) => {
+          const { [diffing]: _, ...rest } = drafts;
+          setDrafts(d ? { ...rest, [diffing]: d } : rest);
+        }}
+      />
+    )}
+    </>
   );
 }

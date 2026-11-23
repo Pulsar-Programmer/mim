@@ -1284,6 +1284,8 @@ function StandardsView({
           onRemove={removeItems}
           onAdd={setAdding}
           onEdit={(s, i) => setEditing({ s, i })}
+          notify={notify}
+          onDone={load}
           onClose={() => setViewing(undefined)}
         />
       )}

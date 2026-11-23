@@ -4,6 +4,7 @@ import { compare, Comparison, mergeText, sameValue } from "./compare";
 import { useCached } from "./hooks";
 import { CARET, DIR, FILE } from "./LinkEditor";
 import { Avatar } from "./Places";
+// import { ResolveDialog } from "./Resolve"; // see the Resolve note in the render below
 import { brief } from "./settings";
 
 const FOLDER_LABEL: Record<string, string> = {
@@ -12,7 +13,7 @@ const FOLDER_LABEL: Record<string, string> = {
   screenshots: "Screenshots",
 };
 // mirrors TEXT_EXTS in lib.rs: what read_config will open
-const TEXT = /\.(json5?|jsonc|toml|properties|txt|cfg|conf|ya?ml|ini|snbt|hjson)$/i;
+export const TEXT = /\.(json5?|jsonc|toml|properties|txt|cfg|conf|ya?ml|ini|snbt|hjson)$/i;
 const letter = (k: number) => String.fromCharCode(65 + (k % 26));
 const ago = (secs: number) => (secs > 0 && secs < 8e12 ? timeAgo(new Date(secs * 1000).toISOString()) : "—");
 const plural = (n: number, w: string, ws = `${w}s`) => `${n} ${n === 1 ? w : ws}`;
@@ -128,6 +129,7 @@ export function LinkWizard({
   const [armed, setArmed] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<string[]>([]);
+  // const [resolving, setResolving] = useState<Linkable | null>(null);
 
   const linkedTo = (i: Installation) =>
     i.linked.length > 0 || standards.some((s) => !s.builtin && s.installations.includes(i.name));
@@ -214,24 +216,42 @@ export function LinkWizard({
         )
       );
       setFocus(list.find((l) => !l.is_dir && versionsOf(l).length > 1)?.dest ?? list[0]?.dest ?? null);
-      // read every differing file up front, so the list can say which need attention
-      const wanted = new Map<string, string>();
-      for (const l of list) {
-        const vs = l.is_dir || !TEXT.test(l.dest) ? [] : versionsOf(l);
-        if (vs.length > 1) for (const v of vs) if (!(v.hash in texts)) wanted.set(v.hash, source(v).path);
-      }
-      const read = await Promise.all(
-        [...wanted].map(([hash, path]) =>
-          api.readConfig(path).then((t) => [hash, t] as const, () => [hash, null] as const)
-        )
-      );
-      if (id === scanId.current) setTexts((m) => ({ ...m, ...Object.fromEntries(read) }));
+      await readDiffering(list, id);
     } catch (e) {
       if (id !== scanId.current) return;
       notify(String(e));
       setStep("pick");
     }
   }
+
+  /** Reads every differing file up front, so the list can say which need attention. */
+  async function readDiffering(list: Linkable[], id: number) {
+    const wanted = new Map<string, string>();
+    for (const l of list) {
+      const vs = l.is_dir || !TEXT.test(l.dest) ? [] : versionsOf(l);
+      if (vs.length > 1) for (const v of vs) if (!(v.hash in texts)) wanted.set(v.hash, source(v).path);
+    }
+    const read = await Promise.all(
+      [...wanted].map(([hash, path]) =>
+        api.readConfig(path).then((t) => [hash, t] as const, () => [hash, null] as const)
+      )
+    );
+    if (id === scanId.current) setTexts((m) => ({ ...m, ...Object.fromEntries(read) }));
+  }
+
+  // /** After a file was resolved on disk: fresh versions, every choice kept. */
+  // async function rescan() {
+  //   const id = ++scanId.current;
+  //   try {
+  //     const list = await api.scanLinkables([...picked]);
+  //     if (id !== scanId.current) return;
+  //     setScan(list);
+  //     setArmed(false);
+  //     await readDiffering(list, id);
+  //   } catch (e) {
+  //     if (id === scanId.current) notify(String(e));
+  //   }
+  // }
 
   const differs = (l: Linkable) => !l.is_dir && versionsOf(l).length > 1;
   const needing = (scan ?? []).filter((l) => {
@@ -793,6 +813,20 @@ export function LinkWizard({
         </div>
       )}
 
+      {/* Possible future action: Resolve here saves to disk right away, before Link is
+          confirmed. Bring it back once it can stage a draft that Link applies, the way
+          LinkEditor does.
+      {resolving && (
+        <ResolveDialog
+          dest={resolving.dest}
+          into={versionsOf(resolving)[0]?.copies[0].installation}
+          from={versionsOf(resolving)[1]?.copies[0].installation}
+          notify={notify}
+          onClose={() => setResolving(null)}
+          onDone={rescan}
+        />
+      )} */}
+
       {step === "done" && (
         <section className="lw-done">
           <div className="lw-done-mark">✓</div>
@@ -1105,6 +1139,7 @@ function FileDetail({
       <h2 className="lw-detail-title">
         <code>{l.dest}</code>
       </h2>
+      {/* Possible future action: a Resolve button here, see the note in LinkWizard's render. */}
       <p className="hint">
         {summary}
         {missing.length > 0 && ` Also goes to ${missing.map((i) => i.name).join(", ")}.`}
@@ -1243,7 +1278,7 @@ function FileDetail({
 }
 
 /** For nested files (json…): each other version's lines against the kept one. */
-function LineDiff({ versions, keeper, texts }: { versions: Version[]; keeper: number; texts: string[] }) {
+export function LineDiff({ versions, keeper, texts }: { versions: { hash: string }[]; keeper: number; texts: string[] }) {
   const lines = (t: string) => t.split(/\r?\n/).map((x) => x.trimEnd()).filter((x) => x.trim());
   const base = new Set(lines(texts[keeper] ?? ""));
   return (

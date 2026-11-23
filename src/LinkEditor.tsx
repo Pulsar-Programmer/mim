@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api, entriesFor, Installation, LinkState, Standard, StandardEntry } from "./api";
 import { Modal } from "./Modal";
 import { Avatar, StandardAvatar } from "./Places";
+import { canDiff, ResolveDialog, ResolveDraft, stdKey } from "./Resolve";
 
 export const DIR = (
   <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
@@ -82,6 +83,9 @@ export function LinkEditor({
   const [wantWhole, setWantWhole] = useState<Set<string>>(new Set());
   const [canWhole, setCanWhole] = useState<Set<string>>(new Set());
   const [inWay, setInWay] = useState<string[]>([]);
+  const [diffing, setDiffing] = useState<string | null>(null);
+  // resolved files by rel_path: written only by Apply, dropped when unticked or on leaving
+  const [drafts, setDrafts] = useState<Record<string, ResolveDraft>>({});
 
   const nameOf = useMemo(() => new Map(entries.map((e) => [e.rel_path, e.name])), [entries]);
   const inFolder = (r: string, f: string) => nameOf.get(r)?.startsWith(`${f}/`) ?? false;
@@ -117,6 +121,19 @@ export function LinkEditor({
   }, []);
 
   const isDir = (r: string) => entries.find((e) => e.rel_path === r)?.is_dir ?? false;
+  // an old version-folder entry isn't the file at the standard's top level
+  const diffable = (r: string) =>
+    !isDir(r) && canDiff(nameOf.get(r) ?? "") && entries.find((e) => e.rel_path === r)?.scope === "global";
+  const canResolve = (r: string) => want.has(r) && !covered(r) && (st(r) === "own" || st(r) === "other") && diffable(r);
+  const draftList = Object.entries(drafts);
+
+  useEffect(() => {
+    setDrafts((d) => {
+      const kept = Object.entries(d).filter(([r]) => canResolve(r));
+      return kept.length === Object.keys(d).length ? d : Object.fromEntries(kept);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [want, wantWhole, states]);
   const modeOf = (r: string) => modes[r] ?? (st(r) === "linked" || isDir(r) ? "link" : "copy");
   const toLink = rels.filter((r) => want.has(r) && !covered(r) && modeOf(r) === "link" && st(r) !== "linked");
   const toCopy = rels.filter((r) => want.has(r) && !covered(r) && modeOf(r) === "copy");
@@ -170,7 +187,7 @@ export function LinkEditor({
       return;
     }
     setInWay([]);
-    if (trash.length || toUnlink.length) setReview(true);
+    if (trash.length || toUnlink.length || draftList.length) setReview(true);
     else apply();
   }
 
@@ -178,6 +195,8 @@ export function LinkEditor({
     if (busy) return;
     setBusy(true);
     try {
+      // first, so links and copies below carry the resolved version
+      for (const [, d] of draftList) await api.writeMerged(d.path, d.text);
       let renamed: string[] = [];
       if (merge.length) renamed = await api.mergeShared(inst.name, merge.map((r) => r.split("/")[1]));
       // every file first, so unticked ones can still keep a copy below
@@ -191,6 +210,7 @@ export function LinkEditor({
       if (toUnlink.length) await api.unlinkStandard(std.name, inst.name, keep, toUnlink);
       notify(
         [
+          draftList.length && `Resolved ${plural(draftList.length, "file")}`,
           toWhole.length && `Linked ${toWhole.map((f) => `${f}/`).join(", ")} as a whole into ${inst.name}`,
           toSplit.length && `${toSplit.map((f) => `${f}/`).join(", ")} now linked file by file`,
           toLink.length && `Linked ${plural(toLink.length, "item")} from "${std.name}" into ${inst.name}`,
@@ -347,6 +367,18 @@ export function LinkEditor({
             ))}
           </span>
         )}
+        {canResolve(e.rel_path) && (
+          <button
+            className={`btn small ${drafts[e.rel_path] ? "primary" : ""}`}
+            aria-label={`Resolve ${n.name}`}
+            onClick={(ev) => {
+              ev.preventDefault();
+              setDiffing(e.rel_path);
+            }}
+          >
+            {drafts[e.rel_path] ? `Resolved · ${drafts[e.rel_path].changes}` : "Resolve"}
+          </button>
+        )}
         <span className={`le-pill ${kind}`}>{text}</span>
       </label>
     );
@@ -355,6 +387,7 @@ export function LinkEditor({
   const others = std.entries.length - entries.length;
 
   return (
+    <>
     <Modal
       className="share-dialog le-dialog"
       label={`Link ${std.name} to ${inst.name}`}
@@ -443,6 +476,19 @@ export function LinkEditor({
           </>
         ) : (
           <div className="le-review">
+            {draftList.length > 0 && (
+              <section className="le-sec add">
+                <h3>Save {plural(draftList.length, "resolved file")} to {std.name}</h3>
+                <span className="le-list">
+                  {draftList.map(([r, d]) => (
+                    <code key={r}>
+                      {label(r)} · {d.whole ? "replaced" : plural(d.changes, "change")}
+                    </code>
+                  ))}
+                </span>
+                <p>Not saved yet. Untick a file or leave this menu to throw its changes away.</p>
+              </section>
+            )}
             {toWhole.length > 0 && (
               <section className="le-sec add">
                 <h3>Link {plural(toWhole.length, "whole folder")}</h3>
@@ -486,6 +532,15 @@ export function LinkEditor({
               <section className="le-sec trash">
                 <h3>Move {trash.length === 1 ? "1 item" : `${trash.length} items`} to the Trash</h3>
                 {list(trash)}
+                {trash.some(canResolve) && (
+                  <span className="le-quick rs-import">
+                    {trash.filter(canResolve).map((r) => (
+                      <button key={r} className={`btn small ${drafts[r] ? "primary" : ""}`} onClick={() => setDiffing(r)}>
+                        {drafts[r] ? "Resolved" : "Resolve"} {nameOf.get(r)}
+                      </button>
+                    ))}
+                  </span>
+                )}
                 <p>
                   {inst.name} has its own {trash.length === 1 ? "copy" : "copies"}. To link{" "}
                   {std.name}'s, MIM moves {trash.length === 1 ? "it" : "them"} to the Trash — you
@@ -559,5 +614,20 @@ export function LinkEditor({
         </footer>
       </div>
     </Modal>
+    {/* beside the Modal: its Cmd+Enter must not reach this one's */}
+    {diffing && (
+      <ResolveDialog
+        dest={nameOf.get(diffing)!}
+        into={stdKey(std)}
+        from={inst.name}
+        onClose={() => setDiffing(null)}
+        draft={drafts[diffing]}
+        onStage={(d) => {
+          const { [diffing]: _, ...rest } = drafts;
+          setDrafts(d ? { ...rest, [diffing]: d } : rest);
+        }}
+      />
+    )}
+    </>
   );
 }

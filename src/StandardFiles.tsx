@@ -3,6 +3,7 @@ import { api, Installation, Standard } from "./api";
 import { buildTree, CARET, DIR, FILE, leaves, plural, TreeNode } from "./LinkEditor";
 import { Modal } from "./Modal";
 import { StandardAvatar } from "./Places";
+import { canDiff, ResolveDialog, ResolveDraft, stdKey } from "./Resolve";
 
 /** How many top-level items a standard's card shows before "+N more". */
 const CARD_ITEMS = 8;
@@ -213,6 +214,8 @@ export function StandardFiles({
   onRemove,
   onAdd,
   onEdit,
+  notify,
+  onDone,
   onClose,
 }: {
   standards: Standard[];
@@ -222,6 +225,8 @@ export function StandardFiles({
   onRemove: (s: Standard, rels: string[]) => void;
   onAdd: (s: Standard) => void;
   onEdit: (s: Standard, i: Installation) => void;
+  notify: (m: string) => void;
+  onDone: () => void;
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -231,7 +236,27 @@ export function StandardFiles({
   const [q, setQ] = useState("");
   // folders start open at the top level and closed below; this holds the ones toggled
   const [toggled, setToggled] = useState<Set<string>>(new Set());
+  const [diffing, setDiffing] = useState<{ s: Standard; rel: string; dest: string } | null>(null);
+  // resolved files, keyed by rel_path; only the Save bar writes them
+  const [drafts, setDrafts] = useState<Record<string, ResolveDraft>>({});
+  const [saving, setSaving] = useState(false);
   const needle = q.trim().toLowerCase();
+  const pending = Object.entries(drafts).filter(([r]) => standards.some((s) => s.entries.some((e) => e.rel_path === r)));
+
+  async function saveDrafts() {
+    setSaving(true);
+    try {
+      for (const [r, d] of pending) {
+        await api.writeMerged(d.path, d.text);
+        setDrafts(({ [r]: _, ...rest }) => rest);
+      }
+      notify(`Saved ${plural(pending.length, "resolved file")} · old versions in Trash`);
+    } catch (e) {
+      notify(String(e));
+    }
+    setSaving(false);
+    onDone();
+  }
 
   const current = standards.find((s) => s.name === sel);
   const inst = installations.find((i) => i.name === instName);
@@ -308,17 +333,27 @@ export function StandardFiles({
         <span className={`sf-who ${names.length ? "" : "none"}`} title={names.join(", ") || undefined}>
           {who(names)}
         </span>
+        {!e.is_dir && !e.missing && canDiff(e.name) && (
+          <button
+            className={`btn small sf-diff ${drafts[e.rel_path] ? "primary" : ""}`}
+            aria-label={`Resolve ${e.name}`}
+            onClick={() => setDiffing({ s, rel: e.rel_path, dest: e.name })}
+          >
+            {drafts[e.rel_path] ? `Resolved · ${drafts[e.rel_path].changes}` : "Resolve"}
+          </button>
+        )}
         <RemoveButton s={s} name={e.name} rels={[e.rel_path]} onRemove={onRemove} />
       </div>
     );
   };
 
   return (
+    <>
     <dialog
       ref={ref}
       className="share-dialog sf-dialog"
       onClose={onClose}
-      onClick={(e) => e.target === ref.current && ref.current.close()}
+      onClick={(e) => e.target === ref.current && !saving && ref.current.close()}
     >
       <div className="share-body">
         <header className="sf-head">
@@ -402,7 +437,33 @@ export function StandardFiles({
             </div>
           </div>
         </div>
+        {pending.length > 0 && (
+          <footer className="share-foot le-foot">
+            <span className="hint">
+              {plural(pending.length, "resolved file")} not saved yet. Close to throw {pending.length === 1 ? "it" : "them"} away.
+            </span>
+            <button className="btn" onClick={() => setDrafts({})} disabled={saving}>
+              Discard
+            </button>
+            <button className="btn primary" onClick={saveDrafts} disabled={saving}>
+              {saving ? "Saving…" : `Save ${plural(pending.length, "file")}`}
+            </button>
+          </footer>
+        )}
       </div>
     </dialog>
+    {diffing && (
+      <ResolveDialog
+        dest={diffing.dest}
+        into={stdKey(diffing.s)}
+        onClose={() => setDiffing(null)}
+        draft={drafts[diffing.rel]}
+        onStage={(d) => {
+          const { [diffing.rel]: _, ...rest } = drafts;
+          setDrafts(d ? { ...rest, [diffing.rel]: d } : rest);
+        }}
+      />
+    )}
+    </>
   );
 }

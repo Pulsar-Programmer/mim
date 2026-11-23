@@ -2344,6 +2344,27 @@ fn write_config(path: String, text: String) -> CmdResult<()> {
     fs::write(&p, text).map_err(err)
 }
 
+/// Saves a resolved file through any link, so everyone sharing it gets it.
+/// A copy of what it replaces goes to the Trash first.
+#[tauri::command(async)]
+fn write_merged(path: String, text: String) -> CmdResult<()> {
+    let p = inside_mc(&path)?;
+    if !is_text_config(&p) || !p.is_file() {
+        return Err("MIM only edits existing text config files".into());
+    }
+    if fs::read(&p).ok().as_deref() == Some(text.as_bytes()) {
+        return Ok(());
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(err)?.as_nanos();
+    let dir = std::env::temp_dir().join(format!("mim-before-merge-{stamp}"));
+    fs::create_dir_all(&dir).map_err(err)?;
+    let old = dir.join(p.file_name().ok_or("bad path")?);
+    let saved = fs::copy(&p, &old).map_err(err).and_then(|_| trash::delete(&old).map_err(err));
+    let _ = fs::remove_dir_all(&dir);
+    saved?;
+    fs::write(&p, text).map_err(err)
+}
+
 // ---------------------------------------------------------------------------
 // Misc
 // ---------------------------------------------------------------------------
@@ -3093,8 +3114,21 @@ fn options_source(label: String, kind: &'static str, p: PathBuf) -> OptionsSourc
 
 #[tauri::command(async)]
 fn options_sources() -> Vec<OptionsSource> {
+    file_sources("options.txt")
+}
+
+/// Every place that could hold a copy of `dest`.
+#[tauri::command(async)]
+fn diff_sources(dest: String) -> CmdResult<Vec<OptionsSource>> {
+    if !valid_dest(&dest) {
+        return Err(format!("can't compare {dest}"));
+    }
+    Ok(file_sources(&dest))
+}
+
+fn file_sources(file: &str) -> Vec<OptionsSource> {
     let root = mc_dir();
-    let base = root.join("options.txt");
+    let base = root.join(file);
     let mut out = vec![options_source("Base game".into(), "base", base)];
     let inst_dir = root.join("installations");
     for name in names_in(&inst_dir) {
@@ -3102,11 +3136,11 @@ fn options_sources() -> Vec<OptionsSource> {
         if !dir.is_dir() || name == "Shared" {
             continue;
         }
-        out.push(options_source(name, "installation", dir.join("options.txt")));
+        out.push(options_source(name, "installation", dir.join(file)));
     }
     for (name, dir) in visible_children(&root.join("standards")) {
         if dir.is_dir() {
-            out.push(options_source(name, "standard", dir.join("options.txt")));
+            out.push(options_source(name, "standard", dir.join(file)));
         }
     }
     out
@@ -6659,6 +6693,8 @@ pub fn run() {
             list_config,
             read_config,
             write_config,
+            write_merged,
+            diff_sources,
             list_packs,
             set_packs,
             add_packs,
