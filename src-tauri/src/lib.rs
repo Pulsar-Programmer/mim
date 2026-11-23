@@ -113,6 +113,24 @@ fn inside_mc(path: &str) -> CmdResult<PathBuf> {
     }
 }
 
+/// Like `inside_mc`, but keeps the last part unresolved: acting on a linked
+/// file changes the link, never the original other installations use.
+fn entry_inside(root: &Path, path: &str) -> CmdResult<PathBuf> {
+    let p = Path::new(path);
+    let name = p.file_name().ok_or("bad path")?;
+    let parent = fs::canonicalize(p.parent().ok_or("bad path")?).map_err(err)?;
+    if parent.starts_with(fs::canonicalize(root).map_err(err)?) {
+        Ok(parent.join(name))
+    } else {
+        Err("not a path inside the minecraft folder".into())
+    }
+}
+
+/// Puts moved items back, newest first. False if any couldn't be.
+fn undo_moves(moves: &[(PathBuf, PathBuf)]) -> bool {
+    moves.iter().rev().fold(true, |ok, (from, to)| fs::rename(to, from).is_ok() && ok)
+}
+
 fn installations_dir() -> PathBuf {
     mc_dir().join("installations")
 }
@@ -3102,7 +3120,10 @@ fn write_servers(installation: Option<String>, servers: Vec<Server>) -> CmdResul
 /// Swaps servers.dat and servers.dat_old, so a restore can itself be undone.
 #[tauri::command(async)]
 fn restore_servers_backup(installation: Option<String>) -> CmdResult<()> {
-    let dir = game_dir(installation.as_deref())?;
+    restore_servers_in(&game_dir(installation.as_deref())?)
+}
+
+fn restore_servers_in(dir: &Path) -> CmdResult<()> {
     let (cur, old, tmp) = (
         dir.join("servers.dat"),
         dir.join("servers.dat_old"),
@@ -3110,6 +3131,15 @@ fn restore_servers_backup(installation: Option<String>) -> CmdResult<()> {
     );
     if !old.exists() {
         return Err("no backup to restore".into());
+    }
+    if cur.is_symlink() {
+        // swap the contents, so the installation stays linked to its standard
+        let real = fs::canonicalize(&cur).map_err(err)?;
+        let real_tmp = real.with_file_name("servers.dat_mim_swap");
+        fs::write(&tmp, fs::read(&real).map_err(err)?).map_err(err)?;
+        fs::write(&real_tmp, fs::read(&old).map_err(err)?).map_err(err)?;
+        fs::rename(&real_tmp, &real).map_err(err)?;
+        return fs::rename(&tmp, &old).map_err(err);
     }
     if cur.exists() {
         fs::rename(&cur, &tmp).map_err(err)?;
@@ -3256,9 +3286,12 @@ fn find_world(dir: &Path) -> Option<PathBuf> {
 /// Copies a world folder or .zip into a saves folder. Returns the new folder name.
 #[tauri::command(async)]
 fn import_world(source: String, installation: Option<String>) -> CmdResult<String> {
-    let saves = game_dir(installation.as_deref())?.join("saves");
-    fs::create_dir_all(&saves).map_err(err)?;
-    let src = PathBuf::from(&source);
+    import_world_into(&game_dir(installation.as_deref())?.join("saves"), &source)
+}
+
+fn import_world_into(saves: &Path, source: &str) -> CmdResult<String> {
+    fs::create_dir_all(saves).map_err(err)?;
+    let src = PathBuf::from(source);
     let stem = src.file_stem().unwrap_or_default().to_string_lossy().to_string();
 
     let tmp = std::env::temp_dir().join(format!("mim-import-{}", uuid::Uuid::new_v4()));
@@ -3280,9 +3313,14 @@ fn import_world(source: String, installation: Option<String>) -> CmdResult<Strin
             } else {
                 w.file_name().unwrap_or_default().to_string_lossy().into()
             };
-            let dest = free_path(&saves, &name);
-            copy_recursive(&w, &dest).map_err(err)?;
-            Ok(dest.file_name().unwrap_or_default().to_string_lossy().into())
+            let dest = free_path(saves, &name);
+            match copy_recursive(&w, &dest) {
+                Ok(()) => Ok(dest.file_name().unwrap_or_default().to_string_lossy().into()),
+                Err(e) => {
+                    let _ = fs::remove_dir_all(&dest); // only ever our half-made copy
+                    Err(err(e))
+                }
+            }
         }
     };
     let _ = fs::remove_dir_all(&tmp);
@@ -3299,7 +3337,18 @@ fn backup_world(path: String, dest: String) -> CmdResult<()> {
 }
 
 /// Zips `dir` into `dest`, with `dir`'s own folder at the top (like ditto --keepParent).
+/// Goes through a .part file, so a failure can't damage an older backup at `dest`.
 fn zip_dir(dir: &Path, dest: &Path) -> zip::result::ZipResult<()> {
+    let name = dest.file_name().unwrap_or_default().to_string_lossy();
+    let part = dest.with_file_name(format!("{name}.part"));
+    let done = write_zip(dir, &part).and_then(|_| fs::rename(&part, dest).map_err(Into::into));
+    if done.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    done
+}
+
+fn write_zip(dir: &Path, dest: &Path) -> zip::result::ZipResult<()> {
     let parent = dir.parent().unwrap_or(dir);
     let mut files = vec![];
     walk_files(dir, &mut files);
@@ -3317,7 +3366,7 @@ fn zip_dir(dir: &Path, dest: &Path) -> zip::result::ZipResult<()> {
 /// Moves a world, mod, or screenshot to the Trash — nothing else.
 #[tauri::command(async)]
 fn trash_item(path: String) -> CmdResult<()> {
-    let p = inside_mc(&path)?;
+    let p = entry_inside(&mc_dir(), &path)?;
     let parent = p
         .parent()
         .and_then(|d| d.file_name())
@@ -3327,6 +3376,32 @@ fn trash_item(path: String) -> CmdResult<()> {
         return Err("MIM only trashes worlds, mods, packs and screenshots".into());
     }
     trash::delete(&p).map_err(err)
+}
+
+/// Who else a change to these items reaches because their folder is shared.
+/// Empty for a linked file: only the link itself changes.
+#[tauri::command(async)]
+fn shared_with(paths: Vec<String>) -> Vec<String> {
+    shared_with_in(&mc_dir(), &paths)
+}
+
+fn shared_with_in(mc: &Path, paths: &[String]) -> Vec<String> {
+    let mut games = vec![("the Minecraft folder".to_string(), mc.to_path_buf())];
+    games.extend(visible_children(&mc.join("installations")));
+    let mut seen = std::collections::HashSet::new();
+    let mut who = std::collections::BTreeSet::new();
+    for p in paths.iter().map(Path::new).filter(|p| !p.is_symlink()) {
+        let Some(parent) = p.parent().filter(|d| seen.insert(d.to_path_buf())) else { continue };
+        let (Some(folder), Some(own)) = (parent.file_name(), parent.parent().map(canon)) else { continue };
+        let real = canon(parent);
+        let others: Vec<_> =
+            games.iter().filter(|(_, g)| canon(g) != own && canon(&g.join(folder)) == real).collect();
+        if others.is_empty() && parent.is_symlink() {
+            who.insert("the linked standard".to_string());
+        }
+        who.extend(others.into_iter().map(|(n, _)| n.clone()));
+    }
+    who.into_iter().collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -3555,7 +3630,10 @@ fn list_mods(installation: Option<String>) -> CmdResult<Vec<Mod>> {
 /// Enables/disables a mod the way launchers do: foo.jar <-> foo.jar.disabled.
 #[tauri::command(async)]
 fn toggle_mod(path: String) -> CmdResult<String> {
-    let p = inside_mc(&path)?;
+    toggle_entry(entry_inside(&mc_dir(), &path)?)
+}
+
+fn toggle_entry(p: PathBuf) -> CmdResult<String> {
     if p.parent().and_then(|d| d.file_name()).is_none_or(|n| n != "mods") {
         return Err("not a mod".into());
     }
@@ -3565,7 +3643,7 @@ fn toggle_mod(path: String) -> CmdResult<String> {
         None if s.ends_with(".jar") => PathBuf::from(format!("{s}.disabled")),
         None => return Err("not a jar".into()),
     };
-    if next.exists() {
+    if next.symlink_metadata().is_ok() {
         return Err("a file with that name already exists".into());
     }
     fs::rename(&p, &next).map_err(err)?;
@@ -4311,25 +4389,69 @@ async fn upgrade_in(installation: &str, game: &str, remove: &[String], p: &Progr
     }
 
     p.say("Swapping in the new mods");
-    for (old, staged, name) in swaps {
-        trash::delete(&old).map_err(err)?;
-        fs::rename(&staged, mods.join(&name)).map_err(err)?;
-        report.added.push(name);
-    }
-    for old in drop {
-        trash::delete(&old).map_err(err)?;
+    // outside staging: if trashing fails below, the next upgrade mustn't wipe these
+    let replaced = dir.join(".mim").join(format!("replaced-mods-{}", uuid::Uuid::new_v4()));
+    let moves = match swap_mods(&mods, &replaced, &swaps) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(format!("Nothing changed — {e}"));
+        }
+    };
+    let saved = (|| {
+        let mut profiles = read_profiles()?;
+        let at = dir.to_string_lossy();
+        let profile = profiles["profiles"]
+            .as_object_mut()
+            .and_then(|m| m.values_mut().find(|p| p["gameDir"].as_str() == Some(at.as_ref())))
+            .ok_or("the launcher profile disappeared")?;
+        profile["lastVersionId"] = json!(version_id);
+        write_profiles(&profiles)
+    })();
+    if let Err(e) = saved {
+        if undo_moves(&moves) {
+            let _ = fs::remove_dir(&replaced);
+        }
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("Nothing changed — {e}"));
     }
     let _ = fs::remove_dir_all(&staging);
+    report.added.extend(swaps.into_iter().map(|(_, _, name)| name));
 
-    let mut profiles = read_profiles()?;
-    let at = dir.to_string_lossy();
-    let profile = profiles["profiles"]
-        .as_object_mut()
-        .and_then(|m| m.values_mut().find(|p| p["gameDir"].as_str() == Some(at.as_ref())))
-        .ok_or("the launcher profile disappeared")?;
-    profile["lastVersionId"] = json!(version_id);
-    write_profiles(&profiles)?;
+    // the upgrade is done; a failure here only leaves old jars to clean up
+    let old_jars = moves.iter().map(|(_, to)| to).filter(|to| to.starts_with(&replaced));
+    for old in old_jars.chain(drop.iter()) {
+        trash::delete(old).map_err(|e| format!("Upgraded, but couldn't move an old mod to the Trash: {e}"))?;
+    }
+    let _ = fs::remove_dir(&replaced);
     Ok(report)
+}
+
+/// Moves every old jar into `replaced`, then every staged jar into `mods`.
+/// All or nothing; returns the moves so a later failure can undo them.
+fn swap_mods(mods: &Path, replaced: &Path, swaps: &[(PathBuf, PathBuf, String)]) -> CmdResult<Vec<(PathBuf, PathBuf)>> {
+    let olds: Vec<&PathBuf> = swaps.iter().map(|(old, ..)| old).collect();
+    if let Some((.., n)) =
+        swaps.iter().find(|(.., n)| mods.join(n).symlink_metadata().is_ok() && !olds.contains(&&mods.join(n)))
+    {
+        return Err(format!("another mod is already named {n}"));
+    }
+    fs::create_dir_all(replaced).map_err(err)?;
+    let steps = swaps
+        .iter()
+        .map(|(old, _, _)| (old.clone(), replaced.join(file_name(old))))
+        .chain(swaps.iter().map(|(_, staged, n)| (staged.clone(), mods.join(n))));
+    let mut moves = vec![];
+    for (from, to) in steps {
+        if let Err(e) = fs::rename(&from, &to) {
+            if undo_moves(&moves) {
+                let _ = fs::remove_dir(replaced);
+            }
+            return Err(err(e));
+        }
+        moves.push((from, to));
+    }
+    Ok(moves)
 }
 
 // ---------------------------------------------------------------------------
@@ -4571,41 +4693,48 @@ fn archive_profile_in(mc: &Path, id: &str) -> CmdResult<()> {
     let dir = profile_dir(mc, &p);
     let shared = dir == canon(mc) || others.iter().any(|o| profile_dir(mc, o) == dir);
 
-    fs::create_dir_all(&arch).map_err(err)?;
-    let moved_dir = !shared && dir.is_dir();
-    if moved_dir {
-        if let Err(e) = fs::rename(&dir, arch.join("game")) {
-            let _ = fs::remove_dir_all(&arch);
-            return Err(format!("couldn't move the folder: {e}"));
-        }
-    }
-    let mut versions = vec![];
-    if let Some(vid) = p["lastVersionId"].as_str().filter(|v| valid_name(v)) {
-        let used = others.iter().any(|o| {
+    // ponytail: "latest-release" profiles aren't resolved; vanilla versions re-download anyway
+    let lone_version = p["lastVersionId"].as_str().filter(|v| valid_name(v)).map(String::from).filter(|vid| {
+        !others.iter().any(|o| {
             let ov = o["lastVersionId"].as_str().unwrap_or("");
             ov == vid || version_parent(mc, ov).as_deref() == Some(vid)
-        });
-        let src = mc.join("versions").join(vid);
-        // ponytail: "latest-release" profiles aren't resolved; vanilla versions re-download anyway
-        if !used && src.is_dir() {
+        }) && mc.join("versions").join(vid).is_dir()
+    });
+    let moved_dir = !shared && dir.is_dir();
+    let mut moves = vec![];
+    let done = (|| {
+        fs::create_dir_all(&arch).map_err(err)?;
+        if moved_dir {
+            fs::rename(&dir, arch.join("game")).map_err(|e| format!("couldn't move the folder: {e}"))?;
+            moves.push((dir.clone(), arch.join("game")));
+        }
+        let mut versions = vec![];
+        if let Some(vid) = lone_version {
             fs::create_dir_all(arch.join("versions")).map_err(err)?;
-            if fs::rename(&src, arch.join("versions").join(vid)).is_ok() {
-                versions.push(vid.to_string());
+            let (src, to) = (mc.join("versions").join(&vid), arch.join("versions").join(&vid));
+            if fs::rename(&src, &to).is_ok() {
+                moves.push((src, to));
+                versions.push(vid);
             }
         }
+        let record = ArchivedProfile {
+            id: id.into(),
+            profile: p,
+            game_dir: dir.to_string_lossy().into(),
+            moved_dir,
+            versions,
+            archived: now_iso(),
+        };
+        fs::write(arch.join("archive.json"), serde_json::to_string_pretty(&record).map_err(err)?)
+            .map_err(err)?;
+        file["profiles"].as_object_mut().unwrap().remove(id);
+        write_profiles_in(mc, &file)
+    })();
+    // arch didn't exist before this call, so once everything's back it's only ours
+    if done.is_err() && undo_moves(&moves) {
+        let _ = fs::remove_dir_all(&arch);
     }
-    let record = ArchivedProfile {
-        id: id.into(),
-        profile: p,
-        game_dir: dir.to_string_lossy().into(),
-        moved_dir,
-        versions,
-        archived: now_iso(),
-    };
-    fs::write(arch.join("archive.json"), serde_json::to_string_pretty(&record).map_err(err)?)
-        .map_err(err)?;
-    file["profiles"].as_object_mut().unwrap().remove(id);
-    write_profiles_in(mc, &file)
+    done
 }
 
 fn restore_profile_in(mc: &Path, id: &str) -> CmdResult<()> {
@@ -5592,6 +5721,140 @@ mod tests {
         fs::remove_dir_all(&mc).unwrap();
     }
 
+    fn temp_root(tag: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("mim-{tag}-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        fs::canonicalize(root).unwrap()
+    }
+
+    #[test]
+    fn linked_files_change_only_the_link() {
+        let root = temp_root("link-entry");
+        let (std, a, b) = (root.join("standards/Base/mods"), root.join("installations/A/mods"), root.join("installations/B/mods"));
+        for d in [&std, &a, &b] {
+            fs::create_dir_all(d).unwrap();
+        }
+        fs::write(std.join("x.jar"), "jar").unwrap();
+        symlink(std.join("x.jar"), a.join("x.jar")).unwrap();
+        symlink(std.join("x.jar"), b.join("x.jar")).unwrap();
+
+        let link = a.join("x.jar").to_string_lossy().to_string();
+        assert_eq!(entry_inside(&root, &link).unwrap(), a.join("x.jar"));
+        assert!(shared_with_in(&root, &[link.clone()]).is_empty());
+        let off = toggle_entry(entry_inside(&root, &link).unwrap()).unwrap();
+        assert!(off.ends_with("A/mods/x.jar.disabled") && a.join("x.jar.disabled").is_symlink());
+        assert!(std.join("x.jar").is_file() && b.join("x.jar").exists());
+        toggle_entry(entry_inside(&root, &off).unwrap()).unwrap();
+        assert!(a.join("x.jar").is_symlink());
+        assert!(entry_inside(&root, "/etc/hosts").is_err());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn shared_folders_name_who_else_is_affected() {
+        let root = temp_root("shared-with");
+        let std = root.join("standards/Base/mods");
+        fs::create_dir_all(&std).unwrap();
+        fs::write(std.join("x.jar"), "jar").unwrap();
+        for i in ["A", "B"] {
+            fs::create_dir_all(root.join("installations").join(i)).unwrap();
+            symlink(&std, root.join("installations").join(i).join("mods")).unwrap();
+        }
+        let via = |i: &str| root.join("installations").join(i).join("mods/x.jar").to_string_lossy().to_string();
+        assert_eq!(shared_with_in(&root, &[via("A")]), vec!["B".to_string()]);
+        fs::remove_file(root.join("installations/B/mods")).unwrap();
+        assert_eq!(shared_with_in(&root, &[via("A")]), vec!["the linked standard".to_string()]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn server_restore_keeps_the_link() {
+        let root = temp_root("servers");
+        let (inst, std) = (root.join("inst"), root.join("std"));
+        fs::create_dir_all(&inst).unwrap();
+        fs::create_dir_all(&std).unwrap();
+        fs::write(std.join("servers.dat"), "now").unwrap();
+        symlink(std.join("servers.dat"), inst.join("servers.dat")).unwrap();
+        fs::write(inst.join("servers.dat_old"), "before").unwrap();
+        restore_servers_in(&inst).unwrap();
+        assert!(inst.join("servers.dat").is_symlink());
+        assert_eq!(fs::read_to_string(std.join("servers.dat")).unwrap(), "before");
+        assert_eq!(fs::read_to_string(inst.join("servers.dat_old")).unwrap(), "now");
+        assert!(!inst.join("servers.dat_mim_swap").exists() && !std.join("servers.dat_mim_swap").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn failed_import_and_backup_leave_nothing_broken() {
+        let root = temp_root("failed-copy");
+        let (world, saves) = (root.join("src/W"), root.join("saves"));
+        fs::create_dir_all(&world).unwrap();
+        fs::write(world.join("level.dat"), "x").unwrap();
+        symlink(root.join("missing"), world.join("broken")).unwrap();
+        assert!(import_world_into(&saves, &world.to_string_lossy()).is_err());
+        assert_eq!(fs::read_dir(&saves).unwrap().count(), 0);
+
+        let dest = root.join("backup.zip");
+        fs::write(&dest, "older backup").unwrap();
+        assert!(zip_dir(&world, &dest).is_err());
+        assert_eq!(fs::read_to_string(&dest).unwrap(), "older backup");
+        assert!(!root.join("backup.zip.part").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn mod_swap_is_all_or_nothing() {
+        let root = temp_root("swap");
+        let (mods, staging, replaced) = (root.join("mods"), root.join("staging"), root.join("replaced"));
+        fs::create_dir_all(&mods).unwrap();
+        fs::create_dir_all(&staging).unwrap();
+        for (n, v) in [("a-1.jar", "a1"), ("b-1.jar", "b1"), ("taken.jar", "keep")] {
+            fs::write(mods.join(n), v).unwrap();
+        }
+        fs::write(staging.join("a-2.jar"), "a2").unwrap();
+        fs::write(staging.join("taken.jar"), "new").unwrap();
+        let clash = vec![
+            (mods.join("a-1.jar"), staging.join("a-2.jar"), "a-2.jar".to_string()),
+            (mods.join("b-1.jar"), staging.join("taken.jar"), "taken.jar".to_string()),
+        ];
+        assert!(swap_mods(&mods, &replaced, &clash).is_err());
+        assert_eq!(fs::read_to_string(mods.join("taken.jar")).unwrap(), "keep");
+        assert!(mods.join("a-1.jar").exists() && !mods.join("a-2.jar").exists());
+
+        // a staged jar went missing: the first swap has to come back
+        fs::remove_file(staging.join("taken.jar")).unwrap();
+        let gone = vec![clash[0].clone(), (mods.join("b-1.jar"), staging.join("gone.jar"), "b-2.jar".to_string())];
+        assert!(swap_mods(&mods, &replaced, &gone).is_err());
+        assert!(mods.join("a-1.jar").exists() && mods.join("b-1.jar").exists());
+        assert!(staging.join("a-2.jar").exists() && !mods.join("a-2.jar").exists());
+
+        let ok = vec![clash[0].clone()];
+        let moves = swap_mods(&mods, &replaced, &ok).unwrap();
+        assert!(mods.join("a-2.jar").exists() && replaced.join("a-1.jar").exists());
+        assert!(undo_moves(&moves));
+        assert!(mods.join("a-1.jar").exists() && staging.join("a-2.jar").exists());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn failed_archive_puts_everything_back() {
+        let mc = temp_root("archive-fail");
+        let game = mc.join("installations/Solo");
+        fs::create_dir_all(&game).unwrap();
+        fs::write(game.join("options.txt"), "fov:1").unwrap();
+        fs::create_dir_all(mc.join("versions/solo-1")).unwrap();
+        let file = json!({"profiles": {"p1": {"name": "Solo", "gameDir": game.to_string_lossy(), "lastVersionId": "solo-1"}}});
+        fs::write(mc.join("launcher_profiles.json"), file.to_string()).unwrap();
+        // a file where the backups folder goes makes the final write fail
+        fs::create_dir_all(mc.join(".mim")).unwrap();
+        fs::write(mc.join(".mim/profile-backups"), "").unwrap();
+
+        assert!(archive_profile_in(&mc, "p1").is_err());
+        assert!(game.join("options.txt").is_file() && mc.join("versions/solo-1").is_dir());
+        assert!(!archive_dir(&mc, "p1").unwrap().exists());
+        fs::remove_dir_all(&mc).unwrap();
+    }
+
     #[test]
     fn options_keep_colons_in_values() {
         let o = parse_options("fov:0.5\nresourcePacks:[\"file/a:b.zip\"]\n\n");
@@ -5675,6 +5938,7 @@ pub fn run() {
             import_world,
             backup_world,
             trash_item,
+            shared_with,
             list_mods,
             toggle_mod,
             add_mods,

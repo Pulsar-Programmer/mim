@@ -7,6 +7,7 @@ import {
   Installation,
   PackInfo,
   PackList,
+  okToChangeShared,
   reportSummary,
   splitLinks,
 } from "./api";
@@ -194,6 +195,9 @@ export function PacksView({
               className="linklike danger-link"
               onClick={() =>
                 confirm(p.path, async () => {
+                  if (!(await okToChangeShared([p.path], `Removing ${packName(p.file)}`))) {
+                    return `Kept ${packName(p.file)}`;
+                  }
                   await api.trashItem(p.path);
                   return `Moved ${packName(p.file)} to Trash`;
                 })

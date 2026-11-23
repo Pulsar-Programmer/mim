@@ -1,7 +1,7 @@
 import { CSSProperties, MouseEvent, PointerEvent as RPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { api, formatBytes, Installation, Screenshot } from "./api";
+import { api, formatBytes, Installation, okToChangeShared, Screenshot } from "./api";
 import { PlacePicker, sharedPlaces } from "./Places";
 import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
@@ -235,6 +235,8 @@ export function ScreenshotsView({
   }
 
   async function trash(paths: string[]) {
+    const label = paths.length === 1 ? "Trashing this screenshot" : `Trashing ${paths.length} screenshots`;
+    if (!(await okToChangeShared(paths, label))) return "Nothing moved";
     let n = 0;
     for (const p of paths) {
       await api.trashItem(p);

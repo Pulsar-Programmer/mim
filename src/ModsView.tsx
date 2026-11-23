@@ -6,6 +6,7 @@ import {
   ImportReport,
   Installation,
   Mod,
+  okToChangeShared,
   reportSummary,
   splitLinks,
   timeAgo,
@@ -75,6 +76,7 @@ export function ModsView({
 
   async function toggle(m: Mod) {
     try {
+      if (!(await okToChangeShared([m.path], `Turning ${m.name} ${m.enabled ? "off" : "on"}`))) return;
       await api.toggleMod(m.path);
       reload();
     } catch (e) {
@@ -293,6 +295,7 @@ export function ModsView({
                     className="linklike danger-link"
                     onClick={() =>
                       confirm(m.path, async () => {
+                        if (!(await okToChangeShared([m.path], `Removing ${m.name}`))) return `Kept ${m.name}`;
                         await api.trashItem(m.path);
                         return `Moved ${m.name} to Trash`;
                       })
