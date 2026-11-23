@@ -1061,6 +1061,17 @@ fn list_standards() -> CmdResult<Vec<Standard>> {
     Ok(out)
 }
 
+fn new_std_name(n: &str) -> CmdResult<&str> {
+    let n = n.trim();
+    if !valid_name(n) || n.contains('\\') {
+        return Err("Invalid standard name".into());
+    }
+    if n.eq_ignore_ascii_case(SHARED) {
+        return Err("\"Shared\" is the built-in standard".into());
+    }
+    Ok(n)
+}
+
 #[tauri::command(async)]
 fn ensure_standards_dir() -> CmdResult<String> {
     let dir = standards_dir();
@@ -1070,13 +1081,7 @@ fn ensure_standards_dir() -> CmdResult<String> {
 
 #[tauri::command(async)]
 fn create_standard(name: String) -> CmdResult<String> {
-    let name = name.trim();
-    if !valid_name(name) {
-        return Err("Invalid standard name".into());
-    }
-    if name.eq_ignore_ascii_case(SHARED) {
-        return Err("\"Shared\" is the built-in standard".into());
-    }
+    let name = new_std_name(&name)?;
     let d = standards_dir().join(name);
     if d.exists() {
         return Err(format!("\"{name}\" already exists"));
@@ -1152,7 +1157,8 @@ fn entry_src(rel: &str) -> CmdResult<(PathBuf, String)> {
 fn linked_entries(inst: &Path, entries: &[StandardEntry]) -> Vec<String> {
     entries
         .iter()
-        .filter(|e| entry_src(&e.rel_path).is_ok_and(|(src, dest)| links_to(&inst.join(dest), &src)))
+        // through its own link or a whole linked folder
+        .filter(|e| entry_src(&e.rel_path).is_ok_and(|(src, dest)| link_state(inst, &src, &dest).0.state == "linked"))
         .map(|e| e.rel_path.clone())
         .collect()
 }
@@ -1253,6 +1259,129 @@ fn link_standard(
         add_link(&std, &installation)?;
     }
     Ok(blocked)
+}
+
+/// One config folder of a standard, as an installation has it.
+#[derive(Serialize, Debug, PartialEq)]
+struct FolderLink {
+    folder: String,
+    /// the installation's folder is itself one link to the standard's
+    whole: bool,
+    /// what linking it whole would replace, relative to the installation
+    in_way: Vec<String>,
+}
+
+/// The standard's folder holding entries `rels`. Shared is left out: its list
+/// is a picked part of the Minecraft folder, and a folder link would expose it all.
+fn folder_src(name: &str, folder: &str, rels: &[String]) -> CmdResult<PathBuf> {
+    if name == SHARED || !(folder == MERGED || folder.starts_with("config/")) || !valid_dest(folder) {
+        return Err(format!("can't link {folder} as a folder"));
+    }
+    let mut found: Option<PathBuf> = None;
+    for r in rels {
+        let (src, dest) = entry_of(name, r)?;
+        let inner = dest.strip_prefix(&format!("{folder}/")).ok_or(format!("{r} isn't in {folder}"))?;
+        let dir = src.ancestors().nth(inner.split('/').count()).map(Path::to_path_buf);
+        if found.is_some() && found != dir {
+            return Err(format!("{folder} is spread over version folders"));
+        }
+        found = dir;
+    }
+    found.ok_or(format!("{folder} is empty"))
+}
+
+/// Files and links under `dir`, without following links.
+fn items_under(dir: &Path, out: &mut Vec<PathBuf>) {
+    for e in fs::read_dir(dir).into_iter().flatten().flatten() {
+        match e.file_type() {
+            Ok(t) if t.is_dir() => items_under(&e.path(), out),
+            Ok(_) => out.push(e.path()),
+            _ => {}
+        }
+    }
+}
+
+/// What a folder link to `src` would replace. Links to the same files don't count.
+fn folder_in_way(inst: &Path, src: &Path, folder: &str) -> Vec<String> {
+    let dir = inst.join(folder);
+    if links_to(&dir, src) {
+        return vec![];
+    }
+    if dir.is_symlink() {
+        return vec![folder.to_string()];
+    }
+    let mut items = vec![];
+    items_under(&dir, &mut items);
+    let mut way: Vec<String> = items
+        .iter()
+        .filter(|p| p.file_name().is_some_and(|n| n != ".DS_Store"))
+        .filter(|p| !p.strip_prefix(&dir).is_ok_and(|r| links_to(p, &src.join(r))))
+        .filter_map(|p| p.strip_prefix(inst).ok().map(slash_path))
+        .collect();
+    way.sort();
+    way
+}
+
+/// Makes `folder` one link to `src`. Returns what's in the way; unless
+/// `replace`, nothing changes then. Real files go to the Trash, links just go.
+fn link_folder_in(inst: &Path, src: &Path, folder: &str, replace: bool) -> CmdResult<Vec<String>> {
+    let dest = inst.join(folder);
+    if let Some(a) = linked_ancestor(inst, &dest) {
+        return Err(format!("{} is already a linked folder", slash_path(a.strip_prefix(inst).unwrap_or(&a))));
+    }
+    if links_to(&dest, src) {
+        return Ok(vec![]);
+    }
+    let way = folder_in_way(inst, src, folder);
+    if !way.is_empty() && !replace {
+        return Ok(way);
+    }
+    if dest.is_symlink() {
+        remove_link(&dest).map_err(err)?;
+    } else if dest.exists() {
+        let mut items = vec![];
+        items_under(&dest, &mut items);
+        if items.iter().all(|p| p.is_symlink()) {
+            for p in &items {
+                remove_link(p).map_err(err)?;
+            }
+            fs::remove_dir_all(&dest).map_err(err)?; // only empty folders are left
+        } else {
+            trash::delete(&dest).map_err(err)?;
+        }
+    }
+    fs::create_dir_all(dest.parent().unwrap()).map_err(err)?;
+    symlink(src, &dest).map_err(err)?;
+    Ok(way)
+}
+
+/// How each (folder, its entries) stands in an installation. Folders that
+/// can't be linked whole are left out.
+#[tauri::command(async)]
+fn folder_links(name: String, installation: String, folders: Vec<(String, Vec<String>)>) -> CmdResult<Vec<FolderLink>> {
+    let inst = game_dir(Some(&installation))?;
+    Ok(folders
+        .iter()
+        .filter_map(|(folder, rels)| {
+            let src = folder_src(&name, folder, rels).ok()?;
+            Some(FolderLink {
+                whole: links_to(&inst.join(folder), &src),
+                in_way: folder_in_way(&inst, &src, folder),
+                folder: folder.clone(),
+            })
+        })
+        .collect())
+}
+
+/// Links a whole config folder, so new files in it are shared too.
+#[tauri::command(async)]
+fn link_folder(name: String, installation: String, folder: String, rel_paths: Vec<String>, replace: bool) -> CmdResult<Vec<String>> {
+    let src = folder_src(&name, &folder, &rel_paths)?;
+    let way = link_folder_in(&game_dir(Some(&installation))?, &src, &folder, replace)?;
+    if way.is_empty() || replace {
+        add_link(&standard_dir(&name)?, &installation)?;
+    }
+    Ok(way)
 }
 
 /// Unlinks all of standard `name`, or with `rel_paths` just those entries;
@@ -1612,6 +1741,51 @@ fn delete_standard(name: String) -> CmdResult<()> {
         detach(&links_of(&installations_dir().join(inst), &name), true)?;
     }
     trash::delete(std).map_err(err)
+}
+
+/// Renames a standard's folder and repoints every installation's links at it.
+/// If a link can't be remade, everything goes back as it was.
+#[tauri::command(async)]
+fn rename_standard(name: String, new_name: String) -> CmdResult<()> {
+    if name == SHARED {
+        return Err("The Shared standard can't be renamed".into());
+    }
+    let new = new_std_name(&new_name)?;
+    if new == name {
+        return Ok(());
+    }
+    let old = standard_dir(&name)?;
+    let dest = standards_dir().join(new);
+    // "pvp" -> "PvP" is the same folder on macOS and Windows
+    if dest.symlink_metadata().is_ok() && canon(&dest) != canon(&old) {
+        return Err(format!("\"{new}\" already exists"));
+    }
+    // resolved before the move: afterwards these links are broken
+    let root = canon(&old);
+    let mut links = vec![];
+    for i in installation_names() {
+        let inst = installations_dir().join(i);
+        let mut all: Vec<PathBuf> = visible_children(&inst).into_iter().map(|(_, p)| p).collect();
+        if !inst.join(MERGED).is_symlink() {
+            links_under(&inst.join(MERGED), &mut all);
+        }
+        links.extend(all.into_iter().filter(|p| p.is_symlink()).filter_map(|p| {
+            let rel = fs::canonicalize(&p).ok()?.strip_prefix(&root).ok()?.to_path_buf();
+            Some((p, rel))
+        }));
+    }
+    fs::rename(&old, &dest).map_err(err)?;
+    for (n, (link, rel)) in links.iter().enumerate() {
+        if let Err(e) = remove_link(link).and_then(|_| symlink(dest.join(rel), link)) {
+            for (l, r) in &links[..=n] {
+                let _ = remove_link(l);
+                let _ = symlink(old.join(r), l);
+            }
+            let _ = fs::rename(&dest, &old);
+            return Err(err(e));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -4716,6 +4890,57 @@ mod tests {
 
     // throwaway temp folder, never the real minecraft dir
     #[test]
+    fn config_can_be_one_folder_link() {
+        let root = std::env::temp_dir().join(format!("mim-whole-{}", uuid::Uuid::new_v4()));
+        let (src, a, b) = (root.join("standards/PvP/config"), root.join("a"), root.join("b"));
+        fs::create_dir_all(src.join("jade")).unwrap();
+        fs::write(src.join("sodium.json"), "std").unwrap();
+        fs::write(src.join("jade/jade.json"), "std").unwrap();
+
+        // per-file links aren't in the way, and become one link
+        let pairs = vec![(src.join("sodium.json"), "config/sodium.json".to_string())];
+        link_entries(&a, &pairs, false).unwrap();
+        assert!(link_folder_in(&a, &src, "config", false).unwrap().is_empty());
+        assert!(links_to(&a.join("config"), &src));
+        assert_eq!(link_state(&a, &src.join("jade/jade.json"), "config/jade/jade.json").0.state, "linked");
+
+        // a new file made through the link lands in the standard
+        fs::write(a.join("config/new.json"), "mod").unwrap();
+        assert!(src.join("new.json").is_file());
+
+        // the installation's own file is reported, and nothing changes
+        fs::create_dir_all(b.join("config")).unwrap();
+        fs::write(b.join("config/mine.json"), "mine").unwrap();
+        assert_eq!(link_folder_in(&b, &src, "config", false).unwrap(), ["config/mine.json"]);
+        assert!(!b.join("config").is_symlink());
+        assert_eq!(fs::read_to_string(b.join("config/mine.json")).unwrap(), "mine");
+
+        // copying all of a linked config/ leaves real files and the standard intact
+        let c = root.join("c");
+        link_folder_in(&c, &src, "config", true).unwrap();
+        copy_entry(&c, &src.join("sodium.json"), "config/sodium.json").unwrap();
+        copy_entry(&c, &src.join("jade/jade.json"), "config/jade/jade.json").unwrap();
+        assert!(!c.join("config").is_symlink() && !c.join("config/sodium.json").is_symlink());
+        assert_eq!(fs::read_to_string(c.join("config/jade/jade.json")).unwrap(), "std");
+        fs::write(c.join("config/sodium.json"), "changed").unwrap();
+        assert_eq!(fs::read_to_string(src.join("sodium.json")).unwrap(), "std");
+
+        // a folder inside a linked folder can't be linked on its own
+        assert!(link_folder_in(&a, &src.join("jade"), "config/jade", true).is_err());
+
+        // back to per-file links, with the standard untouched
+        let all = vec![
+            (src.join("sodium.json"), "config/sodium.json".to_string()),
+            (src.join("jade/jade.json"), "config/jade/jade.json".to_string()),
+        ];
+        link_entries(&a, &all, true).unwrap();
+        assert!(!a.join("config").is_symlink() && a.join("config/sodium.json").is_symlink());
+        assert_eq!(fs::read_to_string(src.join("sodium.json")).unwrap(), "std");
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
     fn share_config_links_single_mods() {
         let root = std::env::temp_dir().join(format!("mim-cfg-{}", uuid::Uuid::new_v4()));
         let (std, a, b) = (root.join("standards/PvP"), root.join("a"), root.join("b"));
@@ -5167,6 +5392,29 @@ mod tests {
         let names: Vec<_> = p["profiles"].as_object().unwrap().values().map(|v| v["name"].as_str().unwrap()).collect();
         assert!(names.len() == 2 && names.contains(&"Copy"), "{names:?}");
         assert!(read_links(&std).contains(&"Copy".to_string()));
+
+        // renaming a standard repoints links, nested and relative ones too
+        fs::create_dir_all(std.join("config/fabric")).unwrap();
+        fs::write(std.join("config/fabric/a.json"), "{}").unwrap();
+        fs::create_dir_all(moved.join("config/fabric")).unwrap();
+        symlink(std.join("config/fabric/a.json"), moved.join("config/fabric/a.json")).unwrap();
+        remove_link(&copy.join("options.txt")).unwrap();
+        symlink("../../standards/Base/options.txt", copy.join("options.txt")).unwrap();
+        fs::create_dir_all(root.join("standards/Taken")).unwrap();
+        for bad in ["Shared", "shared", "a/b", ".x", "Taken"] {
+            assert!(rename_standard("Base".into(), bad.into()).is_err(), "{bad}");
+        }
+        assert!(rename_standard("Shared".into(), "Nope".into()).is_err());
+        rename_standard("Base".into(), " PvP ".into()).unwrap();
+        let pvp = root.join("standards/PvP");
+        assert!(!std.exists() && read_links(&pvp).contains(&"Copy".to_string()));
+        assert!(links_to(&moved.join("options.txt"), &pvp.join("options.txt")));
+        assert!(links_to(&copy.join("options.txt"), &pvp.join("options.txt")));
+        assert!(links_to(&moved.join("config/fabric/a.json"), &pvp.join("config/fabric/a.json")));
+        // only the case changes
+        rename_standard("PvP".into(), "pvp".into()).unwrap();
+        assert_eq!(fs::read_to_string(moved.join("options.txt")).unwrap(), "fov:1");
+        assert!(visible_children(&root.join("standards")).iter().any(|(n, _)| n == "pvp"));
         fs::remove_dir_all(&root).unwrap();
     }
 
@@ -5388,9 +5636,12 @@ pub fn run() {
             ensure_standards_dir,
             create_standard,
             delete_standard,
+            rename_standard,
             link_standard,
             unlink_standard,
             link_states,
+            folder_links,
+            link_folder,
             share_config,
             add_to_standard,
             remove_shared_item,

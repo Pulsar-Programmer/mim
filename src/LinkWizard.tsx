@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, formatBytes, InstCopy, Installation, Linkable, Standard, timeAgo } from "./api";
 import { compare, Comparison, mergeText, sameValue } from "./compare";
 import { useCached } from "./hooks";
+import { CARET, DIR, FILE } from "./LinkEditor";
 import { Avatar } from "./Places";
 import { brief } from "./settings";
 
@@ -10,16 +11,44 @@ const FOLDER_LABEL: Record<string, string> = {
   resourcepacks: "Resource packs",
   screenshots: "Screenshots",
 };
-const GROUPS: [string, (l: Linkable) => boolean][] = [
-  ["Folders", (l) => l.is_dir],
-  ["Settings", (l) => !l.is_dir && !l.dest.startsWith("config/")],
-  ["Mod configs", (l) => l.dest.startsWith("config/")],
-];
 // mirrors TEXT_EXTS in lib.rs: what read_config will open
 const TEXT = /\.(json5?|jsonc|toml|properties|txt|cfg|conf|ya?ml|ini|snbt|hjson)$/i;
 const letter = (k: number) => String.fromCharCode(65 + (k % 26));
 const ago = (secs: number) => (secs > 0 && secs < 8e12 ? timeAgo(new Date(secs * 1000).toISOString()) : "—");
 const plural = (n: number, w: string, ws = `${w}s`) => `${n} ${n === 1 ? w : ws}`;
+const isConfig = (l: Linkable) => l.dest.startsWith("config/");
+const under = (dest: string, folder: string) => dest.startsWith(`${folder}/`);
+
+/** The list as the real folders: config/ and its subfolders hold their files. */
+interface TreeRow {
+  name: string;
+  path: string;
+  kids: TreeRow[];
+  l?: Linkable;
+}
+
+function linkTree(items: Linkable[]): TreeRow[] {
+  const root: TreeRow = { name: "", path: "", kids: [] };
+  for (const l of items) {
+    const parts = l.dest.split("/");
+    let at = root;
+    parts.slice(0, -1).forEach((name, i) => {
+      const path = parts.slice(0, i + 1).join("/");
+      let dir = at.kids.find((k) => !k.l && k.path === path);
+      if (!dir) at.kids.push((dir = { name, path, kids: [] }));
+      at = dir;
+    });
+    at.kids.push({ name: parts[parts.length - 1], path: l.dest, kids: [], l });
+  }
+  const isFile = (n: TreeRow) => !!n.l && !n.l.is_dir;
+  const sorted = (rows: TreeRow[]): TreeRow[] =>
+    rows
+      .map((n) => ({ ...n, kids: sorted(n.kids) }))
+      .sort((a, b) => Number(isFile(a)) - Number(isFile(b)) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+  return sorted(root.kids);
+}
+
+const itemsIn = (n: TreeRow): Linkable[] => (n.l ? [n.l] : n.kids.flatMap(itemsIn));
 
 /** One distinct content of a file, and everyone who has it. Newest first. */
 interface Version {
@@ -80,8 +109,13 @@ export function LinkWizard({
   const [scan, setScan] = useState<Linkable[] | null>(null);
   const scanId = useRef(0);
   const [on, setOn] = useState<Set<string>>(new Set());
-  const [policy, setPolicy] = useState("merge"); // "newest", or an installation's name
-  const [keep, setKeep] = useState<Record<string, string>>({}); // dest -> hash, "use this one as is"
+  // each file's own choices; the buttons above the list just set these for every file
+  const [from, setFrom] = useState<Record<string, string>>({}); // dest -> hash clashes come from (default: newest)
+  const [unmerged, setUnmerged] = useState<Set<string>>(new Set()); // files kept whole instead of merged
+  const [decided, setDecided] = useState(false); // a Prefer button settled every clash
+  const [drops, setDrops] = useState<Record<string, string[]>>({}); // dest -> settings left out of the merge
+  const [wholeDirs, setWholeDirs] = useState<Set<string>>(new Set()); // config folders that are one link
+  const [toggledDirs, setToggledDirs] = useState<Set<string>>(new Set()); // top folders start open, others closed
   const [picks, setPicks] = useState<Record<string, Record<string, number>>>({}); // dest -> setting -> version
   const [how, setHow] = useState<Record<string, "link" | "clone">>({});
   const [focus, setFocus] = useState<string | null>(null);
@@ -127,37 +161,45 @@ export function LinkWizard({
   }, [scan, texts]);
   const reading = (scan ?? []).some((l) => !l.is_dir && versionsOf(l).length > 1 && !comparisons.has(l.dest));
 
+  /** The version a file's clashes come from; versions are newest first. */
+  const baseOf = (l: Linkable, vs = versionsOf(l)) => Math.max(0, vs.findIndex((v) => v.hash === from[l.dest]));
+  const wantsMerge = (l: Linkable) => !unmerged.has(l.dest);
+
   /** The version a file comes from, unless it's being merged. */
   const keeper = (l: Linkable): Version => {
     const vs = versionsOf(l);
     const c = comparisons.get(l.dest);
-    return (
-      vs.find((v) => v.hash === keep[l.dest]) ??
-      (policy !== "newest" && policy !== "merge"
-        ? vs.find((v) => v.copies.some((c) => c.installation === policy))
-        : undefined) ??
-      (policy === "merge" && c?.kind === "additive" ? vs[c.superset] : undefined) ??
-      vs[0]
-    );
+    return wantsMerge(l) && c?.kind === "additive" ? vs[c.superset] : vs[baseOf(l, vs)];
   };
 
   /** Merging writes a new file; identical or one-has-it-all files never need to. */
   const merging = (l: Linkable) => {
     const c = comparisons.get(l.dest);
-    return policy === "merge" && !keep[l.dest] && !!c?.mergeable && (c.kind === "combine" || c.kind === "conflict");
+    if (!c?.mergeable || !wantsMerge(l)) return false;
+    return c.kind === "combine" || c.kind === "conflict" || (c.kind === "additive" && !!drops[l.dest]?.length);
   };
   const mergedText = (l: Linkable) => {
     const vs = versionsOf(l);
-    return mergeText(vs.map((v) => texts[v.hash] ?? ""), comparisons.get(l.dest)!, l.dest, 0, picks[l.dest]);
+    return mergeText(
+      vs.map((v) => texts[v.hash] ?? ""),
+      comparisons.get(l.dest)!,
+      l.dest,
+      baseOf(l, vs),
+      picks[l.dest],
+      new Set(drops[l.dest])
+    );
   };
   // servers.dat is rewritten by the game, so it's safer as each installation's own
-  const howOf = (l: Linkable) => how[l.dest] ?? (l.dest === "servers.dat" ? "clone" : "link");
+  const inWhole = (l: Linkable) => [...wholeDirs].some((f) => under(l.dest, f));
+  const howOf = (l: Linkable) =>
+    inWhole(l) ? "link" : (how[l.dest] ?? (l.dest === "servers.dat" ? "clone" : "link"));
 
   async function startCompare() {
     const id = ++scanId.current; // a later Compare wins over a slow earlier one
     setStep("compare");
     setScan(null);
     setArmed(false);
+    setWholeDirs(new Set());
     if (!stdName) {
       const taken = new Set(customStds.map((s) => s.name.toLowerCase()));
       let n = "Linked";
@@ -199,7 +241,7 @@ export function LinkWizard({
   const differs = (l: Linkable) => !l.is_dir && versionsOf(l).length > 1;
   const needing = (scan ?? []).filter((l) => {
     const c = comparisons.get(l.dest);
-    const settled = !!keep[l.dest] || (merging(l) && c!.conflicts.every((k) => picks[l.dest]?.[k] !== undefined));
+    const settled = decided || !!from[l.dest] || unmerged.has(l.dest) || (merging(l) && c!.conflicts.every((k) => picks[l.dest]?.[k] !== undefined));
     return on.has(l.dest) && needsYou(c) && !settled;
   });
   const visible = (scan ?? []).filter(
@@ -223,18 +265,91 @@ export function LinkWizard({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [focused]);
 
+  /** Folder links holding any of these files go back to a link per file. */
+  const dropWhole = (dests: string[]) =>
+    setWholeDirs((s) => new Set([...s].filter((f) => !dests.some((d) => under(d, f)))));
+
   function setTicked(dests: string[], tick: boolean) {
     const next = new Set(on);
     for (const d of dests) tick ? next.add(d) : next.delete(d);
     setOn(next);
     setArmed(false);
+    // one symlink can't leave a file out
+    if (!tick) dropWhole(dests);
   }
 
+  // ---- one-time actions: they set the rows below, and the rows stay editable
+
+  function mergeAll(v: boolean) {
+    const several = (scan ?? []).filter(differs).map((l) => l.dest);
+    setUnmerged(new Set(v ? [] : several));
+    setArmed(false);
+    notify(v ? "Merging every file" : "Keeping every file whole");
+  }
+
+  function preferAll(inst: string | null) {
+    const next = { ...from };
+    for (const l of (scan ?? []).filter(differs)) {
+      const vs = versionsOf(l);
+      const v = inst ? vs.find((x) => x.copies.some((c) => c.installation === inst)) : vs[0];
+      if (v) next[l.dest] = v.hash;
+    }
+    setFrom(next);
+    setPicks({});
+    setDecided(true);
+    setArmed(false);
+    notify(`Every clash now uses ${inst ?? "the newer value"}`);
+  }
+
+  function setHowFor(items: Linkable[], m: "link" | "clone") {
+    if (m === "clone") dropWhole(items.map((l) => l.dest));
+    setHow({ ...how, ...Object.fromEntries(items.map((l) => [l.dest, m])) });
+    setArmed(false);
+  }
+
+  /** Link or copy a whole group: ticks it too, except what's already in sync. */
+  function setGroup(items: Linkable[], m: "link" | "clone") {
+    setTicked(items.filter((l) => !synced(l)).map((l) => l.dest), true);
+    setHowFor(items, m);
+  }
+
+  /** One folder: a single symlink, a link per file, or everyone's own copy. */
+  function setFolder(n: TreeRow, m: "whole" | "each" | "copy") {
+    const items = itemsIn(scanTree(n.path) ?? n);
+    const related = (f: string) => f === n.path || under(f, n.path) || under(n.path, f);
+    setTicked(items.map((l) => l.dest), true);
+    setHowFor(items, m === "copy" ? "clone" : "link");
+    setWholeDirs((s) => {
+      const next = new Set([...s].filter((f) => !related(f)));
+      if (m === "whole") next.add(n.path);
+      return next;
+    });
+  }
+
+  /** A folder with everything in it, even what the search is hiding. */
+  function scanTree(path: string) {
+    let rows = linkTree(scan ?? []);
+    for (let i = 1, parts = path.split("/"); i <= parts.length; i++) {
+      const at = rows.find((r) => r.path === parts.slice(0, i).join("/"));
+      if (!at) return null;
+      if (i === parts.length) return at;
+      rows = at.kids;
+    }
+    return null;
+  }
+
+  const tree = linkTree(visible);
+  const isOpen = (n: TreeRow, depth: number) => !!find || attention || (depth === 0) !== toggledDirs.has(n.path);
+  const shownItems = (rows: TreeRow[], depth: number): Linkable[] =>
+    rows.flatMap((n) => (n.l ? [n.l] : isOpen(n, depth) ? shownItems(n.kids, depth + 1) : []));
+
   function listKeys(e: React.KeyboardEvent) {
-    const k = visible.findIndex((l) => l.dest === focus);
+    if (e.target !== e.currentTarget) return; // a checkbox or action has the keyboard
+    const rows = shownItems(tree, 0);
+    const k = rows.findIndex((l) => l.dest === focus);
     if (e.key === "ArrowDown" || e.key === "ArrowUp") {
       e.preventDefault();
-      const n = visible[Math.min(visible.length - 1, Math.max(0, k + (e.key === "ArrowDown" ? 1 : -1)))];
+      const n = rows[Math.min(rows.length - 1, Math.max(0, k + (e.key === "ArrowDown" ? 1 : -1)))];
       if (n) {
         setFocus(n.dest);
         document.getElementById(`lw-${n.dest}`)?.scrollIntoView({ block: "nearest" });
@@ -252,10 +367,19 @@ export function LinkWizard({
   const folders = ticked.filter((l) => l.is_dir);
   const existing = customStds.find((s) => s.name.toLowerCase() === stdName.trim().toLowerCase());
   const nameOk = /^[^./][^/]*$/.test(stdName.trim()) && stdName.trim().toLowerCase() !== "shared";
+  const everyConfig = (scan ?? []).filter(isConfig);
+  const copyAllConfig =
+    everyConfig.length > 0 && everyConfig.every((l) => on.has(l.dest) && howOf(l) === "clone");
+  // a linked config/ has to be swapped out before its files can become real copies
+  const relinkFirst = (inst: string) =>
+    copyAllConfig && everyConfig.some((l) => l.copies.some((c) => c.installation === inst && c.link));
   // own copies that lose to the keeper: replaced, so they go to the Trash
   const replaced = files.flatMap((l) => {
     const k = merging(l) ? null : keeper(l);
-    return l.copies.filter((c) => c.link === null && c.hash !== k?.hash).map((c) => `${c.installation} · ${l.dest}`);
+    // a whole-folder link replaces every real file in config/, even matching ones
+    const gone = (c: InstCopy) =>
+      c.link === null && ((inWhole(l) || (relinkFirst(c.installation) && isConfig(l))) || c.hash !== k?.hash);
+    return l.copies.filter(gone).map((c) => `${c.installation} · ${l.dest}`);
   });
   // a folder linked from some standard can't merge into Shared; it's left alone
   const mergeable = (l: Linkable, inst: string) =>
@@ -269,7 +393,11 @@ export function LinkWizard({
       return;
     }
     const name = existing?.name ?? stdName.trim();
-    const total = (files.length ? 1 + files.length + pickedList.length : 0) + (folders.length ? pickedList.length : 0);
+    const copiedDirs = folders.filter((l) => howOf(l) === "clone");
+    const total =
+      (files.length ? 1 + files.length + pickedList.length : 0) +
+      (folders.length ? pickedList.length : 0) +
+      (copiedDirs.length ? pickedList.length : 0);
     let done = 0;
     let at = "";
     const tick = (what: string) => setBusy((at = `${what} · ${++done}/${total}`));
@@ -284,10 +412,16 @@ export function LinkWizard({
           if (merged != null) await api.adoptText(name, l.dest, merged);
           else await api.adoptFile(name, source(keeper(l)).path, l.dest);
         }
-        const rels = (m: "link" | "clone") => files.filter((l) => howOf(l) === m).map((l) => `${name}/${l.dest}`);
+        const oneByOne = files.filter((l) => !inWhole(l));
+        const rels = (m: "link" | "clone") => oneByOne.filter((l) => howOf(l) === m).map((l) => `${name}/${l.dest}`);
+        const allConfigRels = files.filter(isConfig).map((l) => `${name}/${l.dest}`);
+        const relsIn = (f: string) => files.filter((l) => under(l.dest, f)).map((l) => `${name}/${l.dest}`);
         for (const i of pickedList) {
           tick(`Applying to ${i.name}`);
+          if (relinkFirst(i.name)) await api.linkFolder(name, i.name, "config", allConfigRels, true);
           if (rels("link").length) await api.linkStandard(name, i.name, rels("link"), true);
+          // after the per-file links, which free a config/ that's linked from elsewhere
+          for (const f of wholeDirs) if (relsIn(f).length) await api.linkFolder(name, i.name, f, relsIn(f), true);
           if (rels("clone").length) await api.copyStandard(name, i.name, rels("clone"));
         }
       }
@@ -296,14 +430,24 @@ export function LinkWizard({
         const dirs = folders.filter((l) => mergeable(l, i.name)).map((l) => l.dest);
         if (dirs.length) renamed.push(...(await api.mergeShared(i.name, dirs)));
       }
+      // after every merge, so each installation's copy has everything
+      for (const i of copiedDirs.length ? pickedList : []) {
+        tick(`Copying to ${i.name}`);
+        const dirs = copiedDirs.filter((l) => mergeable(l, i.name)).map((l) => `Shared/${l.dest}`);
+        if (dirs.length) await api.copyStandard("Shared", i.name, dirs);
+      }
       setResult(
         [
-          files.some((l) => howOf(l) === "link") &&
-            `${plural(files.filter((l) => howOf(l) === "link").length, "file")} linked through "${name}"`,
+          files.some(inWhole) &&
+            `${[...wholeDirs].filter((f) => files.some((l) => under(l.dest, f))).map((f) => `${f}/`).join(", ")} linked as one folder through "${name}"`,
+          files.some((l) => howOf(l) === "link" && !inWhole(l)) &&
+            `${plural(files.filter((l) => howOf(l) === "link" && !inWhole(l)).length, "file")} linked through "${name}"`,
           files.some((l) => howOf(l) === "clone") &&
-            `${plural(files.filter((l) => howOf(l) === "clone").length, "file")} cloned, each installation keeps its own`,
+            `${plural(files.filter((l) => howOf(l) === "clone").length, "file")} copied, each installation keeps its own`,
           files.some(merging) && `${plural(files.filter(merging).length, "file")} merged`,
-          folders.length && `${folders.map((l) => FOLDER_LABEL[l.dest]).join(", ")} merged into Shared`,
+          folders.length > copiedDirs.length &&
+            `${folders.filter((l) => howOf(l) === "link").map((l) => FOLDER_LABEL[l.dest]).join(", ")} merged into Shared`,
+          copiedDirs.length > 0 && `${copiedDirs.map((l) => FOLDER_LABEL[l.dest]).join(", ")} copied to each installation`,
           replaced.length && `${plural(replaced.length, "older copy", "older copies")} in the Trash`,
           renamed.length && `${plural(renamed.length, "name clash", "name clashes")} — kept both`,
         ].filter((x): x is string => !!x)
@@ -321,11 +465,14 @@ export function LinkWizard({
   function restart() {
     setPicked(new Set());
     setScan(null);
-    setKeep({});
     setPicks({});
     setHow({});
     setTexts({});
-    setPolicy("merge");
+    setDrops({});
+    setFrom({});
+    setUnmerged(new Set());
+    setDecided(false);
+    setWholeDirs(new Set());
     setStep("pick");
   }
 
@@ -451,69 +598,151 @@ export function LinkWizard({
               </div>
             </div>
             <div className="lw-list" tabIndex={0} onKeyDown={listKeys} title="↑↓ to move · space to tick">
-              {GROUPS.map(([label, test]) => {
-                const items = visible.filter(test);
-                if (!items.length) return null;
-                const n = items.filter((l) => on.has(l.dest)).length;
-                return (
-                  <div key={label}>
-                    <label className="lw-group">
-                      <input
-                        type="checkbox"
-                        checked={n === items.length}
-                        ref={(el) => {
-                          if (el) el.indeterminate = n > 0 && n < items.length;
-                        }}
-                        onChange={() => setTicked(items.map((l) => l.dest), n < items.length)}
-                      />
-                      {label}
-                      <span className="lw-count">{items.length}</span>
-                    </label>
-                    {items.map((l) => (
+              {visible.length > 0 && (
+                <div className="lw-group">
+                  <label className="lw-group-tick">
+                    <input
+                      type="checkbox"
+                      checked={visible.every((l) => on.has(l.dest))}
+                      ref={(el) => {
+                        if (el) {
+                          const n = visible.filter((l) => on.has(l.dest)).length;
+                          el.indeterminate = n > 0 && n < visible.length;
+                        }
+                      }}
+                      onChange={() =>
+                        setTicked(visible.map((l) => l.dest), !visible.every((l) => on.has(l.dest)))
+                      }
+                    />
+                    Folders
+                  </label>
+                  <span className="lw-group-acts">
+                    <button className="linklike" title="Link everything" onClick={() => setGroup(scan, "link")}>
+                      link all
+                    </button>
+                    <button className="linklike" title="Give each installation its own copy of everything" onClick={() => setGroup(scan, "clone")}>
+                      copy all
+                    </button>
+                  </span>
+                  <span className="lw-count">{visible.length}</span>
+                </div>
+              )}
+              {(function rows(nodes: TreeRow[], depth: number): React.ReactNode {
+                return nodes.map((n) => {
+                  if (n.l) {
+                    const l = n.l;
+                    return (
                       <Row
                         key={l.dest}
                         l={l}
+                        name={n.name}
+                        depth={depth}
                         on={on.has(l.dest)}
                         focus={focus === l.dest}
                         synced={synced(l)}
+                        copied={howOf(l) === "clone"}
                         versions={l.is_dir ? 0 : versionsOf(l).length}
                         status={verdict(comparisons.get(l.dest))}
                         onFocus={() => setFocus(l.dest)}
                         onTick={() => setTicked([l.dest], !on.has(l.dest))}
+                        onHow={l.is_dir ? (m) => setGroup([l], m) : undefined}
                       />
-                    ))}
-                  </div>
-                );
-              })}
+                    );
+                  }
+                  const items = itemsIn(n);
+                  const ticked = items.filter((l) => on.has(l.dest)).length;
+                  const open = isOpen(n, depth);
+                  const whole = wholeDirs.has(n.path);
+                  const parentWhole = [...wholeDirs].some((f) => under(n.path, f));
+                  const copies = items.every((l) => howOf(l) === "clone");
+                  const toggle = () => {
+                    const next = new Set(toggledDirs);
+                    next.has(n.path) ? next.delete(n.path) : next.add(n.path);
+                    setToggledDirs(next);
+                  };
+                  return (
+                    <div key={n.path}>
+                      <div
+                        className={`lw-item lw-dir ${ticked ? "" : "off"}`}
+                        style={{ paddingLeft: 8 + depth * 16 }}
+                        onClick={toggle}
+                      >
+                        <button
+                          className={`le-caret ${open ? "open" : ""}`}
+                          aria-label={`${open ? "Collapse" : "Expand"} ${n.name}/`}
+                          aria-expanded={open}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggle();
+                          }}
+                        >
+                          {CARET}
+                        </button>
+                        <input
+                          type="checkbox"
+                          aria-label={`Include ${n.name}/`}
+                          checked={ticked === items.length}
+                          ref={(el) => {
+                            if (el) el.indeterminate = ticked > 0 && ticked < items.length;
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                          onChange={() => setTicked(items.map((l) => l.dest), ticked < items.length)}
+                        />
+                        <span className="le-ico dir">{DIR}</span>
+                        <span className="lw-item-name">{n.name}/</span>
+                        {whole || parentWhole ? (
+                          <span className="lw-tag">one link</span>
+                        ) : (
+                          copies && <span className="lw-tag">copy</span>
+                        )}
+                        <span className="lw-badge single">
+                          {ticked === items.length ? items.length : `${ticked}/${items.length}`}
+                        </span>
+                        <span className="lw-row-acts" onClick={(e) => e.stopPropagation()}>
+                          <button className="linklike" title="One symlink for this whole folder. New files are shared too, and it replaces each installation's folder." onClick={() => setFolder(n, "whole")}>
+                            link folder
+                          </button>
+                          <button className="linklike" title="A symlink per file, so installations keep their other files" onClick={() => setFolder(n, "each")}>
+                            link each
+                          </button>
+                          <button className="linklike" title="Each installation gets its own copy" onClick={() => setFolder(n, "copy")}>
+                            copy
+                          </button>
+                        </span>
+                      </div>
+                      {open && rows(n.kids, depth + 1)}
+                    </div>
+                  );
+                });
+              })(tree, 0)}
               {visible.length === 0 && <p className="le-empty">{attention ? "Nothing needs you — the rest merges cleanly." : "Nothing here."}</p>}
             </div>
           </div>
 
           <div className="lw-detail">
             {pickedList.length > 1 && scan.some(differs) && (
-              <label className="lw-policy">
-                Build the shared copy by
-                <select
-                  value={policy}
-                  onChange={(e) => {
-                    setPolicy(e.target.value);
-                    setKeep({});
-                  }}
-                >
-                  <option value="merge">merging them (recommended)</option>
-                  <option value="newest">using the newest of each</option>
-                  {pickedList.map((i) => (
-                    <option key={i.name} value={i.name}>
-                      staying true to {i.name}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <div className="lw-policy" role="group" aria-label="Set every file">
+                <button className="lw-set" title="Set every file to combine all installations' settings" onClick={() => mergeAll(true)}>
+                  Merge all
+                </button>
+                <button className="lw-set" title="Set every file to one installation's version, unmerged" onClick={() => mergeAll(false)}>
+                  Unmerge all
+                </button>
+                <span className="lw-set-label">Prefer</span>
+                <button className="lw-set" title="Set every clash to the most recently saved file" onClick={() => preferAll(null)}>
+                  Newer
+                </button>
+                {pickedList.map((i) => (
+                  <button key={i.name} className="lw-set" title={`Set every clash to ${i.name}'s value`} onClick={() => preferAll(i.name)}>
+                    {i.name}
+                  </button>
+                ))}
+              </div>
             )}
             {!focused ? (
               <p className="le-empty">Pick something on the left.</p>
             ) : focused.is_dir ? (
-              <FolderDetail l={focused} picked={pickedList} />
+              <FolderDetail l={focused} picked={pickedList} how={howOf(focused)} onHow={(m) => setHowFor([focused], m)} />
             ) : (
               <FileDetail
                 l={focused}
@@ -526,21 +755,36 @@ export function LinkWizard({
                 picked={pickedList}
                 texts={texts}
                 instOf={instOf}
-                onKeep={(hash) => {
-                  setKeep({ ...keep, [focused.dest]: hash });
+                wantsMerge={wantsMerge(focused)}
+                dropped={drops[focused.dest] ?? []}
+                onAll={(k) => {
+                  setFrom({ ...from, [focused.dest]: versionsOf(focused)[k].hash });
+                  const { [focused.dest]: _, ...rest } = picks;
+                  setPicks(rest);
                   setTicked([focused.dest], true);
                 }}
-                onMerge={() => {
-                  const { [focused.dest]: _, ...rest } = keep;
-                  setKeep(rest);
-                  setPolicy("merge");
+                onToggleMerge={() => {
+                  const next = new Set(unmerged);
+                  next.has(focused.dest) ? next.delete(focused.dest) : next.add(focused.dest);
+                  setUnmerged(next);
                   setTicked([focused.dest], true);
                 }}
                 onPick={(key, version) => {
                   setPicks({ ...picks, [focused.dest]: { ...picks[focused.dest], [key]: version } });
-                  setArmed(false);
+                  if (unmerged.has(focused.dest)) {
+                    const next = new Set(unmerged);
+                    next.delete(focused.dest);
+                    setUnmerged(next);
+                  }
+                  setTicked([focused.dest], true);
                 }}
-                onHow={(m) => setHow({ ...how, [focused.dest]: m })}
+                onDrop={(keys, include) => {
+                  const now = new Set(drops[focused.dest]);
+                  for (const k of keys) include ? now.delete(k) : now.add(k);
+                  setDrops({ ...drops, [focused.dest]: [...now] });
+                  setTicked([focused.dest], true);
+                }}
+                onHow={(m) => setHowFor([focused], m)}
               />
             )}
           </div>
@@ -629,22 +873,31 @@ export function LinkWizard({
 
 function Row({
   l,
+  name,
+  depth,
   on,
   focus,
   synced,
+  copied,
   versions,
   status,
   onFocus,
   onTick,
+  onHow,
 }: {
   l: Linkable;
+  name: string;
+  depth: number;
   on: boolean;
   focus: boolean;
   synced: boolean;
+  copied: boolean;
   versions: number;
   status: [string, string];
   onFocus: () => void;
   onTick: () => void;
+  /** folders can be linked or copied right from the list */
+  onHow?: (m: "link" | "clone") => void;
 }) {
   // a badge only when it tells you something
   const badge = synced
@@ -657,17 +910,46 @@ function Row({
           ? ["single", `only ${l.copies[0].installation}`]
           : ["", ""];
   return (
-    <div id={`lw-${l.dest}`} className={`lw-item ${focus ? "focus" : ""} ${on ? "" : "off"}`} onClick={onFocus}>
-      <input type="checkbox" checked={on} onClick={(e) => e.stopPropagation()} onChange={onTick} />
+    <div
+      id={`lw-${l.dest}`}
+      className={`lw-item ${focus ? "focus" : ""} ${on ? "" : "off"}`}
+      style={{ paddingLeft: 8 + depth * 16 }}
+      onClick={onFocus}
+    >
+      <span className="le-caret-gap" />
+      <input type="checkbox" aria-label={`Include ${name}`} checked={on} onClick={(e) => e.stopPropagation()} onChange={onTick} />
+      <span className={`le-ico ${l.is_dir ? "dir" : ""}`}>{l.is_dir ? DIR : FILE}</span>
       <span className="lw-item-name" title={l.dest}>
-        {l.is_dir ? FOLDER_LABEL[l.dest] : l.dest.replace(/^config\//, "")}
+        {name}
+        {l.is_dir ? "/" : ""}
       </span>
+      {on && copied && <span className="lw-tag">copy</span>}
       {badge[1] && <span className={`lw-badge ${badge[0]}`}>{badge[1]}</span>}
+      {onHow && (
+        <span className="lw-row-acts" onClick={(e) => e.stopPropagation()}>
+          <button className="linklike" title="One shared folder" onClick={() => onHow("link")}>
+            link
+          </button>
+          <button className="linklike" title="Each installation gets its own full copy" onClick={() => onHow("clone")}>
+            copy
+          </button>
+        </span>
+      )}
     </div>
   );
 }
 
-function FolderDetail({ l, picked }: { l: Linkable; picked: Installation[] }) {
+function FolderDetail({
+  l,
+  picked,
+  how,
+  onHow,
+}: {
+  l: Linkable;
+  picked: Installation[];
+  how: "link" | "clone";
+  onHow: (m: "link" | "clone") => void;
+}) {
   const own = l.copies.filter((c) => !c.link);
   const seen = new Map<string, number>();
   for (const n of [...l.shared, ...own.flatMap((c) => c.names)]) seen.set(n, (seen.get(n) ?? 0) + 1);
@@ -675,7 +957,12 @@ function FolderDetail({ l, picked }: { l: Linkable; picked: Installation[] }) {
   return (
     <div className="lw-detail-body">
       <h2 className="lw-detail-title">{FOLDER_LABEL[l.dest]}</h2>
-      <p className="hint">Everything merges into the one Shared folder — nothing is picked or lost.</p>
+      <p className="hint">
+        {how === "link"
+          ? "Everything merges into the one Shared folder, so nothing is picked or lost."
+          : "Everything is gathered in Shared, then each installation gets its own full copy."}
+      </p>
+      <HowPicker how={how} onHow={onHow} noun="folder" />
       <div className="lw-versions">
         {picked.map((i) => {
           const c = l.copies.find((x) => x.installation === i.name);
@@ -715,6 +1002,21 @@ function FolderDetail({ l, picked }: { l: Linkable; picked: Installation[] }) {
   );
 }
 
+function HowPicker({ how, onHow, noun }: { how: "link" | "clone"; onHow: (m: "link" | "clone") => void; noun: string }) {
+  return (
+    <div className="lw-how" role="radiogroup" aria-label={`How installations get this ${noun}`}>
+      <button role="radio" aria-checked={how === "link"} className={how === "link" ? "on" : ""} onClick={() => onHow("link")}>
+        <b>Link</b>
+        <span>One {noun}, always in sync</span>
+      </button>
+      <button role="radio" aria-checked={how === "clone"} className={how === "clone" ? "on" : ""} onClick={() => onHow("clone")}>
+        <b>Copy</b>
+        <span>Each keeps its own</span>
+      </button>
+    </div>
+  );
+}
+
 function FileDetail({
   l,
   versions,
@@ -726,9 +1028,12 @@ function FileDetail({
   picked,
   texts,
   instOf,
-  onKeep,
-  onMerge,
+  wantsMerge,
+  dropped,
+  onAll,
+  onToggleMerge,
   onPick,
+  onDrop,
   onHow,
 }: {
   l: Linkable;
@@ -741,25 +1046,36 @@ function FileDetail({
   picked: Installation[];
   texts: Record<string, string | null>;
   instOf: (n: string) => Installation | undefined;
-  onKeep: (hash: string) => void;
-  onMerge: () => void;
+  wantsMerge: boolean;
+  dropped: string[];
+  onAll: (version: number) => void;
+  onToggleMerge: () => void;
   onPick: (key: string, version: number) => void;
+  onDrop: (keys: string[], include: boolean) => void;
   onHow: (m: "link" | "clone") => void;
 }) {
   const [peek, setPeek] = useState<string | null>(null);
-  const [showAdded, setShowAdded] = useState(false);
   const missing = picked.filter((i) => !l.copies.some((c) => c.installation === i.name));
   const textual = TEXT.test(l.dest);
   const ki = Math.max(0, versions.findIndex((v) => v.hash === keeper.hash));
   const several = versions.length > 1;
-  const canMerge = !!c?.mergeable && (c.kind === "combine" || c.kind === "conflict");
+  const canMerge = !!c?.mergeable && (c.kind === "combine" || c.kind === "conflict" || c.kind === "additive");
+  const merged = canMerge && wantsMerge;
   const added = c ? c.keys.filter((k) => !c.conflicts.includes(k)) : [];
-  const whoHas = (k: string) => c!.maps.flatMap((m, i) => (m.has(k) ? [letter(i)] : [])).join(", ");
+  const nameOf = (v: Version) =>
+    v.copies.length > 1 ? `${v.copies[0].installation} +${v.copies.length - 1}` : v.copies[0].installation;
+  const whoHas = (k: string) => c!.maps.flatMap((m, i) => (m.has(k) ? [nameOf(versions[i])] : [])).join(", ");
+  const included = added.filter((k) => !dropped.includes(k)).length;
   // a version that lacks the setting can't supply it: the first that has it does
   const chosen = (key: string) => {
-    const want = merging ? (picks[key] ?? 0) : ki;
+    const want = merging ? (picks[key] ?? ki) : ki;
     return c!.maps[want]?.has(key) ? want : c!.maps.findIndex((m) => m.has(key));
   };
+  /** Whether "All A" describes what's chosen now. */
+  const isAll = (k: number) =>
+    merged
+      ? !!c?.conflicts.length && c.conflicts.every((key) => c.maps[k].has(key) && sameValue(c.maps[k].get(key), c.maps[chosen(key)]?.get(key)))
+      : k === ki;
   const summary = !several
     ? l.copies.length > 1
       ? "Identical everywhere."
@@ -790,64 +1106,49 @@ function FileDetail({
         {missing.length > 0 && ` Also goes to ${missing.map((i) => i.name).join(", ")}.`}
       </p>
 
-      <div className="lw-how" role="radiogroup" aria-label="How installations get this file">
-        <button role="radio" aria-checked={how === "link"} className={how === "link" ? "on" : ""} onClick={() => onHow("link")}>
-          <b>Link</b>
-          <span>One file, always in sync</span>
-        </button>
-        <button role="radio" aria-checked={how === "clone"} className={how === "clone" ? "on" : ""} onClick={() => onHow("clone")}>
-          <b>Clone</b>
-          <span>Each keeps its own copy</span>
-        </button>
-      </div>
+      <HowPicker how={how} onHow={onHow} noun="file" />
 
-      <div className="lw-versions">
+      <div className="lw-picks">
         {canMerge && (
-          <button className={`lw-version pickable lw-merge ${merging ? "kept" : ""}`} onClick={onMerge}>
-            <span className="lw-version-head">
-              <span className="lw-letter">+</span>
-              <span className="lw-who">Merge all versions</span>
-              <span className="lw-meta">keeps every setting</span>
-            </span>
+          <button className={`lw-pick ${merged ? "on" : ""}`} aria-pressed={merged} onClick={onToggleMerge}>
+            <span className="lw-letter">+</span>
+            <span className="lw-pick-name">Merge</span>
           </button>
         )}
         {versions.map((v, k) => {
-          const kept = k === ki && !merging;
+          const active = several && isAll(k);
           return (
-            <div
-              key={v.hash}
-              className={`lw-version ${several ? "pickable" : ""} ${kept && several ? "kept" : ""}`}
-              onClick={() => onKeep(v.hash)}
-            >
-              <div className="lw-version-head">
+            <div key={v.hash} className={`lw-pick ${active ? "on" : ""}`}>
+              <button
+                className="lw-pick-main"
+                aria-pressed={active}
+                disabled={!several}
+                title={several ? `Use ${nameOf(v)} for every clash in this file` : undefined}
+                onClick={() => onAll(k)}
+              >
                 {several && <span className="lw-letter">{letter(k)}</span>}
                 <span className="lw-who">
-                  {v.copies.map((c) => (
-                    <span key={c.installation} className="lw-member" title={c.link ? `linked from ${c.link}` : undefined}>
-                      <Avatar inst={instOf(c.installation)} small /> {c.installation}
+                  {v.copies.map((x) => (
+                    <span key={x.installation} className="lw-member" title={x.link ? `linked from ${x.link}` : undefined}>
+                      <Avatar inst={instOf(x.installation)} small /> {x.installation}
                     </span>
                   ))}
                 </span>
                 <span className="lw-meta">
+                  {several && <b>All {letter(k)} · </b>}
                   {formatBytes(v.size)} · {ago(v.modified)}
                 </span>
-                {textual && texts[v.hash] && (
-                  <button
-                    className="linklike lw-peek-btn"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setPeek(peek === v.hash ? null : v.hash);
-                    }}
-                  >
-                    {peek === v.hash ? "hide" : "view"}
-                  </button>
-                )}
-              </div>
-              {peek === v.hash && <pre className="lw-pre" onClick={(e) => e.stopPropagation()}>{texts[v.hash]}</pre>}
+              </button>
+              {textual && texts[v.hash] && (
+                <button className="linklike lw-peek-btn" onClick={() => setPeek(peek === v.hash ? null : v.hash)}>
+                  {peek === v.hash ? "hide" : "view"}
+                </button>
+              )}
             </div>
           );
         })}
       </div>
+      {peek && texts[peek] && <pre className="lw-pre">{texts[peek]}</pre>}
 
       {several && c && c.kind !== "same" && (
         <div className="lw-diff">
@@ -862,7 +1163,9 @@ function FileDetail({
                       <tr>
                         <th>{plural(c.conflicts.length, "clash", "clashes")}</th>
                         {versions.map((v, k) => (
-                          <th key={v.hash}>{letter(k)}</th>
+                          <th key={v.hash} className="lw-th-name" title={nameOf(v)}>
+                            {letter(k)} · {nameOf(v)}
+                          </th>
                         ))}
                       </tr>
                     </thead>
@@ -877,7 +1180,7 @@ function FileDetail({
                               <td key={k} className={on ? "kept" : ""}>
                                 {v === undefined ? (
                                   <span className="lw-none">—</span>
-                                ) : merging ? (
+                                ) : canMerge ? (
                                   <button className="lw-cell" title={v} aria-pressed={on} onClick={() => onPick(key, k)}>
                                     {v}
                                   </button>
@@ -894,21 +1197,38 @@ function FileDetail({
                 </div>
               )}
               {added.length > 0 && (
-                <>
-                  <button className="linklike lw-added" onClick={() => setShowAdded(!showAdded)}>
-                    {showAdded ? "Hide" : "Show"} {plural(added.length, "setting")} only some have
-                  </button>
-                  {showAdded && (
-                    <ul className="lw-added-list">
-                      {added.map((k) => (
-                        <li key={k}>
-                          <code>{k}</code>
-                          <span>in {whoHas(k)}</span>
-                        </li>
-                      ))}
-                    </ul>
+                <details className="lw-only">
+                  <summary>
+                    {plural(added.length, "setting")} only some have
+                    <span>{merged ? `${included} included` : "turn on Merge to choose"}</span>
+                  </summary>
+                  {merged && (
+                    <div className="le-quick">
+                      <button className="linklike" onClick={() => onDrop(added, true)}>
+                        all
+                      </button>
+                      <button className="linklike" onClick={() => onDrop(added, false)}>
+                        none
+                      </button>
+                    </div>
                   )}
-                </>
+                  <ul className="lw-added-list">
+                    {added.map((k) => (
+                      <li key={k}>
+                        <label>
+                          <input
+                            type="checkbox"
+                            disabled={!merged}
+                            checked={merged ? !dropped.includes(k) : !!c.maps[ki]?.has(k)}
+                            onChange={(e) => onDrop([k], e.target.checked)}
+                          />
+                          <code>{k}</code>
+                        </label>
+                        <span>in {whoHas(k)}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
               )}
             </>
           )}

@@ -1,8 +1,14 @@
 import { useEffect, useState } from "react";
-import { entriesFor, Installation, Standard } from "./api";
-import { LinkEditor } from "./LinkEditor";
+import { entriesFor, Installation, Standard, StandardEntry } from "./api";
+import { buildTree, LinkEditor } from "./LinkEditor";
 import { Avatar, StandardAvatar } from "./Places";
 import { brief } from "./settings";
+
+/** config/ holds its files one by one, so name only the top-level items. */
+const topNames = (entries: StandardEntry[]) => {
+  const names = buildTree(entries).map((n) => (n.entry ? n.name : `${n.name}/`));
+  return names.slice(0, 4).join(", ") + (names.length > 4 ? ` +${names.length - 4}` : "");
+};
 
 /** Every standard one installation can use; each opens the link editor. */
 export function LinksDrawer({
@@ -65,7 +71,7 @@ export function LinksDrawer({
                   <span className="place-sub">
                     {n === 0 ? "nothing linked" : `${n} of ${entries.length} linked`}
                     {" · "}
-                    {entries.map((e) => e.name).join(", ")}
+                    {topNames(entries)}
                   </span>
                 </span>
                 <span className="link-row-go">Choose ›</span>

@@ -118,6 +118,9 @@ export function applySettings(s: Settings) {
     root.setProperty("--display", headings);
   }
   if (body && s.fontScope === "everything") root.setProperty("--body", body);
+  // ponytail: measured from a Hypixel card's "H"; other glyphs may need their own offset
+  if (s.font === "minecraft") root.setProperty("--initial-nudge", "0.074em, -0.0625em");
+  else root.removeProperty("--initial-nudge");
   // native webview zoom (like ⌘+), so 100vh layouts still fit the window
   getCurrentWebview().setZoom(s.scale).catch(() => {});
 }
