@@ -237,81 +237,57 @@ nav {
 /* update control, after T3 Code's sidebar update pill */
 .update-btn {
   flex-shrink: 0;
-  display: inline-grid;
-  place-items: center;
-  width: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 32px;
   height: 32px;
+  padding: 0 8px;
   border: none;
-  border-radius: 50%;
+  border-radius: 16px;
   background: none;
   color: var(--faint);
+  font-family: var(--body);
+  font-size: 12.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
   transition: background 0.15s, color 0.15s;
 }
-.update-btn:hover,
-.update-btn.has-update {
+.update-btn > svg {
+  flex-shrink: 0;
+}
+.update-btn:hover {
   color: var(--ink);
   background: var(--hover);
 }
 .update-btn.has-update {
-  background: var(--chip);
+  padding: 0 11px 0 9px;
+  color: var(--ink);
+  background: var(--accent-soft);
+}
+.update-btn.has-update > svg {
+  color: var(--accent);
 }
 .update-btn.armed {
-  color: var(--accent);
-  background: var(--accent-soft);
+  box-shadow: inset 0 0 0 1.5px var(--accent);
 }
 .update-btn[aria-disabled] {
   cursor: default;
 }
 .update-btn:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: -2px;
+  outline-offset: 1px;
 }
-.update-icon {
-  position: relative;
-  display: grid;
-  place-items: center;
-}
-.update-dot {
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 0 2px var(--chip);
-}
-.update-check {
-  position: absolute;
-  right: -4px;
-  bottom: -4px;
-  display: grid;
-  place-items: center;
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--ink);
-  color: var(--bg);
-  box-shadow: 0 0 0 2px var(--chip);
-}
-.update-ring {
-  position: relative;
-  display: grid;
-  place-items: center;
-  width: 32px;
-  height: 32px;
-}
-.update-ring > svg {
-  position: absolute;
-  inset: 0;
-  transform: rotate(-90deg);
-  pointer-events: none;
+.update-label {
+  min-width: 28px;
+  text-align: center;
 }
 .update-ring circle {
   fill: none;
   stroke: currentColor;
-  stroke-width: 1.5;
+  stroke-width: 2;
   stroke-linecap: round;
   transition: stroke-dashoffset 0.3s ease-out;
 }
