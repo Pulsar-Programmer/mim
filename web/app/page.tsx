@@ -64,6 +64,7 @@ export default async function Page() {
             alt="MIM's Installations page showing six Minecraft installations with their versions, mod loaders, mod counts, and linked folders." />
         </div>
         <div className="horizon" aria-hidden />
+        <div className="ground" aria-hidden />
       </header>
 
       <main>
@@ -134,8 +135,9 @@ export default async function Page() {
         </section>
       </main>
 
+      <div className="bedrock" aria-hidden />
       <footer className="wrap foot">
-        <span>MIM is not affiliated with or endorsed by Mojang or Microsoft.</span>
+        <span>Minecraft textures belong to Mojang. MIM is not affiliated with or endorsed by Mojang or Microsoft.</span>
         <span>Pixel type: Minecraftia by Andrew Tyler, <a href="https://creativecommons.org/licenses/by-sa/3.0/">CC BY-SA 3.0</a>.</span>
       </footer>
     </>

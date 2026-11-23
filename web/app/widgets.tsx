@@ -69,9 +69,9 @@ export function DownloadCta() {
 
 const VERSIONS = ["1.21.4", "1.20.1", "1.16.1"];
 const LOADERS: { name: string; sprite: SpriteName }[] = [
-  { name: "Fabric", sprite: "gear" },
-  { name: "Forge", sprite: "anvil" },
-  { name: "NeoForge", sprite: "lantern" },
+  { name: "Fabric", sprite: "wool" },
+  { name: "Forge", sprite: "furnace" },
+  { name: "NeoForge", sprite: "blast" },
   { name: "Vanilla", sprite: "grass" },
 ];
 const MODS = [42, 118, 9];
@@ -123,8 +123,8 @@ export function Recipe() {
 
 const ITEMS: { name: string; sprite: SpriteName; text: string }[] = [
   { name: "Saves", sprite: "grass", text: "Browse your worlds across every install and see what's inside each one." },
-  { name: "Mods", sprite: "gear", text: "See what each install runs and update its mods from Modrinth." },
-  { name: "Upgrades", sprite: "anvil", text: "Move an install and its mods to a newer Minecraft version." },
+  { name: "Mods", sprite: "crafting", text: "See what each install runs and update its mods from Modrinth." },
+  { name: "Upgrades", sprite: "xp", text: "Move an install and its mods to a newer Minecraft version." },
   { name: "Resource Packs", sprite: "painting", text: "Manage your packs and share them between installs." },
   { name: "Shader Packs", sprite: "lantern", text: "Pick shaders with preview screenshots from Modrinth." },
   { name: "Options & Config", sprite: "book", text: "Compare and edit settings and keybinds for each game folder." },

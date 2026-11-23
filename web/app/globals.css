@@ -60,14 +60,14 @@ h2 { font-size: clamp(1.7rem, 3.4vw, 2.6rem); line-height: 1.25; }
 .beam.two { top: 130px; right: 15%; width: 130px; height: 420px; opacity: .7; }
 .glass {
   position: relative; z-index: 3; display: flex; align-items: center; justify-content: space-between; gap: 16px;
-  width: min(1104px, calc(100% - 16px)); margin-inline: auto; padding: 9px 18px;
+  width: min(1104px, calc(100% - 16px)); min-height: 60px; margin-inline: auto; padding: 8px 10px 8px 16px;
   border: 1px solid var(--line); border-radius: 18px; background: #2a1d36b8; backdrop-filter: blur(12px);
 }
-.brand { display: flex; align-items: center; gap: 10px; padding-top: 3px; font: 1.25rem/1 var(--pixel); text-decoration: none; }
-.brand img { margin-top: -4px; }
-.navlinks { display: flex; align-items: center; gap: clamp(10px, 2.2vw, 26px); font: .78rem/1 var(--pixel); }
-.navlinks a { display: flex; align-items: center; gap: 7px; padding: 6px 2px; color: #fff3dccc; text-decoration: none; transition: color .2s; }
-.navlinks a:hover { color: var(--sun); }
+.brand { display: flex; align-items: center; gap: 10px; border-radius: 10px; font: 1.25rem/1 var(--pixel); text-decoration: none; }
+.brand img { flex: none; }
+.navlinks { display: flex; align-items: center; gap: 2px; font: .78rem/1 var(--pixel); }
+.navlinks a { display: flex; align-items: center; gap: 8px; height: 42px; padding: 0 16px; border-radius: 14px; color: #fff3dcc7; text-decoration: none; transition: color .15s, background-color .15s; }
+.navlinks a:hover, .navlinks a:focus-visible { color: var(--cream); background: #fff3dc1c; }
 
 .hero { display: flex; flex-direction: column; align-items: center; padding: clamp(44px, 6vw, 68px) var(--gutter) 0; text-align: center; }
 .badge { display: inline-flex; align-items: center; gap: 8px; padding: 5px 14px; border: 1px solid var(--line); border-radius: 10px; background: #1d1526cc; font-size: .875rem; font-weight: 600; }
@@ -77,7 +77,7 @@ h1 em { color: var(--amber); font-style: normal; display: inline-block; transfor
 .cta { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 14px; margin-top: 26px; }
 .cta-note { margin-top: 12px; font-size: .9rem; color: var(--soft); }
 
-.stage { position: relative; width: min(1020px, calc(100% - 2 * var(--gutter))); margin: clamp(120px, 14vw, 170px) auto 0; }
+.stage { position: relative; width: min(1020px, calc(100% - 2 * var(--gutter))); margin: clamp(120px, 14vw, 170px) auto 48px; }
 .stage::before {
   content: ""; position: absolute; z-index: -1; left: 50%; top: calc(-1 * clamp(96px, 11vw, 136px)); bottom: 0; width: 100vw; translate: -50% 0;
   background: linear-gradient(#2a1b36 0 13%, #442a4f 13% 26%, #6e4567 26% 40%, #9f5961 40% 54%, #d06c5c 54% 68%, #e98a62 68% 84%, #f6b27a 84%);
@@ -89,6 +89,8 @@ h1 em { color: var(--amber); font-style: normal; display: inline-block; transfor
 }
 @keyframes rise { from { transform: translateY(120px); } to { transform: none; } }
 .shot { position: relative; z-index: 2; border-radius: 12px 12px 0 0; box-shadow: 0 0 0 1px #0007, 0 -8px 44px #17111f55; }
+.ground { position: absolute; inset: auto 0 0; z-index: 3; height: 48px; background: url(/img/mc/ground.png) 0 0 / 48px; image-rendering: pixelated; box-shadow: 0 -3px 0 #0003; }
+.bedrock { height: 32px; margin-top: 8px; background: url(/img/mc/bedrock.png) 0 0 / 32px; image-rendering: pixelated; filter: brightness(.55); }
 .horizon {
   position: absolute; inset: auto 0 0; z-index: 1; height: 216px; pointer-events: none;
   background: url(/img/horizon.png) repeat-x left bottom / 960px 216px; image-rendering: pixelated;
@@ -106,10 +108,10 @@ h1 em { color: var(--amber); font-style: normal; display: inline-block; transfor
 /* inventory slots */
 .slot {
   display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px; color: var(--cream); font: inherit;
-  background: #1d1526; border: 2px solid; border-color: #0e0a14 #5a4a68 #5a4a68 #0e0a14; border-radius: 3px;
+  background: #6f6178; border: 3px solid; border-color: #2f2638 #a899b0 #a899b0 #2f2638; border-radius: 2px;
 }
 button.slot { cursor: pointer; transition: background .15s; }
-button.slot:hover:not(:disabled), .slot[aria-pressed="true"] { background: #4a3a58; }
+button.slot:hover:not(:disabled), .slot[aria-pressed="true"] { background: #7d6e87; }
 button.slot:disabled { cursor: default; opacity: .45; }
 
 .recipe { padding: clamp(14px, 2.4vw, 24px); background: var(--raised); border: 1px solid var(--line); border-radius: 18px; }
@@ -120,7 +122,7 @@ button.slot:disabled { cursor: default; opacity: .45; }
 .recipe-arrow { grid-column: 3; grid-row: 1 / 3; justify-self: center; width: 26px; height: 22px; background: var(--sun); clip-path: polygon(0 32%, 54% 32%, 54% 0, 100% 50%, 54% 100%, 54% 68%, 0 68%); }
 .output { grid-column: 4; grid-row: 1 / 3; align-self: stretch; background: #3b2c48; border-color: #ffe29a88; border-width: 3px; }
 .slot b { margin-top: 5px; font: .78rem/1.3 var(--pixel); }
-.slot small { color: var(--soft); font-size: .78rem; line-height: 1.25; }
+.slot small { color: var(--cream); font-size: .78rem; line-height: 1.25; }
 .output b { font-size: .9rem; color: var(--sun); }
 .recipe-hint { margin-top: 12px; text-align: center; font-size: .875rem; color: var(--soft); }
 
@@ -156,7 +158,7 @@ figcaption { position: absolute; left: 50%; bottom: 0; translate: -50% 50%; padd
 .note { margin-top: 14px; font-size: .9rem; line-height: 1.5; color: var(--soft); }
 code { padding: 1px 5px; border-radius: 4px; background: #0005; font-size: .82rem; overflow-wrap: anywhere; }
 .after { margin-top: 24px; text-align: center; font-size: .95rem; color: var(--soft); }
-.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 28px; padding-block: 22px 28px; border-top: 1px solid var(--line); font-size: .85rem; color: var(--soft); }
+.foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px 28px; padding-block: 22px 28px; font-size: .85rem; color: var(--soft); }
 
 @media (max-width: 860px) {
   .explain, .inventory { grid-template-columns: minmax(0, 1fr); }
@@ -165,6 +167,7 @@ code { padding: 1px 5px; border-radius: 4px; background: #0005; font-size: .82re
 }
 @media (max-width: 640px) {
   .navlinks a:not(.nav-get) { display: none; }
+  .navlinks a { padding-inline: 12px; }
   .gallery { grid-template-columns: minmax(0, 1fr); }
   .horizon { height: 108px; background-size: 480px 108px; }
   .panel { margin: 4px 4px 0; }
