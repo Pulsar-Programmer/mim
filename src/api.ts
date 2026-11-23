@@ -18,6 +18,7 @@ export async function okToChangeShared(paths: string[], what: string, followLink
 export type InstanceItem =
   | "mods"
   | "resourcepacks"
+  | "shaderpacks"
   | "saves"
   | "screenshots"
   | "options.txt"
@@ -284,6 +285,33 @@ export interface Screenshot {
   height: number;
 }
 
+export interface ShaderPack {
+  file: string;
+  path: string;
+  is_dir: boolean;
+  size_bytes: number;
+  modified: number;
+}
+
+export interface ShaderList {
+  dir: string;
+  linked: boolean;
+  /** the pack Iris or OptiFine has on */
+  active: string | null;
+  /** settings files holding that choice; empty until a shader mod has run */
+  configs: string[];
+  packs: ShaderPack[];
+}
+
+export interface ShaderInfo {
+  title: string;
+  description: string;
+  icon: string | null;
+  page: string;
+  downloads: number;
+  images: { url: string; raw_url: string; title: string | null }[];
+}
+
 export interface Profile {
   id: string;
   name: string;
@@ -484,8 +512,8 @@ export const api = {
     invoke<number>("add_mods", { installation, files }),
   resolveLink: (link: string) => invoke<LinkInfo>("resolve_link", { link }),
   /** mod, collection or modpack links, matched to the installation's version and loader */
-  importLinks: (links: string[], installation: string, onlyPacks = false) =>
-    invoke<ImportReport>("import_links", { links, installation, onlyPacks }),
+  importLinks: (links: string[], installation: string, only: "resourcepack" | "shader" | null = null) =>
+    invoke<ImportReport>("import_links", { links, installation, only }),
   updateMods: (installation: string) => invoke<ImportReport>("update_mods", { installation }),
   /** which newer game versions every enabled mod has a build for */
   scanUpgrade: (installation: string) => invoke<UpgradeScan>("scan_upgrade", { installation }),
@@ -493,6 +521,12 @@ export const api = {
   upgradeInstallation: (installation: string, game: string, remove: string[]) =>
     invoke<ImportReport>("upgrade_installation", { installation, game, remove }),
   listScreenshots: () => invoke<Screenshot[]>("list_screenshots"),
+  listShaders: (installation: string | null) => invoke<ShaderList>("list_shaders", { installation }),
+  setShader: (installation: string | null, file: string | null) =>
+    invoke<void>("set_shader", { installation, file }),
+  addShaders: (installation: string | null, files: string[]) =>
+    invoke<number>("add_shaders", { installation, files }),
+  shaderGallery: () => invoke<Record<string, ShaderInfo>>("shader_gallery"),
   listLogs: (installation: string | null = null) =>
     invoke<LogEntry[]>("list_logs", { installation }),
   sortLogs: (installation: string | null = null) =>

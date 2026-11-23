@@ -23,6 +23,7 @@ import { OptionsView } from "./OptionsView";
 import { ServersView } from "./ServersView";
 import { ModsView } from "./ModsView";
 import { ScreenshotsView } from "./ScreenshotsView";
+import { ShadersView } from "./ShadersView";
 import { SettingsView } from "./SettingsView";
 import { ProfilesView } from "./ProfilesView";
 import { instancePlaces, PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
@@ -45,6 +46,7 @@ type View =
   | "link"
   | "standards"
   | "packs"
+  | "shaders"
   | "folder"
   | "saves"
   | "servers"
@@ -66,6 +68,7 @@ const NAV: [string, [View, string][]][] = [
       ["saves", "Saves"],
       ["mods", "Mods"],
       ["packs", "Resource Packs"],
+      ["shaders", "Shader Packs"],
       ["options", "Options"],
       ["config", "Config"],
       ["servers", "Servers"],
@@ -265,6 +268,7 @@ function App() {
         {view === "config" && <ConfigView notify={notify} installations={installations} />}
         {view === "logs" && <LogsView notify={notify} installations={installations} />}
         {view === "servers" && <ServersView notify={notify} installations={installations} />}
+        {view === "shaders" && <ShadersView notify={notify} installations={installations} />}
         {view === "screenshots" && (
           <ScreenshotsView notify={notify} installations={installations} />
         )}
@@ -724,7 +728,7 @@ function NewInstallView({
           if (!list.length) continue;
           const what = onlyPacks ? "resource packs" : "mods";
           try {
-            notes.push(`${what}: ${reportSummary(await api.importLinks(list, name.trim(), onlyPacks))}`);
+            notes.push(`${what}: ${reportSummary(await api.importLinks(list, name.trim(), onlyPacks ? "resourcepack" : null))}`);
           } catch (e) {
             notes.push(`${what} failed: ${e}`);
           }
