@@ -1660,34 +1660,10 @@ fn shared_without(items: &[String], gone: &[String], listed: &[String]) -> Vec<S
     out
 }
 
-/// Swaps a folder link for a real folder of links to what's inside it, so one
-/// item in it can change without touching the rest.
-fn expand_link(link: &Path) -> std::io::Result<()> {
-    let real = fs::canonicalize(link)?;
-    let name = link.file_name().unwrap_or_default().to_string_lossy();
-    let staged = link.with_file_name(format!(".{name}.mim-expand"));
-    let built = fs::create_dir(&staged).and_then(|_| {
-        fs::read_dir(&real)?.try_for_each(|e| {
-            let e = e?;
-            symlink(e.path(), staged.join(e.file_name()))
-        })
-    });
-    if let Err(e) = built {
-        let _ = fs::remove_dir_all(&staged); // only links; doesn't follow them
-        return Err(e);
-    }
-    remove_link(link)?;
-    fs::rename(&staged, link).inspect_err(|_| {
-        let _ = symlink(&real, link);
-        let _ = fs::remove_dir_all(&staged);
-    })
-}
-
 /// Removes every installation's links to these entries; with `keep`, each
-/// becomes a real copy. An entry reached through a whole linked folder splits
-/// that folder first, unless the entry is about to vanish (`source_goes`) and
-/// nobody wants a copy: then the folder link can simply stay.
-fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool, source_goes: bool) -> CmdResult<()> {
+/// becomes a real copy. An entry seen through a whole linked folder has no
+/// link of its own: it just follows the folder, so it can't keep a copy.
+fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool) -> CmdResult<()> {
     let mut links = vec![];
     for i in insts {
         for (src, dest) in pairs {
@@ -1695,16 +1671,12 @@ fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool, sour
             if state.state != "linked" {
                 continue;
             }
-            let item = i.join(dest);
-            if link != item {
-                if !keep && source_goes {
-                    continue;
-                }
-                while let Some(folder) = linked_ancestor(i, &item) {
-                    expand_link(&folder).map_err(err)?;
-                }
+            if link == i.join(dest) {
+                links.push(link);
+            } else if keep {
+                let inst = i.file_name().unwrap_or_default().to_string_lossy();
+                return Err(format!("{inst} has {dest} through a linked folder, so it can't keep a copy — choose Delete there too"));
             }
-            links.push(item);
         }
     }
     detach(&links, keep)
@@ -1737,7 +1709,7 @@ fn remove_from_standard(name: String, rel_paths: Vec<String>, keep: bool) -> Cmd
     }
     let names = installation_names();
     let dirs: Vec<PathBuf> = names.iter().map(|n| installations_dir().join(n)).collect();
-    free_entries(&dirs, &pairs, keep, !shared)?;
+    free_entries(&dirs, &pairs, keep)?;
     if shared {
         let listed: Vec<String> = shared_entries().into_iter().map(|e| e.name).collect();
         let items = shared_without(&read_shared_in(&standards_dir()), &gone, &listed);
@@ -3447,13 +3419,14 @@ fn write_zip(dir: &Path, dest: &Path) -> zip::result::ZipResult<()> {
 
 /// Moves a world, mod, or screenshot to the Trash — nothing else.
 #[tauri::command(async)]
-fn trash_item(path: String, keep: bool) -> CmdResult<()> {
-    trash::delete(release_item(&mc_dir(), &path, keep)?).map_err(err)
+fn trash_item(path: String) -> CmdResult<()> {
+    trash::delete(release_item(&mc_dir(), &path)?).map_err(err)
 }
 
-/// Readies an original for the Trash: installations using it get their own
-/// copy with `keep`, otherwise lose it too. Removing a link frees nothing.
-fn release_item(mc: &Path, path: &str, keep: bool) -> CmdResult<PathBuf> {
+/// Readies an item for the Trash. Inside a shared folder that's the shared
+/// item, gone for everyone; links to just this item go too, so none dangle.
+/// Removing a link itself leaves the original alone.
+fn release_item(mc: &Path, path: &str) -> CmdResult<PathBuf> {
     let p = trash_target(mc, path)?;
     if !p.is_symlink() {
         let (Some(name), Some(folder)) = (p.file_name(), p.parent().and_then(|d| d.file_name())) else {
@@ -3462,18 +3435,12 @@ fn release_item(mc: &Path, path: &str, keep: bool) -> CmdResult<PathBuf> {
         let rel = format!("{}/{}", folder.to_string_lossy(), name.to_string_lossy());
         let mut games = vec![mc.to_path_buf()];
         games.extend(visible_children(&mc.join("installations")).into_iter().map(|(_, g)| g));
-        free_entries(&games, &[(p.clone(), rel)], keep, true)?;
+        free_entries(&games, &[(p.clone(), rel)], false)?;
     }
     Ok(p)
 }
 
-/// What removing `path` may touch. Reached through a linked folder it's the
-/// shared copy, so that folder has to be unlinked first.
 fn trash_target(mc: &Path, path: &str) -> CmdResult<PathBuf> {
-    let raw = Path::new(path);
-    if linked_ancestor(mc, raw).or_else(|| linked_ancestor(&canon(mc), raw)).is_some() {
-        return Err("That's inside a linked folder — unlink the folder first".into());
-    }
     let p = entry_inside(mc, path)?;
     let parent = p
         .parent()
@@ -3974,58 +3941,19 @@ async fn download(url: &str, sha512: Option<&str>, dest: &Path) -> CmdResult<()>
 
 /// Newest version for the game version (and loader, for mods and modpacks) —
 /// releases before betas. Nothing for that version means nothing is installed.
-/// With `fits`, only a build that officially supports all of those will do.
-async fn pick_version(
-    project: &str,
-    kind: &str,
-    game: &str,
-    loader: &str,
-    fits: &[(String, String)],
-) -> CmdResult<Option<Value>> {
+async fn pick_version(project: &str, kind: &str, game: &str, loader: &str) -> CmdResult<Option<Value>> {
     let url = format!("{MR}/v2/project/{project}/version");
     let mut q = vec![("game_versions", json!([game]).to_string())];
     if kind == "mod" || kind == "modpack" {
         q.push(("loaders", json!([loader]).to_string()));
     }
     let vs = send_json(http().get(&url).query(&q)).await?;
-    Ok(newest_fitting(vs.as_array().map_or(&[], Vec::as_slice), fits))
-}
-
-fn newest_fitting(versions: &[Value], fits: &[(String, String)]) -> Option<Value> {
-    let ok: Vec<&Value> = versions
+    let vs = vs.as_array().cloned().unwrap_or_default();
+    Ok(vs
         .iter()
-        .filter(|v| {
-            let (games, loaders) = (strs(&v["game_versions"]), strs(&v["loaders"]));
-            fits.iter().all(|(g, l)| games.contains(g) && loaders.contains(l))
-        })
-        .collect();
-    ok.iter().find(|v| v["version_type"] == "release").or(ok.first()).map(|v| (*v).clone())
-}
-
-/// Who uses this game folder's real mods folder, and on what version.
-fn mods_sharing(dir: &Path) -> Vec<(String, Option<(String, String)>)> {
-    let real = canon(&dir.join("mods"));
-    installation_names()
-        .into_iter()
-        .filter(|n| canon(&installations_dir().join(n).join("mods")) == real)
-        .map(|n| {
-            let version = inst_target(&n).ok().map(|(_, g, l)| (g, l));
-            (n, version)
-        })
-        .collect()
-}
-
-/// What a mod must support to go in a folder shared across versions: empty
-/// when they all match. Vanilla members never load mods, so they don't count.
-fn shared_targets(sharing: &[(String, Option<(String, String)>)]) -> Vec<(String, String)> {
-    let mut all: Vec<_> = sharing.iter().filter_map(|(_, v)| v.clone()).collect();
-    all.sort();
-    all.dedup();
-    if all.len() < 2 {
-        return vec![];
-    }
-    all.retain(|(_, l)| l != "vanilla");
-    all
+        .find(|v| v["version_type"] == "release")
+        .or(vs.first())
+        .cloned())
 }
 
 /// (url, safe file name, sha512) of a version's main file.
@@ -4136,40 +4064,23 @@ enum Fetched {
 }
 
 /// Puts one project (a mod, resource pack or shader) into the installation.
-async fn fetch_project(
-    p: Value,
-    dir: PathBuf,
-    game: String,
-    loader: String,
-    shared: Vec<(String, String)>,
-    have: bool,
-    dep: bool,
-) -> Fetched {
+async fn fetch_project(p: Value, dir: PathBuf, game: String, loader: String, have: bool, dep: bool) -> Fetched {
     let title = p["title"].as_str().unwrap_or("?").to_string();
     let kind = p["project_type"].as_str().unwrap_or("");
     if have {
         return if dep { Fetched::Quiet } else { Fetched::Skipped(format!("{title} (already installed)")) };
     }
     let folder = match kind {
-        "mod" if loader == "vanilla" && shared.is_empty() => {
-            return Fetched::Skipped(format!("{title} (needs Fabric)"))
-        }
+        "mod" if loader == "vanilla" => return Fetched::Skipped(format!("{title} (needs Fabric)")),
         "mod" => "mods",
         "resourcepack" => "resourcepacks",
         "shader" => "shaderpacks",
         other => return Fetched::Skipped(format!("{title} ({other}s import on their own)")),
     };
     let id = p["id"].as_str().unwrap_or("");
-    // only the mods folder is what's shared across versions
-    let fits: &[(String, String)] = if kind == "mod" { &shared } else { &[] };
-    let (g, l) = fits.first().map_or((&game, &loader), |(g, l)| (g, l));
-    let v = match pick_version(id, kind, g, l, fits).await {
+    let v = match pick_version(id, kind, &game, &loader).await {
         Ok(Some(v)) => v,
-        Ok(None) if fits.len() > 1 => {
-            let all: Vec<String> = fits.iter().map(|(g, l)| format!("{g} {l}")).collect();
-            return Fetched::Skipped(format!("{title} (no build supports {} — unlink to give each its own)", all.join(" + ")));
-        }
-        Ok(None) => return Fetched::Skipped(format!("{title} (no {g} {l} version)")),
+        Ok(None) => return Fetched::Skipped(format!("{title} (no {game} {loader} version)")),
         Err(e) => return Fetched::Skipped(format!("{title} ({e})")),
     };
     let Some((url, name, hash)) = primary_file(&v) else {
@@ -4219,7 +4130,7 @@ async fn install_mrpack(
     report: &mut ImportReport,
     p: &Progress,
 ) -> CmdResult<()> {
-    let v = pick_version(project, "modpack", game, loader, &[])
+    let v = pick_version(project, "modpack", game, loader)
         .await?
         .ok_or(format!("This pack has no {game} {loader} version"))?;
     let (url, name, hash) = primary_file(&v).ok_or("This pack has no file")?;
@@ -4287,7 +4198,6 @@ async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: S
 
 async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
-    let shared = shared_targets(&mods_sharing(&dir));
     let mut report = ImportReport::default();
     let mut titles = vec![];
     let mut queue = vec![];
@@ -4301,9 +4211,7 @@ async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdRes
             }
         };
         titles.push(info.title.clone());
-        if info.kind == "modpack" && !shared.is_empty() {
-            report.skipped.push(format!("{} (a modpack is built for one version — unlink this folder first)", info.title));
-        } else if info.kind == "modpack" {
+        if info.kind == "modpack" {
             install_mrpack(&info.projects[0], &dir, &game, &loader, &mut report, p).await?;
         } else {
             queue.extend(info.projects);
@@ -4344,7 +4252,7 @@ async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdRes
             .into_iter()
             .map(|p| {
                 let has = p["id"].as_str().is_some_and(|id| have.contains(id));
-                fetch_project(p, dir.clone(), game.clone(), loader.clone(), shared.clone(), has, dep)
+                fetch_project(p, dir.clone(), game.clone(), loader.clone(), has, dep)
             })
             .collect();
         let label = |f: &Fetched| match f {
@@ -4374,21 +4282,8 @@ async fn update_mods(app: tauri::AppHandle, installation: String) -> CmdResult<I
     update_in(&installation, &Progress::new(Some(app))).await
 }
 
-/// One set of jars can't be updated for two game versions or loaders.
-fn mixed_versions(game: &str, loader: &str, sharing: &[(String, Option<(String, String)>)]) -> Option<String> {
-    let here = (game.to_string(), loader.to_string());
-    let others: Vec<&str> =
-        sharing.iter().filter(|(_, v)| v.as_ref() != Some(&here)).map(|(n, _)| n.as_str()).collect();
-    (!others.is_empty()).then(|| {
-        format!("{} shares this mods folder on a different version — unlink it before updating", others.join(", "))
-    })
-}
-
 async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
-    if let Some(e) = mixed_versions(&game, &loader, &mods_sharing(&dir)) {
-        return Err(e);
-    }
     p.say("Checking for updates");
     let mods = dir.join("mods");
     let current = jar_hashes(&mods, false);
@@ -5212,7 +5107,7 @@ mod tests {
         assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
         assert!(share_in(&a, &std, &["nothing".into()], false).is_err());
         // removing it from the standard leaves the installation a real copy
-        free_entries(&[a.clone()], &[(std.join("journeymap"), "journeymap".into())], true, true).unwrap();
+        free_entries(&[a.clone()], &[(std.join("journeymap"), "journeymap".into())], true).unwrap();
         assert!(!a.join("journeymap").is_symlink());
         assert_eq!(fs::read_to_string(a.join("journeymap/data/w.dat")).unwrap(), "map");
         fs::remove_dir_all(a.join("journeymap")).unwrap();
@@ -5971,22 +5866,17 @@ mod tests {
         let opt = (std.join("options.txt"), "options.txt".to_string());
         let inner = (std.join("config/x.json"), "config/x.json".to_string());
 
-        // deleting a file inside a whole linked folder leaves the folder link alone
-        free_entries(&[a.clone()], &[inner.clone()], false, true).unwrap();
+        // a file seen through a whole linked folder just follows that folder
+        free_entries(&[a.clone()], &[inner.clone()], false).unwrap();
         assert!(a.join("config").is_symlink());
-        // keeping a copy splits it: that file is real, the rest stay linked
-        fs::write(std.join("config/y.json"), "y").unwrap();
-        free_entries(&[a.clone()], &[inner], true, true).unwrap();
-        assert!(!a.join("config").is_symlink() && !a.join("config/x.json").is_symlink());
-        assert_eq!(fs::read_to_string(a.join("config/x.json")).unwrap(), "x");
-        assert!(links_to(&a.join("config/y.json"), &std.join("config/y.json")));
-        assert!(!a.join(".config.mim-expand").exists());
+        assert!(free_entries(&[a.clone()], &[opt.clone(), inner], true).is_err());
+        assert!(a.join("config").is_symlink() && a.join("options.txt").is_symlink());
 
-        free_entries(&[a.clone()], &[opt.clone()], false, true).unwrap();
+        free_entries(&[a.clone()], &[opt.clone()], false).unwrap();
         assert!(a.join("options.txt").symlink_metadata().is_err());
         assert!(std.join("options.txt").exists());
         symlink(std.join("options.txt"), a.join("options.txt")).unwrap();
-        free_entries(&[a.clone()], &[opt], true, true).unwrap();
+        free_entries(&[a.clone()], &[opt], true).unwrap();
         assert!(!a.join("options.txt").is_symlink());
         assert_eq!(fs::read_to_string(a.join("options.txt")).unwrap(), "o");
 
@@ -6041,91 +5931,36 @@ mod tests {
     }
 
     #[test]
-    fn removal_inside_a_linked_folder_is_refused() {
-        let root = temp_root("trash-target");
-        let (std, inst) = (root.join("standards/Base/mods"), root.join("installations/A"));
-        fs::create_dir_all(&std).unwrap();
-        fs::create_dir_all(&inst).unwrap();
-        fs::create_dir_all(root.join("mods")).unwrap();
-        fs::write(std.join("x.jar"), "jar").unwrap();
-        fs::write(root.join("mods/own.jar"), "jar").unwrap();
-        symlink(&std, inst.join("mods")).unwrap();
-        symlink(std.join("x.jar"), root.join("mods/link.jar")).unwrap();
-
-        let at = |p: PathBuf| p.to_string_lossy().to_string();
-        assert!(trash_target(&root, &at(inst.join("mods/x.jar"))).unwrap_err().contains("unlink"));
-        assert_eq!(trash_target(&root, &at(root.join("mods/own.jar"))).unwrap(), root.join("mods/own.jar"));
-        // a link that is the item itself can go: the original stays
-        assert_eq!(trash_target(&root, &at(root.join("mods/link.jar"))).unwrap(), root.join("mods/link.jar"));
-        fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn removing_an_original_copies_or_drops_for_its_users() {
+    fn removal_in_a_shared_folder_hits_the_shared_item() {
         let root = temp_root("release-item");
         let saves = root.join("saves");
         fs::create_dir_all(saves.join("W")).unwrap();
-        fs::write(saves.join("W/level.dat"), "w").unwrap();
-        fs::create_dir_all(saves.join("Other")).unwrap();
+        fs::create_dir_all(saves.join("Solo")).unwrap();
         for i in ["A", "B"] {
             fs::create_dir_all(root.join("installations").join(i)).unwrap();
             symlink(&saves, root.join("installations").join(i).join("saves")).unwrap();
         }
         let (a, b) = (root.join("installations/A/saves"), root.join("installations/B/saves"));
-        let w = saves.join("W").to_string_lossy().to_string();
-        assert_eq!(shared_with_in(&root, &[w.clone()], false), vec!["A".to_string(), "B".to_string()]);
+        let at = |p: PathBuf| p.to_string_lossy().to_string();
+        assert_eq!(shared_with_in(&root, &[at(saves.join("W"))], false), vec!["A".to_string(), "B".to_string()]);
 
-        // deleting everywhere: the folder links stay as they are
-        assert_eq!(release_item(&root, &w, false).unwrap(), saves.join("W"));
+        // through either side it's the one shared world, and the folder links stay
+        assert_eq!(release_item(&root, &at(a.join("W"))).unwrap(), saves.join("W"));
+        assert_eq!(release_item(&root, &at(saves.join("W"))).unwrap(), saves.join("W"));
         assert!(a.is_symlink() && b.is_symlink());
 
-        // leaving copies: each gets its own, and the other world stays linked
-        release_item(&root, &w, true).unwrap();
-        for d in [&a, &b] {
-            assert!(!d.is_symlink() && !d.join("W").is_symlink());
-            assert_eq!(fs::read_to_string(d.join("W/level.dat")).unwrap(), "w");
-            assert!(d.join("Other").is_symlink());
-        }
-        assert!(saves.join("W/level.dat").is_file());
+        // a link to just one item: removing the original takes the link with it
+        let own = root.join("installations/C/saves");
+        fs::create_dir_all(&own).unwrap();
+        symlink(saves.join("Solo"), own.join("Solo")).unwrap();
+        release_item(&root, &at(saves.join("Solo"))).unwrap();
+        assert!(own.join("Solo").symlink_metadata().is_err() && saves.join("Solo").is_dir());
+
+        // removing that link on its own leaves the original
+        symlink(saves.join("Solo"), own.join("Solo")).unwrap();
+        assert_eq!(release_item(&root, &at(own.join("Solo"))).unwrap(), canon(&own).join("Solo"));
+        assert!(saves.join("Solo").is_dir());
         fs::remove_dir_all(&root).unwrap();
-    }
-
-    #[test]
-    fn shared_folders_only_take_builds_that_fit_everyone() {
-        let t = |g: &str, l: &str| (g.to_string(), l.to_string());
-        let m = |n: &str, g: &str, l: &str| (n.to_string(), Some(t(g, l)));
-        assert!(shared_targets(&[m("A", "1.21.10", "fabric"), m("B", "1.21.10", "fabric")]).is_empty());
-        let mixed = shared_targets(&[m("A", "1.21.10", "fabric"), m("B", "1.21.4", "fabric"), ("C".into(), None)]);
-        assert_eq!(mixed, vec![t("1.21.10", "fabric"), t("1.21.4", "fabric")]);
-        // vanilla never loads mods, so only the Fabric install has to fit
-        let with_vanilla = shared_targets(&[m("A", "1.21.10", "fabric"), m("V", "1.21.4", "vanilla")]);
-        assert_eq!(with_vanilla, vec![t("1.21.10", "fabric")]);
-
-        let v = |id: &str, kind: &str, games: &[&str]| {
-            json!({"id": id, "version_type": kind, "game_versions": games, "loaders": ["fabric"]})
-        };
-        let builds = [
-            v("new-only", "release", &["1.21.10"]),
-            v("both-beta", "beta", &["1.21.4", "1.21.10"]),
-            v("both", "release", &["1.21.4", "1.21.10"]),
-        ];
-        assert_eq!(newest_fitting(&builds, &mixed).unwrap()["id"], "both");
-        assert_eq!(newest_fitting(&builds, &[]).unwrap()["id"], "new-only");
-        assert!(newest_fitting(&builds[..1], &mixed).is_none());
-        assert!(newest_fitting(&builds, &[t("1.21.10", "quilt")]).is_none());
-    }
-
-    #[test]
-    fn update_refuses_a_folder_shared_across_versions() {
-        let v = |g: &str, l: &str| Some((g.to_string(), l.to_string()));
-        let same = [("A".to_string(), v("1.21.10", "fabric")), ("B".to_string(), v("1.21.10", "fabric"))];
-        assert!(mixed_versions("1.21.10", "fabric", &same).is_none());
-        let game = [("A".to_string(), v("1.21.10", "fabric")), ("B".to_string(), v("1.21.4", "fabric"))];
-        assert!(mixed_versions("1.21.10", "fabric", &game).unwrap().starts_with("B "));
-        let loader = [("B".to_string(), v("1.21.10", "quilt"))];
-        assert!(mixed_versions("1.21.10", "fabric", &loader).is_some());
-        let unknown = [("B".to_string(), None)];
-        assert!(mixed_versions("1.21.10", "fabric", &unknown).is_some());
     }
 
     #[test]

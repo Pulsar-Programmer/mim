@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, chooseRemoval, formatBytes, timeAgo, Installation, World, WorldDetails } from "./api";
+import { api, formatBytes, okToChangeShared, timeAgo, Installation, World, WorldDetails } from "./api";
 import { PlacePicker, sharedPlaces } from "./Places";
 import { useCached, useConfirm } from "./hooks";
 
@@ -279,9 +279,8 @@ function WorldDrawer({
             className="btn danger"
             onClick={() =>
               confirm("delete", async () => {
-                const keep = await chooseRemoval([w.path], w.name);
-                if (keep === null) return `Kept ${w.name}`;
-                await api.trashItem(w.path, keep);
+                if (!(await okToChangeShared([w.path], `Deleting ${w.name}`))) return `Kept ${w.name}`;
+                await api.trashItem(w.path);
                 return `Moved ${w.name} to Trash`;
               })
             }

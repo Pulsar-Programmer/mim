@@ -7,7 +7,7 @@ import {
   Installation,
   PackInfo,
   PackList,
-  chooseRemoval,
+  okToChangeShared,
   reportSummary,
   splitLinks,
 } from "./api";
@@ -193,13 +193,12 @@ export function PacksView({
           {!on && (
             <button
               className="linklike danger-link"
-              disabled={!!list?.linked}
-              title={list?.linked ? "This folder is linked — unlink it first" : undefined}
               onClick={() =>
                 confirm(p.path, async () => {
-                  const keep = await chooseRemoval([p.path], packName(p.file));
-                  if (keep === null) return `Kept ${packName(p.file)}`;
-                  await api.trashItem(p.path, keep);
+                  if (!(await okToChangeShared([p.path], `Removing ${packName(p.file)}`))) {
+                    return `Kept ${packName(p.file)}`;
+                  }
+                  await api.trashItem(p.path);
                   return `Moved ${packName(p.file)} to Trash`;
                 })
               }

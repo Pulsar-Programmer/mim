@@ -1,21 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { ask, message } from "@tauri-apps/plugin-dialog";
-
-/**
- * When others use what's being removed: true to leave them copies, false to
- * delete it there too, null if cancelled. False right away if nobody does.
- */
-export async function chooseRemoval(paths: string[], what: string): Promise<boolean | null> {
-  const who = await api.sharedWith(paths, false);
-  if (!who.length) return false;
-  const [keep, drop] = ["Leave copies there", "Delete there too"];
-  const choice = await message(`${what} is also used by ${who.join(", ")}. Leave each its own copy, or delete it there too?`, {
-    title: "Shared item",
-    kind: "warning",
-    buttons: { yes: keep, no: drop, cancel: "Cancel" },
-  });
-  return choice === keep || choice === "Yes" ? true : choice === drop || choice === "No" ? false : null;
-}
+import { ask } from "@tauri-apps/plugin-dialog";
 
 /** Asks first when these items live in a folder other installations share. */
 export async function okToChangeShared(paths: string[], what: string, followLinks = false): Promise<boolean> {
@@ -475,7 +459,7 @@ export const api = {
   importWorld: (source: string, installation: string | null) =>
     invoke<string>("import_world", { source, installation }),
   backupWorld: (path: string, dest: string) => invoke<void>("backup_world", { path, dest }),
-  trashItem: (path: string, keep = false) => invoke<void>("trash_item", { path, keep }),
+  trashItem: (path: string) => invoke<void>("trash_item", { path }),
   sharedWith: (paths: string[], followLinks: boolean) =>
     invoke<string[]>("shared_with", { paths, followLinks }),
   listMods: (installation: string | null) => invoke<Mod[]>("list_mods", { installation }),

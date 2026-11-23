@@ -2,7 +2,6 @@ import { useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   api,
-  chooseRemoval,
   formatBytes,
   ImportReport,
   Installation,
@@ -66,9 +65,6 @@ export function ModsView({
   const picked = scopes.find((s) => s.key === scope || s.members.some((m) => m.name === scope));
   const current = picked ? picked.key : scopes[0]?.key ?? null;
   const section = scopes.find((s) => s.key === current);
-  const mixedVersions =
-    new Set(section?.members.map((m) => `${m.game_version}/${m.loader}`)).size > 1;
-  const linkedFolder = !!installations.find((i) => i.name === current)?.mods_link;
   // a shared section imports into its shared folder, through any member
   const importTo = section?.members[0]?.name ?? section?.inst?.name;
 
@@ -179,12 +175,8 @@ export function ModsView({
             <button
               className="btn"
               onClick={() => fromModrinth("update")}
-              disabled={!!busy || mixedVersions}
-              title={
-                mixedVersions
-                  ? "These installations share one mods folder on different versions — unlink it before updating"
-                  : brief("Swap every mod Modrinth knows for its newest build for this version — old jars go to the Trash")
-              }
+              disabled={!!busy}
+              title={brief("Swap every mod Modrinth knows for its newest build for this version — old jars go to the Trash")}
             >
               {busy === "update" ? "Updating…" : "Update All"}
             </button>
@@ -225,11 +217,7 @@ export function ModsView({
             >
               <input
                 className="search"
-                placeholder={
-                  mixedVersions
-                    ? "Paste links — only builds that support every version here are added"
-                    : brief("Paste Modrinth or CurseForge links — mods, collections or modpacks")
-                }
+                placeholder={brief("Paste Modrinth or CurseForge links — mods, collections or modpacks")}
                 value={link}
                 onChange={(e) => setLink(e.target.value)}
               />
@@ -337,13 +325,10 @@ export function ModsView({
                   </button>
                   <button
                     className="linklike danger-link"
-                    disabled={linkedFolder}
-                    title={linkedFolder ? "This mods folder is linked — unlink it first" : undefined}
                     onClick={() =>
                       confirm(m.path, async () => {
-                        const keep = await chooseRemoval([m.path], m.name);
-                        if (keep === null) return `Kept ${m.name}`;
-                        await api.trashItem(m.path, keep);
+                        if (!(await okToChangeShared([m.path], `Removing ${m.name}`))) return `Kept ${m.name}`;
+                        await api.trashItem(m.path);
                         return `Moved ${m.name} to Trash`;
                       })
                     }
