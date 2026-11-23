@@ -64,6 +64,10 @@ export function ModsView({
   // a picked installation that now shares a folder lands on that section
   const picked = scopes.find((s) => s.key === scope || s.members.some((m) => m.name === scope));
   const current = picked ? picked.key : scopes[0]?.key ?? null;
+  const section = scopes.find((s) => s.key === current);
+  const mixedVersions =
+    new Set(section?.members.map((m) => `${m.game_version}/${m.loader}`)).size > 1;
+  const linkedFolder = !!installations.find((i) => i.name === current)?.mods_link;
 
   const [mods = [], reload] = useCached<Mod[]>(
     `mods:${current}`,
@@ -171,8 +175,12 @@ export function ModsView({
             <button
               className="btn"
               onClick={() => fromModrinth("update")}
-              disabled={!!busy}
-              title={brief("Swap every mod Modrinth knows for its newest build for this version — old jars go to the Trash")}
+              disabled={!!busy || mixedVersions}
+              title={
+                mixedVersions
+                  ? "These installations share one mods folder on different versions — unlink it before updating"
+                  : brief("Swap every mod Modrinth knows for its newest build for this version — old jars go to the Trash")
+              }
             >
               {busy === "update" ? "Updating…" : "Update All"}
             </button>
@@ -321,6 +329,8 @@ export function ModsView({
                   </button>
                   <button
                     className="linklike danger-link"
+                    disabled={linkedFolder}
+                    title={linkedFolder ? "This mods folder is linked — unlink it first" : undefined}
                     onClick={() =>
                       confirm(m.path, async () => {
                         if (!(await okToChangeShared([m.path], `Removing ${m.name}`))) return `Kept ${m.name}`;

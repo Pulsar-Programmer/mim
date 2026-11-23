@@ -193,6 +193,8 @@ export function PacksView({
           {!on && (
             <button
               className="linklike danger-link"
+              disabled={!!list?.linked}
+              title={list?.linked ? "This folder is linked — unlink it first" : undefined}
               onClick={() =>
                 confirm(p.path, async () => {
                   if (!(await okToChangeShared([p.path], `Removing ${packName(p.file)}`))) {

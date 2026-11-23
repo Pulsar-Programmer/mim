@@ -3391,7 +3391,17 @@ fn write_zip(dir: &Path, dest: &Path) -> zip::result::ZipResult<()> {
 /// Moves a world, mod, or screenshot to the Trash — nothing else.
 #[tauri::command(async)]
 fn trash_item(path: String) -> CmdResult<()> {
-    let p = entry_inside(&mc_dir(), &path)?;
+    trash::delete(trash_target(&mc_dir(), &path)?).map_err(err)
+}
+
+/// What removing `path` may touch. Reached through a linked folder it's the
+/// shared copy, so that folder has to be unlinked first.
+fn trash_target(mc: &Path, path: &str) -> CmdResult<PathBuf> {
+    let raw = Path::new(path);
+    if linked_ancestor(mc, raw).or_else(|| linked_ancestor(&canon(mc), raw)).is_some() {
+        return Err("That's inside a linked folder — unlink the folder first".into());
+    }
+    let p = entry_inside(mc, path)?;
     let parent = p
         .parent()
         .and_then(|d| d.file_name())
@@ -3400,7 +3410,7 @@ fn trash_item(path: String) -> CmdResult<()> {
     if !["saves", "mods", "screenshots", "resourcepacks", "shaderpacks"].contains(&parent.as_str()) {
         return Err("MIM only trashes worlds, mods, packs and screenshots".into());
     }
-    trash::delete(&p).map_err(err)
+    Ok(p)
 }
 
 /// Who else a change to these items reaches because they're shared. A linked
@@ -4247,8 +4257,30 @@ async fn update_mods(app: tauri::AppHandle, installation: String) -> CmdResult<I
     update_in(&installation, &Progress::new(Some(app))).await
 }
 
+/// One set of jars can't be updated for two game versions or loaders.
+fn mixed_versions(game: &str, loader: &str, sharing: &[(String, Option<(String, String)>)]) -> Option<String> {
+    let here = (game.to_string(), loader.to_string());
+    let others: Vec<&str> =
+        sharing.iter().filter(|(_, v)| v.as_ref() != Some(&here)).map(|(n, _)| n.as_str()).collect();
+    (!others.is_empty()).then(|| {
+        format!("{} shares this mods folder on a different version — unlink it before updating", others.join(", "))
+    })
+}
+
 async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
+    let real = canon(&dir.join("mods"));
+    let sharing: Vec<_> = installation_names()
+        .into_iter()
+        .filter(|n| canon(&installations_dir().join(n).join("mods")) == real)
+        .map(|n| {
+            let version = inst_target(&n).ok().map(|(_, g, l)| (g, l));
+            (n, version)
+        })
+        .collect();
+    if let Some(e) = mixed_versions(&game, &loader, &sharing) {
+        return Err(e);
+    }
     p.say("Checking for updates");
     let mods = dir.join("mods");
     let current = jar_hashes(&mods, false);
@@ -5857,6 +5889,39 @@ mod tests {
         assert!(a.join("x.jar").exists() && std.join("x.jar").is_file() && b.join("x.jar").exists());
         assert!(entry_inside(&root, "/etc/hosts").is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn removal_inside_a_linked_folder_is_refused() {
+        let root = temp_root("trash-target");
+        let (std, inst) = (root.join("standards/Base/mods"), root.join("installations/A"));
+        fs::create_dir_all(&std).unwrap();
+        fs::create_dir_all(&inst).unwrap();
+        fs::create_dir_all(root.join("mods")).unwrap();
+        fs::write(std.join("x.jar"), "jar").unwrap();
+        fs::write(root.join("mods/own.jar"), "jar").unwrap();
+        symlink(&std, inst.join("mods")).unwrap();
+        symlink(std.join("x.jar"), root.join("mods/link.jar")).unwrap();
+
+        let at = |p: PathBuf| p.to_string_lossy().to_string();
+        assert!(trash_target(&root, &at(inst.join("mods/x.jar"))).unwrap_err().contains("unlink"));
+        assert_eq!(trash_target(&root, &at(root.join("mods/own.jar"))).unwrap(), root.join("mods/own.jar"));
+        // a link that is the item itself can go: the original stays
+        assert_eq!(trash_target(&root, &at(root.join("mods/link.jar"))).unwrap(), root.join("mods/link.jar"));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn update_refuses_a_folder_shared_across_versions() {
+        let v = |g: &str, l: &str| Some((g.to_string(), l.to_string()));
+        let same = [("A".to_string(), v("1.21.10", "fabric")), ("B".to_string(), v("1.21.10", "fabric"))];
+        assert!(mixed_versions("1.21.10", "fabric", &same).is_none());
+        let game = [("A".to_string(), v("1.21.10", "fabric")), ("B".to_string(), v("1.21.4", "fabric"))];
+        assert!(mixed_versions("1.21.10", "fabric", &game).unwrap().starts_with("B "));
+        let loader = [("B".to_string(), v("1.21.10", "quilt"))];
+        assert!(mixed_versions("1.21.10", "fabric", &loader).is_some());
+        let unknown = [("B".to_string(), None)];
+        assert!(mixed_versions("1.21.10", "fabric", &unknown).is_some());
     }
 
     #[test]
