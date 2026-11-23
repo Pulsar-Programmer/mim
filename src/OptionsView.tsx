@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { api, Installation, OptionEntry, OptionsSource } from "./api";
+import { api, Installation, OptionEntry, OptionsSource, Standard } from "./api";
 import { sameValue } from "./compare";
-import { PlacePicker } from "./Places";
+import { instancePlaces, PlacePicker, stdScope } from "./Places";
 import { useCached } from "./hooks";
 
 // ---- grouping & labels ----------------------------------------------------
@@ -226,7 +226,7 @@ function Editor({ k, value, onChange }: { k: string; value: string; onChange: (v
   return <input className="text" value={value} onChange={(e) => onChange(e.target.value)} />;
 }
 
-const nameOf = (s: OptionsSource) => (s.kind === "base" ? "Minecraft folder" : s.label);
+const nameOf = (s: OptionsSource) => (s.kind === "base" ? "Shared" : s.label);
 const show = (k: string, v: string | undefined) =>
   v === undefined ? "not set" : k.startsWith("key_") ? keyLabel(v) : v;
 
@@ -244,15 +244,16 @@ export function OptionsView({
     api.optionsSources,
     notify
   );
-  const [selected, setSelected] = useState<string | null>(null);
-  // sources that are the same file are one instance, shown as the first of them
-  const instances = sources.filter((s, n) => sources.findIndex((o) => o.target === s.target) === n);
-  const sharersOf = (s: OptionsSource) => sources.filter((o) => o.target === s.target);
-  const instanceName = (s: OptionsSource) =>
-    s.kind === "base" ? nameOf(s) : sharersOf(s).length > 1 && s.link && s.link !== "elsewhere" ? s.link : s.label;
-  const pickedSource = sources.find((s) => s.path === selected) ?? sources[0];
-  const source = instances.find((s) => s.target === pickedSource?.target);
-  const sharers = source ? sharersOf(source).filter((s) => s.kind === "installation") : [];
+  const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const places = useMemo(
+    () => instancePlaces("options.txt", installations, standards),
+    [installations, standards]
+  );
+  const [selected, setSelected] = useState<string>();
+  const section = places.find((p) => p.key === selected || p.members?.some((m) => m.name === selected)) ?? places[0];
+  const keyOf = (s: OptionsSource) => (s.kind === "base" ? "" : s.kind === "standard" ? stdScope(s.label) : s.label);
+  const source = sources.find((s) => keyOf(s) === section.key);
+  const sharers = section.members ?? [];
   // what to compare against: picked, or the Minecraft folder for an installation
   const [comparePick, setComparePick] = useState<string | null>(null);
   const other =
@@ -340,8 +341,9 @@ export function OptionsView({
     if (!source || !seed) return;
     try {
       await api.writeOptions(source.path, await api.readOptions(seed.path));
-      notify(`Copied ${instanceName(seed)} options into ${source.label}`);
+      notify(`Copied ${nameOf(seed)} options into ${source.label}`);
       reloadSources();
+      reloadStandards();
       reload();
     } catch (e) {
       notify(String(e));
@@ -358,42 +360,20 @@ export function OptionsView({
       </header>
 
       <p className="hint wide">
-        Every installation has its own <code>options.txt</code>
+        Edit a standard's <code>options.txt</code> once for everything using it. Installations appear
+        only when they keep their own.
         <span className="more">
           {" "}
-          unless it's linked from a standard — then they share one file. Pick another installation under{" "}
+          Pick another under{" "}
           <b>Compare with</b> to see what differs and take its values</span>.
       </p>
 
-      <PlacePicker
-        places={instances.map((s) => {
-          const group = sharersOf(s);
-          const members = group.length > 1
-            ? group.flatMap((g) => installations.filter((i) => g.kind === "installation" && i.name === g.label))
-            : [];
-          return {
-            key: s.path,
-            label: instanceName(s),
-            kind: s.kind === "base" ? ("root" as const) : undefined,
-            inst: members.length ? undefined : installations.find((i) => i.name === s.label),
-            members,
-            sub: members.length
-              ? `${members.length} linked`
-              : s.link
-                ? `from ${s.link}`
-                : s.exists
-                  ? "own options.txt"
-                  : "no options.txt · game defaults",
-          };
-        })}
-        value={source?.path ?? ""}
-        onChange={setSelected}
-      />
+      <PlacePicker places={places} value={section.key} onChange={setSelected} />
       <div className="options-layout">
         <section className="options-editor">
-          {sharers.length > (source?.kind === "base" ? 0 : 1) && (
+          {sharers.length > 0 && (
             <p className="hint">
-              Shared by <b>{sharers.map((s) => s.label).join(", ")}</b> — saving here changes it for all of them.
+              Used by <b>{sharers.map((s) => s.name).join(", ")}</b> — saving here changes it for all of them.
             </p>
           )}
           {source && !source.exists ? (
@@ -404,7 +384,7 @@ export function OptionsView({
               </p>
               {seed && (
                 <button className="btn primary" onClick={copyFrom}>
-                  Copy {instanceName(seed)} options here
+                  Copy {nameOf(seed)} options here
                 </button>
               )}
             </div>
@@ -421,11 +401,12 @@ export function OptionsView({
                   Compare with
                   <select value={other?.path ?? ""} onChange={(e) => setComparePick(e.target.value)}>
                     <option value="">nothing</option>
-                    {instances
+                    {sources
+                      .filter((s) => places.some((p) => p.key === keyOf(s)))
                       .filter((s) => s.path !== source?.path && (s.exists || s.path === other?.path))
                       .map((s) => (
                         <option key={s.path} value={s.path}>
-                          {instanceName(s)}
+                          {nameOf(s)}
                         </option>
                       ))}
                   </select>
@@ -438,7 +419,7 @@ export function OptionsView({
                 )}
                 {comparing && diffKeys.length > 0 && (
                   <button className="linklike" onClick={takeAll} title="Stages them — nothing is saved until Save">
-                    take all {diffKeys.length} from {instanceName(other!)}
+                    take all {diffKeys.length} from {nameOf(other!)}
                   </button>
                 )}
                 <button className="linklike" onClick={() => source && api.revealPath(source.path)}>
@@ -447,34 +428,50 @@ export function OptionsView({
               </div>
               {sameFile && (
                 <p className="hint">
-                  {instanceName(other!)} uses the very same file — they're linked, so nothing can differ.
+                  {nameOf(other!)} uses the very same file — they're linked, so nothing can differ.
                 </p>
               )}
 
-              <div className="opt-groups">
+              <div className={`opt-groups ${comparing ? "comparing" : ""}`}>
                 {grouped.map(([g, ks]) => (
                   <div key={g} className="opt-group">
                     <h3>{g}</h3>
                     <ul className="opt-list">
+                      {comparing && (
+                        <li className="opt-head">
+                          <span>Option</span>
+                          <span title={nameOf(other!)}>{nameOf(other!)}</span>
+                          <span title={source && nameOf(source)}>{source && nameOf(source)}</span>
+                        </li>
+                      )}
                       {ks.map((k) => {
                         const value = edits.get(k) ?? mine.get(k);
                         const t = theirs.get(k);
+                        const useTheirs = !comparing
+                          ? ""
+                          : t === undefined
+                            ? `${nameOf(other!)} doesn't set this`
+                            : `Use ${nameOf(other!)}'s value`;
                         return (
                           <li key={k} className={edits.has(k) ? "dirty" : ""}>
                             <div className="opt-label">
                               <span>{labelOf(k)}</span>
                               <code className="opt-key">{k}</code>
                             </div>
-                            {comparing && !sameValue(value, t) && (
-                              <button
-                                className="chip differs"
-                                disabled={t === undefined}
-                                title={t === undefined ? `${instanceName(other!)} doesn't set this` : `Use ${instanceName(other!)}'s value`}
-                                onClick={() => t !== undefined && set(k)(t)}
-                              >
-                                {instanceName(other!)}: {show(k, t)}
-                              </button>
-                            )}
+                            {comparing &&
+                              (sameValue(value, t) ? (
+                                <span className="opt-same">{show(k, t)}</span>
+                              ) : (
+                                <button
+                                  className="chip differs"
+                                  disabled={t === undefined}
+                                  title={useTheirs}
+                                  aria-label={`${useTheirs}: ${show(k, t)}`}
+                                  onClick={() => t !== undefined && set(k)(t)}
+                                >
+                                  {show(k, t)}
+                                </button>
+                              ))}
                             <div className="opt-edit">
                               {value === undefined ? (
                                 <span className="hint">not set</span>
@@ -498,7 +495,7 @@ export function OptionsView({
       {edits.size > 0 && (
         <div className="save-bar">
           <span>
-            {edits.size} unsaved change{edits.size === 1 ? "" : "s"} to <b>{source && instanceName(source)}</b>
+            {edits.size} unsaved change{edits.size === 1 ? "" : "s"} to <b>{source && nameOf(source)}</b>
           </span>
           <span className="hint">close Minecraft first or it'll overwrite them</span>
           <button className="linklike" onClick={() => setEdits(new Map())}>

@@ -153,6 +153,15 @@ fn game_dir(installation: Option<&str>) -> CmdResult<PathBuf> {
     }
 }
 
+/// `game_dir`, or a standard's own folder for a "standards/<name>" scope.
+fn scope_dir(scope: Option<&str>) -> CmdResult<PathBuf> {
+    match scope.and_then(|s| s.strip_prefix("standards/")) {
+        Some(SHARED) => Ok(mc_dir()),
+        Some(name) => standard_dir(name),
+        None => game_dir(scope),
+    }
+}
+
 /// Installation folder names, sorted.
 fn installation_names() -> Vec<String> {
     let mut v: Vec<String> = fs::read_dir(installations_dir())
@@ -309,6 +318,8 @@ struct Installation {
     mods_count: usize,
     /// which of INSTANCE_ITEMS are links, and to what
     links: std::collections::HashMap<String, ItemLink>,
+    /// which of INSTANCE_ITEMS it keeps itself, outside any standard
+    standalone: Vec<String>,
     registered: bool,
     linked: Vec<String>,
     unlinked: Vec<String>,
@@ -323,7 +334,27 @@ struct ItemLink {
 }
 
 /// What installations can share whole, so the views can group them.
-const INSTANCE_ITEMS: [&str; 5] = ["mods", "resourcepacks", "saves", "screenshots", "options.txt"];
+const INSTANCE_ITEMS: [&str; 8] =
+    ["mods", "resourcepacks", "saves", "screenshots", "options.txt", "servers.dat", "config", "logs"];
+
+/// Any real file under `dir`, not counting links.
+fn has_own_file(dir: &Path) -> bool {
+    fs::read_dir(dir).into_iter().flatten().flatten().any(|e| match e.file_type() {
+        Ok(t) if t.is_dir() => has_own_file(&e.path()),
+        Ok(t) => t.is_file(),
+        _ => false,
+    })
+}
+
+/// The installation has its own `item`: not the top-level one of a standard.
+fn is_standalone(game: &Path, item: &str) -> bool {
+    if let Some(l) = item_link(game, item) {
+        let real = PathBuf::from(l.dir);
+        return real != canon(&mc_dir().join(item)) && real != canon(&standards_dir().join(l.from).join(item));
+    }
+    let p = game.join(item);
+    if item == MERGED { has_own_file(&p) } else { p.exists() }
+}
 
 fn item_link(game: &Path, name: &str) -> Option<ItemLink> {
     let item = game.join(name);
@@ -403,6 +434,11 @@ fn list_installations() -> CmdResult<Vec<Installation>> {
             links: INSTANCE_ITEMS
                 .iter()
                 .filter_map(|n| item_link(&path, n).map(|l| (n.to_string(), l)))
+                .collect(),
+            standalone: INSTANCE_ITEMS
+                .iter()
+                .filter(|n| is_standalone(&path, n))
+                .map(|n| n.to_string())
                 .collect(),
             name,
             path: path.to_string_lossy().into(),
@@ -1088,7 +1124,7 @@ fn list_standards() -> CmdResult<Vec<Standard>> {
                 for (cname, cpath) in visible_children(&path) {
                     push_entry(&mut entries, format!("{std_name}/{name}/{cname}"), &name, cname, &cpath);
                 }
-            } else if !is_image(&name, &path) {
+            } else if !is_image(&name, &path) && !name.ends_with("_old") && !name.ends_with(".bak") {
                 // top-level pictures are the standard's images, not game files
                 push_entry(&mut entries, format!("{std_name}/{name}"), "global", name, &path);
             }
@@ -2156,7 +2192,7 @@ fn pack_order(game: &Path) -> Vec<String> {
 
 #[tauri::command(async)]
 fn list_packs(installation: Option<String>) -> CmdResult<PackList> {
-    let game = game_dir(installation.as_deref())?;
+    let game = scope_dir(installation.as_deref())?;
     let dir = game.join("resourcepacks");
     let paths: Vec<PathBuf> = fs::read_dir(&dir)
         .map(|rd| {
@@ -2187,7 +2223,7 @@ fn list_packs(installation: Option<String>) -> CmdResult<PackList> {
 /// "vanilla" and mod-provided ones stay underneath, as Minecraft expects.
 #[tauri::command(async)]
 fn set_packs(installation: Option<String>, enabled: Vec<String>) -> CmdResult<()> {
-    set_packs_in(&game_dir(installation.as_deref())?, &enabled)
+    set_packs_in(&scope_dir(installation.as_deref())?, &enabled)
 }
 
 fn set_packs_in(game: &Path, enabled: &[String]) -> CmdResult<()> {
@@ -2217,7 +2253,7 @@ fn set_packs_in(game: &Path, enabled: &[String]) -> CmdResult<()> {
 
 #[tauri::command(async)]
 fn add_packs(installation: Option<String>, files: Vec<String>) -> CmdResult<usize> {
-    copy_in(&game_dir(installation.as_deref())?.join("resourcepacks"), &files, ".zip")
+    copy_in(&scope_dir(installation.as_deref())?.join("resourcepacks"), &files, ".zip")
 }
 
 // ---------------------------------------------------------------------------
@@ -2254,11 +2290,12 @@ fn is_text_config(p: &Path) -> bool {
 
 #[tauri::command(async)]
 fn list_config(installation: Option<String>) -> CmdResult<ConfigOverview> {
-    let game = game_dir(installation.as_deref())?;
+    let game = scope_dir(installation.as_deref())?;
     let dir = game.join("config");
     let mut paths = vec![];
     walk_files(&dir, &mut paths);
-    let stds = fs::canonicalize(standards_dir()).ok();
+    // a standard's own files aren't linked from anywhere
+    let stds = fs::canonicalize(standards_dir()).ok().filter(|s| !canon(&game).starts_with(s));
     let mut files: Vec<ConfigFile> = paths
         .iter()
         .map(|p| ConfigFile {
@@ -2268,7 +2305,7 @@ fn list_config(installation: Option<String>) -> CmdResult<ConfigOverview> {
             modified: modified_secs(p),
             linked: stds.as_ref().and_then(|s| {
                 Some(fs::canonicalize(p).ok()?.strip_prefix(s).ok()?.iter().next()?.to_string_lossy().into())
-            }),
+            }).or_else(|| p.is_symlink().then(|| link_source(p)).flatten()),
         })
         .collect();
     files.sort_by_key(|f| f.rel.to_lowercase());
@@ -2720,12 +2757,12 @@ fn sort_logs_in(root: &Path) -> std::io::Result<usize> {
 
 #[tauri::command(async)]
 fn list_logs(installation: Option<String>) -> CmdResult<Vec<LogEntry>> {
-    Ok(list_logs_in(&game_dir(installation.as_deref())?))
+    Ok(list_logs_in(&scope_dir(installation.as_deref())?))
 }
 
 #[tauri::command(async)]
 fn sort_logs(installation: Option<String>) -> CmdResult<usize> {
-    sort_logs_in(&game_dir(installation.as_deref())?).map_err(err)
+    sort_logs_in(&scope_dir(installation.as_deref())?).map_err(err)
 }
 
 /// Reads a log (gunzipping .gz) — last 2 MB only, logs can be huge.
@@ -2745,9 +2782,24 @@ fn read_log(path: String) -> CmdResult<String> {
     Ok(String::from_utf8_lossy(&bytes[start..]).into())
 }
 
+/// What a purge trashes: stray logs and what's inside the log folders. The
+/// folders stay, since installations may link to them.
+fn log_items(root: &Path) -> Vec<PathBuf> {
+    root_entries(root, "logs")
+        .into_iter()
+        .flat_map(|p| {
+            if p.is_dir() {
+                fs::read_dir(&p).into_iter().flatten().flatten().map(|e| e.path()).collect()
+            } else {
+                vec![p]
+            }
+        })
+        .collect()
+}
+
 #[tauri::command(async)]
 fn purge_logs(installation: Option<String>) -> CmdResult<usize> {
-    let t = root_entries(&game_dir(installation.as_deref())?, "logs");
+    let t = log_items(&scope_dir(installation.as_deref())?);
     if !t.is_empty() {
         trash::delete_all(&t).map_err(err)?;
     }
@@ -2929,12 +2981,19 @@ fn read_world(dir: &Path, location: &str) -> World {
     }
 }
 
-/// The Minecraft folder's `sub`, then each other real folder installations
-/// use, once, under the first installation that uses it.
+/// The Minecraft folder's `sub`, each standard's, then each other real folder
+/// installations use, once, under the first installation that uses it.
 fn instance_dirs(root: &Path, sub: &str) -> Vec<(String, PathBuf)> {
     let shared = root.join(sub);
     let mut seen = std::collections::HashSet::from([canon(&shared)]);
     let mut out = vec![(SHARED.to_string(), shared)];
+    let stds = root.join("standards");
+    for name in names_in(&stds) {
+        let d = stds.join(&name).join(sub);
+        if d.is_dir() && seen.insert(canon(&d)) {
+            out.push((format!("standards/{name}"), d));
+        }
+    }
     let insts = root.join("installations");
     for name in names_in(&insts) {
         let d = insts.join(&name).join(sub);
@@ -3044,6 +3103,11 @@ fn options_sources() -> Vec<OptionsSource> {
             continue;
         }
         out.push(options_source(name, "installation", dir.join("options.txt")));
+    }
+    for (name, dir) in visible_children(&root.join("standards")) {
+        if dir.is_dir() {
+            out.push(options_source(name, "standard", dir.join("options.txt")));
+        }
     }
     out
 }
@@ -3177,10 +3241,6 @@ struct ServerList {
     label: String,
     path: String,
     exists: bool,
-    /// the standard it's linked from, or "Shared"
-    link: Option<String>,
-    /// the file it really is: lists with the same one are one instance
-    target: String,
     servers: Vec<Server>,
     backup: Vec<Server>,
 }
@@ -3189,16 +3249,20 @@ struct ServerList {
 fn list_servers() -> Vec<ServerList> {
     let mut scopes: Vec<Option<String>> = vec![None];
     scopes.extend(installation_names().into_iter().map(Some));
+    scopes.extend(
+        visible_children(&standards_dir())
+            .into_iter()
+            .filter(|(_, p)| p.is_dir())
+            .map(|(n, _)| Some(format!("standards/{n}"))),
+    );
     scopes
         .into_iter()
         .filter_map(|inst| {
-            let dir = game_dir(inst.as_deref()).ok()?;
+            let dir = scope_dir(inst.as_deref()).ok()?;
             let p = dir.join("servers.dat");
             Some(ServerList {
-                label: inst.clone().unwrap_or("Main folder".into()),
+                label: inst.as_deref().map_or("Main folder", |s| s.trim_start_matches("standards/")).into(),
                 exists: p.exists(),
-                link: p.is_symlink().then(|| link_source(&p)).flatten(),
-                target: canon(&p).to_string_lossy().into(),
                 servers: read_servers(&p),
                 backup: read_servers(&dir.join("servers.dat_old")),
                 path: p.to_string_lossy().into(),
@@ -3211,7 +3275,7 @@ fn list_servers() -> Vec<ServerList> {
 /// Saves the list the way Minecraft does: current file becomes servers.dat_old.
 #[tauri::command(async)]
 fn write_servers(installation: Option<String>, servers: Vec<Server>) -> CmdResult<()> {
-    let dir = game_dir(installation.as_deref())?;
+    let dir = scope_dir(installation.as_deref())?;
     let p = dir.join("servers.dat");
     if servers.iter().any(|s| s.ip.trim().is_empty()) {
         return Err("every server needs an address".into());
@@ -3225,7 +3289,7 @@ fn write_servers(installation: Option<String>, servers: Vec<Server>) -> CmdResul
 /// Swaps servers.dat and servers.dat_old, so a restore can itself be undone.
 #[tauri::command(async)]
 fn restore_servers_backup(installation: Option<String>) -> CmdResult<()> {
-    restore_servers_in(&game_dir(installation.as_deref())?)
+    restore_servers_in(&scope_dir(installation.as_deref())?)
 }
 
 fn restore_servers_in(dir: &Path) -> CmdResult<()> {
@@ -3391,7 +3455,7 @@ fn find_world(dir: &Path) -> Option<PathBuf> {
 /// Copies a world folder or .zip into a saves folder. Returns the new folder name.
 #[tauri::command(async)]
 fn import_world(source: String, installation: Option<String>) -> CmdResult<String> {
-    import_world_into(&game_dir(installation.as_deref())?.join("saves"), &source)
+    import_world_into(&scope_dir(installation.as_deref())?.join("saves"), &source)
 }
 
 fn import_world_into(saves: &Path, source: &str) -> CmdResult<String> {
@@ -3733,7 +3797,7 @@ fn read_mod(path: &Path) -> Mod {
 }
 
 fn mods_dir(installation: Option<&str>) -> CmdResult<PathBuf> {
-    Ok(game_dir(installation)?.join("mods"))
+    Ok(scope_dir(installation)?.join("mods"))
 }
 
 #[tauri::command(async)]
@@ -4248,8 +4312,7 @@ async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: S
 }
 
 async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdResult<ImportReport> {
-    let (dir, game, loader) = inst_target(installation)?;
-    let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
+    let (dir, game, loader) = import_target(installation)?;
     let mut report = ImportReport::default();
     let mut titles = vec![];
     let mut queue = vec![];
@@ -4356,13 +4419,35 @@ fn newest_version(game: String, loader: String, sharing: Vec<(String, String)>) 
         .unwrap_or((game, loader))
 }
 
+/// Where an installation or "standards/<name>" scope downloads to, and the
+/// version it matches: the newest of what uses it. A standard nothing modded
+/// uses yet follows the newest modded installation.
+fn import_target(scope: &str) -> CmdResult<(PathBuf, String, String)> {
+    if !scope.starts_with("standards/") {
+        let (dir, game, loader) = inst_target(scope)?;
+        let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
+        return Ok((dir, game, loader));
+    }
+    let dir = scope_dir(Some(scope))?;
+    let versions = |names: Vec<String>| -> Vec<(String, String)> {
+        names.iter().filter_map(|n| inst_target(n).ok().map(|(_, g, l)| (g, l))).collect()
+    };
+    let mut users = mods_sharing(&dir);
+    users.extend(versions(read_links(&dir)));
+    if users.iter().all(|(_, l)| l == "vanilla") {
+        users.extend(versions(installation_names()));
+    }
+    let (game, loader) = users.first().cloned().ok_or("Create an installation first, so MIM knows which version to match")?;
+    let (game, loader) = newest_version(game, loader, users);
+    Ok((dir, game, loader))
+}
+
 async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> {
-    let (dir, game, loader) = inst_target(installation)?;
-    let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
+    let (dir, game, loader) = import_target(installation)?;
     p.say("Checking for updates");
     let mods = dir.join("mods");
     let current = jar_hashes(&mods, false);
-    let mut report = ImportReport { title: installation.into(), ..Default::default() };
+    let mut report = ImportReport { title: installation.trim_start_matches("standards/").into(), ..Default::default() };
     if current.is_empty() {
         return Ok(report);
     }
@@ -5695,7 +5780,32 @@ mod tests {
         symlink(root.join("saves"), insts.join("Root/saves")).unwrap();
 
         let names: Vec<_> = instance_dirs(&root, "saves").into_iter().map(|(n, _)| n).collect();
-        assert_eq!(names, ["Shared", "A", "Own"]);
+        assert_eq!(names, ["Shared", "standards/Pack", "Own"]);
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_of_only_links_has_no_own_file() {
+        let root = std::env::temp_dir().join(format!("mim-own-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("config/sub")).unwrap();
+        fs::write(root.join("real.json"), "{}").unwrap();
+        std::os::unix::fs::symlink(root.join("real.json"), root.join("config/sub/linked.json")).unwrap();
+        assert!(!has_own_file(&root.join("config")));
+        fs::write(root.join("config/sub/own.json"), "{}").unwrap();
+        assert!(has_own_file(&root.join("config")));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn purging_logs_keeps_the_log_folder() {
+        let root = std::env::temp_dir().join(format!("mim-purge-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("logs")).unwrap();
+        fs::write(root.join("logs/latest.log"), "x").unwrap();
+        fs::write(root.join("hs_err_pid1.log"), "x").unwrap();
+        let mut items = log_items(&root);
+        items.sort();
+        assert_eq!(items, [root.join("hs_err_pid1.log"), root.join("logs/latest.log")]);
         fs::remove_dir_all(&root).unwrap();
     }
 

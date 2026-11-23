@@ -15,7 +15,15 @@ export async function okToChangeShared(paths: string[], what: string, followLink
   );
 }
 
-export type InstanceItem = "mods" | "resourcepacks" | "saves" | "screenshots" | "options.txt";
+export type InstanceItem =
+  | "mods"
+  | "resourcepacks"
+  | "saves"
+  | "screenshots"
+  | "options.txt"
+  | "servers.dat"
+  | "config"
+  | "logs";
 
 export interface Installation {
   name: string;
@@ -29,6 +37,8 @@ export interface Installation {
   mods_count: number;
   /** which shareable items are links, and to what */
   links: Partial<Record<InstanceItem, { from: string; dir: string }>>;
+  /** what it keeps itself, outside any standard */
+  standalone: InstanceItem[];
   registered: boolean;
   linked: string[];
   unlinked: string[];
@@ -210,7 +220,7 @@ export interface WorldDetails {
 
 export interface OptionsSource {
   label: string;
-  kind: "base" | "installation";
+  kind: "base" | "standard" | "installation";
   path: string;
   exists: boolean;
   /** where it's linked from ("Shared", a standard, "elsewhere"); null: its own */
@@ -234,10 +244,6 @@ export interface ServerList {
   label: string;
   path: string;
   exists: boolean;
-  /** the standard it's linked from, or "Shared" */
-  link: string | null;
-  /** the real file: lists with the same one are one instance */
-  target: string;
   servers: Server[];
   backup: Server[];
 }
