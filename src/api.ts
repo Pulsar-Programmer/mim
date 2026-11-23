@@ -2,8 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 
 /** Asks first when these items live in a folder other installations share. */
-export async function okToChangeShared(paths: string[], what: string): Promise<boolean> {
-  const who = await api.sharedWith(paths);
+export async function okToChangeShared(paths: string[], what: string, followLinks = false): Promise<boolean> {
+  const who = await api.sharedWith(paths, followLinks);
   return (
     !who.length ||
     ask(`${what} also affects ${who.join(", ")}, because this folder is shared.`, {
@@ -25,6 +25,8 @@ export interface Installation {
   last_used: string | null;
   created: string | null;
   mods_count: number;
+  /** set when the whole mods folder is a link */
+  mods_link: { from: string; dir: string } | null;
   registered: boolean;
   linked: string[];
   unlinked: string[];
@@ -459,7 +461,8 @@ export const api = {
     invoke<string>("import_world", { source, installation }),
   backupWorld: (path: string, dest: string) => invoke<void>("backup_world", { path, dest }),
   trashItem: (path: string) => invoke<void>("trash_item", { path }),
-  sharedWith: (paths: string[]) => invoke<string[]>("shared_with", { paths }),
+  sharedWith: (paths: string[], followLinks: boolean) =>
+    invoke<string[]>("shared_with", { paths, followLinks }),
   listMods: (installation: string | null) => invoke<Mod[]>("list_mods", { installation }),
   toggleMod: (path: string) => invoke<string>("toggle_mod", { path }),
   addMods: (installation: string | null, files: string[]) =>

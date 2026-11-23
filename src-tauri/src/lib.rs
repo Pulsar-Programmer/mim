@@ -307,9 +307,33 @@ struct Installation {
     last_used: Option<String>,
     created: Option<String>,
     mods_count: usize,
+    /// set when the whole mods folder is a link
+    mods_link: Option<ModsLink>,
     registered: bool,
     linked: Vec<String>,
     unlinked: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ModsLink {
+    /// the standard it comes from, or "Shared" for the Minecraft folder's
+    from: String,
+    /// the real folder: installations with the same one share their mods
+    dir: String,
+}
+
+fn mods_link(game: &Path) -> Option<ModsLink> {
+    let mods = game.join("mods");
+    if !mods.is_symlink() {
+        return None;
+    }
+    let dir = canon(&mods);
+    let from = if dir == canon(&mc_dir().join("mods")) {
+        SHARED.to_string()
+    } else {
+        link_source(&mods).unwrap_or_else(|| "Linked folder".into())
+    };
+    Some(ModsLink { from, dir: dir.to_string_lossy().into() })
 }
 
 #[tauri::command(async)]
@@ -373,6 +397,7 @@ fn list_installations() -> CmdResult<Vec<Installation>> {
         }
 
         out.push(Installation {
+            mods_link: mods_link(&path),
             name,
             path: path.to_string_lossy().into(),
             version_id,
@@ -3378,19 +3403,36 @@ fn trash_item(path: String) -> CmdResult<()> {
     trash::delete(&p).map_err(err)
 }
 
-/// Who else a change to these items reaches because their folder is shared.
-/// Empty for a linked file: only the link itself changes.
+/// Who else a change to these items reaches because they're shared. A linked
+/// file only counts with `follow_links`: removing one just removes the link.
 #[tauri::command(async)]
-fn shared_with(paths: Vec<String>) -> Vec<String> {
-    shared_with_in(&mc_dir(), &paths)
+fn shared_with(paths: Vec<String>, follow_links: bool) -> Vec<String> {
+    shared_with_in(&mc_dir(), &paths, follow_links)
 }
 
-fn shared_with_in(mc: &Path, paths: &[String]) -> Vec<String> {
+fn shared_with_in(mc: &Path, paths: &[String], follow_links: bool) -> Vec<String> {
     let mut games = vec![("the Minecraft folder".to_string(), mc.to_path_buf())];
     games.extend(visible_children(&mc.join("installations")));
     let mut seen = std::collections::HashSet::new();
     let mut who = std::collections::BTreeSet::new();
-    for p in paths.iter().map(Path::new).filter(|p| !p.is_symlink()) {
+    for p in paths.iter().map(Path::new) {
+        if p.is_symlink() {
+            let (Some(name), Some(parent)) = (p.file_name(), p.parent()) else { continue };
+            let (Some(folder), Some(own)) = (parent.file_name(), parent.parent().map(canon)) else { continue };
+            if follow_links {
+                let real = canon(p);
+                let others: Vec<_> = games
+                    .iter()
+                    .filter(|(_, g)| canon(g) != own && canon(&g.join(folder).join(name)) == real)
+                    .map(|(n, _)| n.clone())
+                    .collect();
+                if others.is_empty() {
+                    who.insert("the linked standard".to_string());
+                }
+                who.extend(others);
+            }
+            continue;
+        }
         let Some(parent) = p.parent().filter(|d| seen.insert(d.to_path_buf())) else { continue };
         let (Some(folder), Some(own)) = (parent.file_name(), parent.parent().map(canon)) else { continue };
         let real = canon(parent);
@@ -3630,23 +3672,78 @@ fn list_mods(installation: Option<String>) -> CmdResult<Vec<Mod>> {
 /// Enables/disables a mod the way launchers do: foo.jar <-> foo.jar.disabled.
 #[tauri::command(async)]
 fn toggle_mod(path: String) -> CmdResult<String> {
-    toggle_entry(entry_inside(&mc_dir(), &path)?)
+    let mc = mc_dir();
+    toggle_entry(&mc, entry_inside(&mc, &path)?)
 }
 
-fn toggle_entry(p: PathBuf) -> CmdResult<String> {
+/// foo.jar <-> foo.jar.disabled
+fn toggled(p: &Path) -> CmdResult<PathBuf> {
+    let s = p.to_string_lossy();
+    match s.strip_suffix(".disabled") {
+        Some(enabled) => Ok(PathBuf::from(enabled)),
+        None if s.ends_with(".jar") => Ok(PathBuf::from(format!("{s}.disabled"))),
+        None => Err("not a jar".into()),
+    }
+}
+
+fn is_off(p: &Path) -> bool {
+    p.to_string_lossy().ends_with(".disabled")
+}
+
+fn name_free(p: &Path) -> CmdResult<()> {
+    match p.symlink_metadata() {
+        Ok(_) => Err("a file with that name already exists".into()),
+        Err(_) => Ok(()),
+    }
+}
+
+/// A linked mod is one mod: turning it off renames the original and moves
+/// every link to it along, so all installations using it stay in step.
+fn toggle_entry(mc: &Path, p: PathBuf) -> CmdResult<String> {
     if p.parent().and_then(|d| d.file_name()).is_none_or(|n| n != "mods") {
         return Err("not a mod".into());
     }
-    let s = p.to_string_lossy().to_string();
-    let next = match s.strip_suffix(".disabled") {
-        Some(enabled) => PathBuf::from(enabled),
-        None if s.ends_with(".jar") => PathBuf::from(format!("{s}.disabled")),
-        None => return Err("not a jar".into()),
+    let next = toggled(&p)?;
+    let real = if p.is_symlink() { Some(fs::canonicalize(&p).map_err(err)?) } else { None };
+    // a plain file, or a link 0.1.3 turned off alone: only this name changes
+    let Some(real) = real.filter(|r| is_off(r) == is_off(&p)) else {
+        name_free(&next)?;
+        fs::rename(&p, &next).map_err(err)?;
+        return Ok(next.to_string_lossy().into());
     };
-    if next.symlink_metadata().is_ok() {
-        return Err("a file with that name already exists".into());
+    let real_next = toggled(&real)?;
+    name_free(&real_next)?;
+
+    let mut games = vec![mc.to_path_buf()];
+    games.extend(visible_children(&mc.join("installations")).into_iter().map(|(_, g)| g));
+    let mut links = vec![(p.clone(), next.clone())];
+    for mods in games.iter().map(|g| g.join("mods")).filter(|m| !m.is_symlink()) {
+        let mods = canon(&mods);
+        for e in fs::read_dir(&mods).into_iter().flatten().flatten() {
+            let link = mods.join(e.file_name());
+            if link != p && link.is_symlink() && canon(&link) == real {
+                let to = if is_off(&link) == is_off(&real) { toggled(&link)? } else { link.clone() };
+                links.push((link, to));
+            }
+        }
     }
-    fs::rename(&p, &next).map_err(err)?;
+    for (link, to) in &links {
+        if to != link {
+            name_free(to)?;
+        }
+    }
+    fs::rename(&real, &real_next).map_err(err)?;
+    for (n, (link, to)) in links.iter().enumerate() {
+        if let Err(e) = remove_link(link).and_then(|_| symlink(&real_next, to)) {
+            let _ = fs::rename(&real_next, &real);
+            for (l, t) in &links[..=n] {
+                let _ = remove_link(t);
+                let _ = remove_link(l);
+                let _ = symlink(&real, l);
+            }
+            return Err(err(e));
+        }
+    }
     Ok(next.to_string_lossy().into())
 }
 
@@ -5740,12 +5837,24 @@ mod tests {
 
         let link = a.join("x.jar").to_string_lossy().to_string();
         assert_eq!(entry_inside(&root, &link).unwrap(), a.join("x.jar"));
-        assert!(shared_with_in(&root, &[link.clone()]).is_empty());
-        let off = toggle_entry(entry_inside(&root, &link).unwrap()).unwrap();
-        assert!(Path::new(&off).ends_with("A/mods/x.jar.disabled") && a.join("x.jar.disabled").is_symlink());
-        assert!(std.join("x.jar").is_file() && b.join("x.jar").exists());
-        toggle_entry(entry_inside(&root, &off).unwrap()).unwrap();
-        assert!(a.join("x.jar").is_symlink());
+        assert!(shared_with_in(&root, &[link.clone()], false).is_empty());
+        assert_eq!(shared_with_in(&root, &[link.clone()], true), vec!["B".to_string()]);
+
+        // on/off is shared: the original and every link move together
+        let off = toggle_entry(&root, entry_inside(&root, &link).unwrap()).unwrap();
+        assert!(Path::new(&off).ends_with("A/mods/x.jar.disabled"));
+        assert!(std.join("x.jar.disabled").is_file() && !std.join("x.jar").exists());
+        for d in [&a, &b] {
+            assert!(d.join("x.jar.disabled").exists() && d.join("x.jar").symlink_metadata().is_err());
+        }
+        toggle_entry(&root, entry_inside(&root, &off).unwrap()).unwrap();
+        assert!(std.join("x.jar").is_file() && a.join("x.jar").exists() && b.join("x.jar").exists());
+
+        // a link 0.1.3 turned off alone comes back without touching the original
+        fs::rename(a.join("x.jar"), a.join("x.jar.disabled")).unwrap();
+        let alone = a.join("x.jar.disabled");
+        toggle_entry(&root, alone).unwrap();
+        assert!(a.join("x.jar").exists() && std.join("x.jar").is_file() && b.join("x.jar").exists());
         assert!(entry_inside(&root, "/etc/hosts").is_err());
         fs::remove_dir_all(&root).unwrap();
     }
@@ -5761,9 +5870,9 @@ mod tests {
             symlink(&std, root.join("installations").join(i).join("mods")).unwrap();
         }
         let via = |i: &str| root.join("installations").join(i).join("mods/x.jar").to_string_lossy().to_string();
-        assert_eq!(shared_with_in(&root, &[via("A")]), vec!["B".to_string()]);
+        assert_eq!(shared_with_in(&root, &[via("A")], false), vec!["B".to_string()]);
         remove_link(&root.join("installations/B/mods")).unwrap();
-        assert_eq!(shared_with_in(&root, &[via("A")]), vec!["the linked standard".to_string()]);
+        assert_eq!(shared_with_in(&root, &[via("A")], false), vec!["the linked standard".to_string()]);
         fs::remove_dir_all(&root).unwrap();
     }
 

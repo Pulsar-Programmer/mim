@@ -16,6 +16,14 @@ import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
 import { PlacePicker } from "./Places";
 
+interface ModScope {
+  key: string | null;
+  label: string;
+  inst?: Installation;
+  sub: string;
+  members: Installation[];
+}
+
 export function ModsView({
   notify,
   installations,
@@ -25,18 +33,37 @@ export function ModsView({
   installations: Installation[];
   onChanged: () => void;
 }) {
-  // installations with mods first, the main folder last
-  const scopes = useMemo(
-    () => [
-      ...[...installations]
-        .sort((a, b) => b.mods_count - a.mods_count)
-        .map((i) => ({ key: i.name, label: i.name, count: i.mods_count, loader: i.loader })),
-      { key: null, label: "Minecraft folder", count: null, loader: null },
-    ],
-    [installations]
-  );
+  // installations with mods first, the main folder last. Installations linking
+  // the same mods folder are one section, since they have the same mods.
+  const scopes = useMemo<ModScope[]>(() => {
+    const sorted = [...installations].sort((a, b) => b.mods_count - a.mods_count);
+    const sharing = (i: Installation) => sorted.filter((o) => o.mods_link?.dir === i.mods_link?.dir);
+    const places = sorted.flatMap<ModScope>((i) => {
+      const count = `${i.mods_count} mod${i.mods_count === 1 ? "" : "s"}`;
+      if (!i.mods_link) return [{ key: i.name, label: i.name, inst: i, sub: count, members: [] }];
+      if (i.mods_link.from === "Shared") return [];
+      const group = sharing(i);
+      if (group[0] !== i) return [];
+      return group.length > 1
+        ? [{ key: i.name, label: i.mods_link.from, inst: undefined, sub: `${count} · ${group.length} linked`, members: group }]
+        : [{ key: i.name, label: i.name, inst: i, sub: `${count} · from ${i.mods_link.from}`, members: [] }];
+    });
+    const inRoot = sorted.filter((i) => i.mods_link?.from === "Shared");
+    return [
+      ...places,
+      {
+        key: null,
+        label: "Minecraft folder",
+        inst: undefined,
+        sub: inRoot.length ? `${inRoot.length} linked` : "root mods folder",
+        members: inRoot,
+      },
+    ];
+  }, [installations]);
   const [scope, setScope] = useState<string | null | undefined>(undefined);
-  const current = scope === undefined ? scopes[0]?.key ?? null : scope;
+  // a picked installation that now shares a folder lands on that section
+  const picked = scopes.find((s) => s.key === scope || s.members.some((m) => m.name === scope));
+  const current = picked ? picked.key : scopes[0]?.key ?? null;
 
   const [mods = [], reload] = useCached<Mod[]>(
     `mods:${current}`,
@@ -76,7 +103,7 @@ export function ModsView({
 
   async function toggle(m: Mod) {
     try {
-      if (!(await okToChangeShared([m.path], `Turning ${m.name} ${m.enabled ? "off" : "on"}`))) return;
+      if (!(await okToChangeShared([m.path], `Turning ${m.name} ${m.enabled ? "off" : "on"}`, true))) return;
       await api.toggleMod(m.path);
       reload();
     } catch (e) {
@@ -166,8 +193,9 @@ export function ModsView({
           key: s.key ?? "",
           label: s.label,
           kind: s.key == null ? ("root" as const) : undefined,
-          inst: installations.find((i) => i.name === s.key),
-          sub: s.count == null ? "root mods folder" : `${s.count} mod${s.count === 1 ? "" : "s"}`,
+          inst: s.inst,
+          sub: s.sub,
+          members: s.members,
         }))}
         value={current ?? ""}
         onChange={(k) => setScope(k || null)}
