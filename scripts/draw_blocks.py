@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draws the site's original isometric grass block and chest into web/public/img/icons."""
+"""Draws the site's original isometric chest into web/public/img/icons."""
 import random
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageEnhance
@@ -51,13 +51,6 @@ def noise(seed, weights, frame=lambda x, y: None):
     return ["".join(frame(x, y) or r.choices(*zip(*weights))[0] for x in range(16)) for y in range(16)]
 
 
-def grass_side(seed):
-    r = random.Random(seed)
-    drip = [r.choice((2, 3, 3, 4, 5)) for _ in range(16)]
-    dirt = noise(seed + 1, [("d", 6), ("D", 3), ("e", 2)])
-    return ["".join((r.choice("gGgh") if y < drip[x] else dirt[y][x]) for x in range(16)) for y in range(16)]
-
-
 def chest_face(front):
     def frame(x, y):
         if x in (0, 15) or y in (0, 15): return "k"
@@ -78,6 +71,6 @@ def chest_top():
     return noise(13, [("t", 7), ("u", 3)], frame)
 
 
-OUT.mkdir(parents=True, exist_ok=True)
-cube(tex(noise(3, [("g", 7), ("G", 3), ("h", 2)])), tex(grass_side(5)), tex(grass_side(8))).save(OUT / "grass.png", optimize=True)
-cube(tex(chest_top()), tex(chest_face(0)), tex(chest_face(1))).save(OUT / "chest.png", optimize=True)
+if __name__ == "__main__":
+    OUT.mkdir(parents=True, exist_ok=True)
+    cube(tex(chest_top()), tex(chest_face(0)), tex(chest_face(1))).save(OUT / "chest.png", optimize=True)
