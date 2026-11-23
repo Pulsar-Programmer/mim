@@ -11,7 +11,7 @@ import {
 } from "./api";
 import { brief } from "./settings";
 import { useCached } from "./hooks";
-import { PlacePicker, StandardAvatar } from "./Places";
+import { instancePlaces, PlacePicker, StandardAvatar } from "./Places";
 
 /**
  * Folders mods make right in the game folder instead of config/. `mod` is
@@ -108,19 +108,27 @@ export function ConfigView({
   notify: (m: string) => void;
   installations: Installation[];
 }) {
-  const [picked, setScope] = useState<string | null | undefined>(undefined);
-  const scope = picked === undefined ? (installations[0]?.name ?? null) : picked;
+  const [standards = [], reloadStandards] = useCached<Standard[]>(
+    "standards",
+    api.listStandards,
+    notify
+  );
+  const places = useMemo(
+    () => instancePlaces("config", installations, standards),
+    [installations, standards]
+  );
+  const [picked, setPicked] = useState<string>();
+  const section = places.find((p) => p.key === picked || p.members?.some((m) => m.name === picked)) ?? places[0];
+  const scope = section.kind === "root" ? null : section.key;
+  const isStandard = !!section.std && !section.std.builtin;
+  // only an installation's own files can be shared; standards' live in the standard
+  const shareScope = isStandard ? null : scope;
   const [overview, reload] = useCached<ConfigOverview>(
     `config:${scope}`,
     () => api.listConfig(scope),
     notify
   );
   const [mods = []] = useCached<Mod[]>(`mods:${scope}`, () => api.listMods(scope), notify);
-  const [standards = [], reloadStandards] = useCached<Standard[]>(
-    "standards",
-    api.listStandards,
-    notify
-  );
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<ConfigFile | null>(null);
   // the Share dialog: a mod's files, with the ones to share ticked
@@ -135,11 +143,17 @@ export function ConfigView({
   const shareFile = (f: ConfigFile) =>
     setSharing({ mod: groupOf(f)?.mod, files: groupOf(f)?.files ?? [f], picked: [f.rel] });
 
+  // an installation shows what's standalone; linked files are edited in their standard
+  const ownFiles = useMemo(
+    () => (overview?.files ?? []).filter((f) => isStandard || !f.linked),
+    [overview, isStandard]
+  );
+
   // config/ grouped by the mod each top-level entry belongs to
   const groups = useMemo(() => {
     const q = query.toLowerCase();
     const map = new Map<string, { mod?: Mod; label: string; files: ConfigFile[] }>();
-    for (const f of overview?.files ?? []) {
+    for (const f of ownFiles) {
       const top = f.rel.split("/")[0];
       const mod = modFor(top, mods);
       if (q && !f.rel.toLowerCase().includes(q) && !mod?.name.toLowerCase().includes(q)) continue;
@@ -151,12 +165,12 @@ export function ConfigView({
     return [...map.values()].sort((a, b) =>
       !a.mod ? 1 : !b.mod ? -1 : a.label.localeCompare(b.label)
     );
-  }, [overview, mods, query]);
+  }, [ownFiles, mods, query]);
 
-  const loose = (overview?.loose ?? []).filter(
+  const loose = (isStandard ? [] : overview?.loose ?? []).filter(
     (l) => !query || l.name.toLowerCase().includes(query.toLowerCase())
   );
-  const total = overview?.files.length ?? 0;
+  const total = ownFiles.length;
   const matched = groups.filter((g) => g.mod).length;
 
   return (
@@ -186,19 +200,7 @@ export function ConfigView({
         <code>journeymap/</code>; those are listed at the bottom.
       </p>
 
-      <PlacePicker
-        places={[
-          ...installations.map((i) => ({
-            key: i.name,
-            label: i.name,
-            inst: i,
-            sub: `${i.mods_count} mod${i.mods_count === 1 ? "" : "s"}`,
-          })),
-          { key: "", label: "Minecraft folder", kind: "root" as const, sub: "main config/" },
-        ]}
-        value={scope ?? ""}
-        onChange={(k) => setScope(k || null)}
-      />
+      <PlacePicker places={places} value={section.key} onChange={setPicked} />
 
       <div className="config-layout">
         <section className="config-list">
@@ -232,7 +234,7 @@ export function ConfigView({
                         ↔ {s}
                       </span>
                     ))}
-                    {scope && free.length > 0 && (
+                    {shareScope && free.length > 0 && (
                       <button
                         className="cfg-share-btn"
                         onClick={() =>
@@ -265,7 +267,7 @@ export function ConfigView({
                         )}
                         <span className="cfg-size">{formatBytes(f.size_bytes)}</span>
                       </button>
-                      {scope && !f.linked && (
+                      {shareScope && !f.linked && (
                         <button
                           className="cfg-row-share"
                           title="Share this file through a standard"
@@ -324,7 +326,7 @@ export function ConfigView({
               mod={modFor(open.rel.split("/")[0], mods)}
               notify={notify}
               onSaved={reload}
-              onShare={scope && !open.linked ? () => shareFile(open) : undefined}
+              onShare={shareScope && !open.linked ? () => shareFile(open) : undefined}
             />
           ) : (
             <div className="empty">Pick a config file to read or edit it.</div>
@@ -332,9 +334,9 @@ export function ConfigView({
         </section>
       </div>
 
-      {sharing && scope && (
+      {sharing && shareScope && (
         <ShareDialog
-          installation={scope}
+          installation={shareScope}
           {...sharing}
           standards={standards.filter((s) => !s.builtin)}
           notify={notify}

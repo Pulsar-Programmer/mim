@@ -1,8 +1,8 @@
 import { CSSProperties, MouseEvent, PointerEvent as RPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { api, formatBytes, Installation, okToChangeShared, Screenshot } from "./api";
-import { PlacePicker, sharedPlaces } from "./Places";
+import { api, formatBytes, Installation, okToChangeShared, Screenshot, Standard } from "./api";
+import { PlacePicker, scopeName, sharedPlaces } from "./Places";
 import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
 
@@ -147,7 +147,7 @@ export function ScreenshotsView({
     () => raw.filter((s) => !gone.has(s.path)).map((s) => ({ ...s, taken: takenAt(s) })),
     [raw, gone]
   );
-  const locations = [...new Set(shots.map((s) => s.location))];
+  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
   const shown = useMemo(() => {
     const list = shots.filter(
       (s) => (location === "all" || s.location === location) && (!onlyFavs || favs.has(s.path))
@@ -271,7 +271,7 @@ export function ScreenshotsView({
             <div className="hero-title">{fmt(hero.taken, { weekday: "long", month: "long", day: "numeric" })}</div>
             <div className="hero-sub">
               {fmt(hero.taken, { hour: "numeric", minute: "2-digit" })} · {hero.taken?.getFullYear()}
-              {hero.location !== "Shared" && ` · ${hero.location}`} · {hero.width}×{hero.height}
+              {hero.location !== "Shared" && ` · ${scopeName(hero.location)}`} · {hero.width}×{hero.height}
             </div>
             <div className="hero-actions" onClick={(e) => e.stopPropagation()}>
               <button
@@ -302,7 +302,7 @@ export function ScreenshotsView({
 
       {shots.length > 0 && (
         <PlacePicker
-          places={sharedPlaces("screenshots", locations, installations, (l) =>
+          places={sharedPlaces("screenshots", installations, standards, (l) =>
             shots.filter((s) => s.location === l).length
           )}
           value={location}
@@ -370,7 +370,7 @@ export function ScreenshotsView({
                     />
                     <span className="tile-meta">
                       {fmt(shot.taken, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-                      {shot.location !== "Shared" && <span className="tile-loc">{shot.location}</span>}
+                      {shot.location !== "Shared" && <span className="tile-loc">{scopeName(shot.location)}</span>}
                     </span>
                     <span className="tile-check">✓</span>
                   </button>
@@ -686,7 +686,7 @@ function Viewer(props: {
         </span>
         <span className="vs-title" data-tauri-drag-region>
           {fmt(shot.taken, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })}
-          {shot.location !== "Shared" && <span className="vs-loc">{shot.location}</span>}
+          {shot.location !== "Shared" && <span className="vs-loc">{scopeName(shot.location)}</span>}
         </span>
         <div className="vs-tools">
           <button className="vs-btn wide" onClick={toActual} title="Toggle actual size (1)">
@@ -776,7 +776,7 @@ function Viewer(props: {
               {formatBytes(shot.size_bytes)} <span>PNG</span>
             </dd>
             <dt>From</dt>
-            <dd>{shot.location === "Shared" ? "Shared folder" : shot.location}</dd>
+            <dd>{shot.location === "Shared" ? "Shared folder" : scopeName(shot.location)}</dd>
             <dt>Name</dt>
             <dd className="mono" title={shot.path}>
               {shot.name}

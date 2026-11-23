@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Installation, InstanceItem, Standard } from "./api";
+import { Modal } from "./Modal";
 
 // deterministic soft gradient for installations without a custom image
 export function nameGradient(name: string): string {
@@ -64,10 +66,13 @@ export interface Place {
   label: string;
   kind?: "all" | "root";
   inst?: Installation;
+  std?: Standard;
   count?: number;
   sub?: string;
   /** installations that use this place through a link */
   members?: Installation[];
+  /** has none of this yet: stays behind the + until picked */
+  empty?: boolean;
 }
 
 /** One selectable place — the same chip everywhere a folder is picked. */
@@ -120,83 +125,127 @@ export function PlacePicker({
   value: string;
   onChange: (key: string) => void;
 }) {
+  const [adding, setAdding] = useState(false);
   if (places.length < 2) return null;
+  const hidden = places.filter((p) => p.empty && p.key !== value);
   return (
     <div className="places" role="group" aria-label="Instances">
       <span className="places-label" aria-hidden>
         Instances
       </span>
-      {places.map((p) => (
-        <PlaceChip key={p.key} place={p} active={p.key === value} onClick={() => onChange(p.key)} />
-      ))}
+      {places
+        .filter((p) => !p.empty || p.key === value)
+        .map((p) => (
+          <PlaceChip key={p.key} place={p} active={p.key === value} onClick={() => onChange(p.key)} />
+        ))}
+      {hidden.length > 0 && (
+        <button className="place place-add" aria-label="Add an instance" title="Add an instance" onClick={() => setAdding(true)}>
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+            <path d="M8 2.5v11M2.5 8h11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
+        </button>
+      )}
+      {adding && (
+        <Modal className="share-dialog" label="Add an instance" onClose={() => setAdding(false)}>
+          <div className="share-body">
+            <header className="share-head">
+              <div>
+                <h2>Add an instance</h2>
+                <p className="hint">Pick one to start adding to it. It stays in the bar once it has something.</p>
+              </div>
+            </header>
+            <div className="places">
+              {hidden.map((p) => (
+                <PlaceChip
+                  key={p.key}
+                  place={p}
+                  active={false}
+                  onClick={() => {
+                    setAdding(false);
+                    onChange(p.key);
+                  }}
+                />
+              ))}
+            </div>
+            <footer className="share-foot">
+              <button className="btn" onClick={() => setAdding(false)}>
+                Cancel
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
 
+export const stdScope = (name: string) => `standards/${name}`;
+/** A scope or location, as a person reads it. */
+export const scopeName = (scope: string) => scope.replace(/^standards\//, "");
+
 /**
- * One place per instance of `item`: installations linking the same real
- * folder are one place, keyed by the first. The Minecraft folder comes last.
+ * The bar: every standard first, each with the installations using its `item`,
+ * then installations only where their `item` is standalone.
  */
 export function instancePlaces(
   item: InstanceItem,
   installations: Installation[],
-  detail: (i: Installation) => string,
-  rootSub: string
+  standards: Standard[],
+  detail: (i: Installation) => string = () => ""
 ): Place[] {
-  const sub = (...parts: string[]) => parts.filter(Boolean).join(" · ");
-  const places = installations.flatMap<Place>((i) => {
-    const link = i.links[item];
-    if (!link) return [{ key: i.name, label: i.name, inst: i, sub: detail(i) || "own folder", members: [] }];
-    if (link.from === "Shared") return [];
-    const group = installations.filter((o) => o.links[item]?.dir === link.dir);
-    if (group[0] !== i) return [];
-    return group.length > 1
-      ? [{ key: i.name, label: link.from, sub: sub(detail(i), `${group.length} linked`), members: group }]
-      : [{ key: i.name, label: i.name, inst: i, sub: sub(detail(i), `from ${link.from}`), members: [] }];
-  });
-  const inRoot = installations.filter((i) => i.links[item]?.from === "Shared");
+  const uses = (s: Standard, i: Installation) =>
+    s.entries.some(
+      (e) =>
+        e.scope === "global" &&
+        (e.name === item || e.name.startsWith(`${item}/`)) &&
+        s.linked[i.name]?.includes(e.rel_path)
+    );
+  const place = (s: Standard): Place => {
+    const members = installations.filter((i) => uses(s, i));
+    return {
+      key: s.builtin ? "" : stdScope(s.name),
+      label: s.name,
+      kind: s.builtin ? "root" : undefined,
+      std: s,
+      sub: members.length ? `${members.length} linked` : "standard",
+      members,
+      empty:
+        !s.builtin && !s.entries.some((e) => e.scope === "global" && (e.name === item || e.name.startsWith(`${item}/`))),
+    };
+  };
+  const root = standards.find((s) => s.builtin);
+  const alone = installations
+    .filter((i) => i.standalone.includes(item))
+    // two linked to the same non-standard folder are one place
+    .filter((i, n, all) => !i.links[item] || all.findIndex((o) => o.links[item]?.dir === i.links[item]?.dir) === n);
   return [
-    ...places,
-    {
-      key: "",
-      label: "Minecraft folder",
-      kind: "root",
-      sub: inRoot.length ? `${inRoot.length} linked` : rootSub,
-      members: inRoot,
-    },
+    root ? place(root) : { key: "", label: "Shared", kind: "root", sub: "standard", members: [] },
+    ...standards.filter((s) => !s.builtin).map(place),
+    ...alone.map((i) => ({
+      key: i.name,
+      label: i.name,
+      inst: i,
+      sub: [detail(i), i.links[item] ? `from ${i.links[item]!.from}` : "standalone"].filter(Boolean).join(" · "),
+    })),
+    ...installations
+      .filter((i) => !i.standalone.includes(item) && !i.links[item] && !standards.some((s) => uses(s, i)))
+      .map((i) => ({ key: i.name, label: i.name, inst: i, sub: "nothing here yet", empty: true })),
   ];
 }
 
-/**
- * "All", then the shared Minecraft folder with the installations linked to it
- * nested inside, then each other instance of `dir`. `locations` name an
- * instance by one of its installations.
- */
+/** "All", then the bar, keyed by the locations saves and screenshots report. */
 export function sharedPlaces(
   dir: "saves" | "screenshots",
-  locations: string[],
   installations: Installation[],
+  standards: Standard[],
   countOf: (location: string) => number
 ): Place[] {
-  const linked = installations.filter((i) => i.links[dir]?.from === "Shared");
-  const place = (l: string): Place => {
-    const inst = installations.find((i) => i.name === l);
-    const link = inst?.links[dir];
-    const group = link ? installations.filter((o) => o.links[dir]?.dir === link.dir) : [];
-    return group.length > 1
-      ? { key: l, label: link!.from, count: countOf(l), sub: `${group.length} linked`, members: group }
-      : { key: l, label: l, inst, count: countOf(l), sub: link ? `from ${link.from}` : "own folder" };
-  };
+  const places = instancePlaces(dir, installations, standards).map((p) => {
+    const key = p.key || "Shared";
+    return { ...p, key, count: countOf(key) };
+  });
   return [
-    { key: "all", label: "All", kind: "all", count: locations.reduce((n, l) => n + countOf(l), 0) },
-    {
-      key: "Shared",
-      label: "Shared",
-      kind: "root",
-      count: countOf("Shared"),
-      sub: linked.length ? `${linked.length} linked` : "Minecraft folder",
-      members: linked,
-    },
-    ...locations.filter((l) => l !== "Shared").map(place),
+    { key: "all", label: "All", kind: "all", count: places.reduce((n, p) => n + p.count, 0) },
+    ...places,
   ];
 }

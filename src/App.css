@@ -2864,6 +2864,20 @@ kbd {
   transition: border-color 0.12s, box-shadow 0.12s;
 }
 
+.place.place-add {
+  align-self: stretch;
+  justify-content: center;
+  width: 44px;
+  padding: 0;
+  color: var(--muted);
+  background: transparent;
+  border-style: dashed;
+}
+
+.place.place-add:hover {
+  color: var(--ink);
+}
+
 .place:hover {
   border-color: var(--faint);
 }
