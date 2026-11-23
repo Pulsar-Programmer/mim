@@ -5,6 +5,35 @@ use std::fs;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+/// Shadows the `trash` crate so every call skips Finder, which plays its sound
+/// once per delete. Trade-off: Finder's "Put Back" may be missing; dragging out still works.
+mod trash {
+    use std::path::Path;
+
+    fn context() -> ::trash::TrashContext {
+        #[allow(unused_mut)]
+        let mut c = ::trash::TrashContext::new();
+        #[cfg(target_os = "macos")]
+        {
+            use ::trash::macos::{DeleteMethod, TrashContextExtMacos};
+            c.set_delete_method(DeleteMethod::NsFileManager);
+        }
+        c
+    }
+
+    pub fn delete<T: AsRef<Path>>(path: T) -> Result<(), ::trash::Error> {
+        context().delete(path)
+    }
+
+    pub fn delete_all<I, T>(paths: I) -> Result<(), ::trash::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: AsRef<Path>,
+    {
+        context().delete_all(paths)
+    }
+}
+
 type CmdResult<T> = Result<T, String>;
 
 fn err<E: std::fmt::Display>(e: E) -> String {
