@@ -3606,12 +3606,17 @@ kbd {
   white-space: nowrap;
 }
 .sf-who.none { color: var(--faint); }
+/* the × keeps its space, so hovering doesn't shift the row */
+.sf-row .std-file-x,
+.sf-folder-row .std-file-x { flex-shrink: 0; width: 12px; }
 .sf-row:hover .std-file-x,
-.sf-row .std-file-x:focus-visible { width: 12px; opacity: 1; }
-.sf-folder-row { display: flex; align-items: center; }
-.sf-folder-row .sf-folder { flex: 1; min-width: 0; }
+.sf-row .std-file-x:focus-visible,
 .sf-folder-row:hover .std-file-x,
-.sf-folder-row .std-file-x:focus-visible { flex-shrink: 0; width: 12px; margin-right: 12px; opacity: 1; }
+.sf-folder-row .std-file-x:focus-visible { opacity: 1; }
+.sf-folder-row { display: flex; align-items: center; background: var(--bg); transition: background 0.1s; }
+.sf-folder-row:hover { background: var(--panel); }
+.sf-folder-row .sf-folder { flex: 1; min-width: 0; padding-right: 9px; background: none; }
+.sf-folder-row .std-file-x { margin-right: 12px; }
 .sf-error { margin: 0; color: var(--danger); font-size: 12.5px; }
 
 @media (max-width: 680px) {
