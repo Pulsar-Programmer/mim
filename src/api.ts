@@ -247,6 +247,7 @@ export interface ServerList {
   exists: boolean;
   servers: Server[];
   backup: Server[];
+  archived: Server[];
 }
 
 export interface Ping {
@@ -497,6 +498,10 @@ export const api = {
   listServers: () => invoke<ServerList[]>("list_servers"),
   writeServers: (installation: string | null, servers: Server[]) =>
     invoke<void>("write_servers", { installation, servers }),
+  setServerArchived: (installation: string | null, server: Server, archived: boolean) =>
+    invoke<void>("set_server_archived", { installation, server, archived }),
+  deleteArchivedServer: (installation: string | null, server: Server) =>
+    invoke<void>("delete_archived_server", { installation, server }),
   restoreServersBackup: (installation: string | null) =>
     invoke<void>("restore_servers_backup", { installation }),
   pingServer: (address: string) => invoke<Ping>("ping_server", { address }),
