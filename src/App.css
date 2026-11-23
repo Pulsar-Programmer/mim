@@ -3683,15 +3683,61 @@ kbd {
   margin: 0 12px 12px;
 }
 
-/* ---- options: groups flow into columns on wide windows ---- */
+/* ---- options: comparing lines both values up in columns ---- */
 
-.opt-groups {
-  columns: 2 460px;
-  column-gap: 28px;
+.opt-groups.comparing .opt-list li {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 14px;
 }
 
-.opt-group {
-  break-inside: avoid;
+.opt-list li.opt-head {
+  min-height: 0;
+  padding-block: 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.opt-head span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.opt-same {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--faint);
+  overflow-wrap: anywhere;
+}
+
+.opt-groups.comparing .chip.differs {
+  justify-self: start;
+  max-width: 100%;
+  font-size: 11px;
+  text-align: left;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.opt-groups.comparing .opt-edit {
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.opt-groups.comparing .opt-edit input.text,
+.opt-groups.comparing .slider {
+  width: 100%;
+}
+
+.opt-groups.comparing .opt-edit input.num {
+  max-width: 100%;
+}
+
+.opt-groups.comparing .slider input {
+  flex: 1;
+  width: auto;
+  min-width: 0;
 }
 
 /* ---- progress (Modrinth imports, Forge installs) ---- */

@@ -451,30 +451,46 @@ export function OptionsView({
                 </p>
               )}
 
-              <div className="opt-groups">
+              <div className={`opt-groups ${comparing ? "comparing" : ""}`}>
                 {grouped.map(([g, ks]) => (
                   <div key={g} className="opt-group">
                     <h3>{g}</h3>
                     <ul className="opt-list">
+                      {comparing && (
+                        <li className="opt-head">
+                          <span>Option</span>
+                          <span title={instanceName(other!)}>{instanceName(other!)}</span>
+                          <span title={source && instanceName(source)}>{source && instanceName(source)}</span>
+                        </li>
+                      )}
                       {ks.map((k) => {
                         const value = edits.get(k) ?? mine.get(k);
                         const t = theirs.get(k);
+                        const useTheirs = !comparing
+                          ? ""
+                          : t === undefined
+                            ? `${instanceName(other!)} doesn't set this`
+                            : `Use ${instanceName(other!)}'s value`;
                         return (
                           <li key={k} className={edits.has(k) ? "dirty" : ""}>
                             <div className="opt-label">
                               <span>{labelOf(k)}</span>
                               <code className="opt-key">{k}</code>
                             </div>
-                            {comparing && !sameValue(value, t) && (
-                              <button
-                                className="chip differs"
-                                disabled={t === undefined}
-                                title={t === undefined ? `${instanceName(other!)} doesn't set this` : `Use ${instanceName(other!)}'s value`}
-                                onClick={() => t !== undefined && set(k)(t)}
-                              >
-                                {instanceName(other!)}: {show(k, t)}
-                              </button>
-                            )}
+                            {comparing &&
+                              (sameValue(value, t) ? (
+                                <span className="opt-same">{show(k, t)}</span>
+                              ) : (
+                                <button
+                                  className="chip differs"
+                                  disabled={t === undefined}
+                                  title={useTheirs}
+                                  aria-label={`${useTheirs}: ${show(k, t)}`}
+                                  onClick={() => t !== undefined && set(k)(t)}
+                                >
+                                  {show(k, t)}
+                                </button>
+                              ))}
                             <div className="opt-edit">
                               {value === undefined ? (
                                 <span className="hint">not set</span>
