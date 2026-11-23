@@ -120,6 +120,8 @@ export function applySettings(s: Settings) {
   if (body && s.fontScope === "everything") root.setProperty("--body", body);
   // ponytail: measured from a Hypixel card's "H"; other glyphs may need their own offset
   if (s.font === "minecraft") root.setProperty("--initial-nudge", "0.074em, -0.0625em");
+  // every Minecraftia glyph sits exactly 0.0625em left of its advance box's center
+  else if (s.font === "minecraftia") root.setProperty("--initial-nudge", "0.0625em, 0");
   else root.removeProperty("--initial-nudge");
   // native webview zoom (like ⌘+), so 100vh layouts still fit the window
   getCurrentWebview().setZoom(s.scale).catch(() => {});
