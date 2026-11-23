@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { CSSProperties, useEffect } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { api, Profile, ProfilesOverview, timeAgo } from "./api";
 import { useCached, useConfirm } from "./hooks";
@@ -33,6 +33,27 @@ function issueOf(p: Profile): string | null {
   if (p.outside) return "Its game folder is outside installations/. Move it to keep everything together.";
   if (p.shares_root && p.kind === "custom") return "It shares the main Minecraft folder, so its mods and saves mix with others.";
   return null;
+}
+
+const customImage = (icon?: string | null) => (icon?.startsWith("data:image/") ? icon : null);
+
+/** A steady color per profile for ones without their own image. */
+function hueOf(name: string): CSSProperties {
+  let h = 0;
+  for (const c of name) h = (h * 31 + c.charCodeAt(0)) % 360;
+  return { "--pf-hue": h } as CSSProperties;
+}
+
+function ProfileArt({ name, icon, presets }: { name: string; icon?: string | null; presets: Record<string, string> }) {
+  const custom = customImage(icon);
+  const src = custom ?? (icon ? presets[icon] : undefined);
+  return src ? (
+    <img className={`pf-art-img${custom ? "" : " block"}`} src={src} alt="" />
+  ) : (
+    <span className="pf-art-letter" style={hueOf(name)} aria-hidden="true">
+      {name.trim().charAt(0).toUpperCase() || "?"}
+    </span>
+  );
 }
 
 export function ProfilesView({
@@ -75,8 +96,22 @@ export function ProfilesView({
     });
   }
 
+  async function pickImage(p: Profile) {
+    const path = await openDialog({
+      title: `Image for ${p.name}`,
+      multiple: false,
+      filters: [{ name: "Image", extensions: ["png", "jpg", "jpeg", "webp"] }],
+    });
+    if (typeof path !== "string") return;
+    run(async () => {
+      await api.setProfileIcon(p.id, path);
+      return `Updated the image for ${p.name}`;
+    });
+  }
+
   const profiles = data?.profiles ?? [];
   const archived = data?.archived ?? [];
+  const presets = data?.preset_icons ?? {};
   const attention = profiles.filter(issueOf);
   const ready = profiles.filter((p) => !issueOf(p));
 
@@ -84,33 +119,68 @@ export function ProfilesView({
     const issue = issueOf(p);
     const isArmed = armed === `archive:${p.id}`;
     const version = versionLabel(p.version_id ?? (p.kind === "custom" ? null : p.kind));
+    const custom = customImage(p.icon);
+    const banner = custom ?? (p.icon ? presets[p.icon] : undefined);
     return (
-      <li key={p.id} className={`pf-row${issue ? " has-issue" : ""}`}>
-        <div className="pf-main">
-          <div className="pf-title">
-            <span className="pf-name">{p.name}</span>
-            {version && <span className="pf-version" title={p.version_id ?? undefined}>{version}</span>}
-          </div>
-          <div className="pf-meta">
-            <span>{playedLabel(p.last_used)}</span>
-            {p.missing ? (
-              <span className="pf-folder gone" title={p.game_dir}>{folderLabel(p)}</span>
-            ) : (
+      <li key={p.id} className={`pf-card${issue ? " has-issue" : ""}`} style={hueOf(p.name)}>
+        <div className="pf-banner" aria-hidden="true">
+          {banner && <img src={banner} alt="" />}
+        </div>
+        <div className="pf-head">
+          <div className="pf-art-wrap">
+            <button
+              className="pf-art"
+              disabled={locked}
+              title={lockedTitle ?? "Change image"}
+              aria-label={`Change image for ${p.name}`}
+              onClick={() => pickImage(p)}
+            >
+              <ProfileArt name={p.name} icon={p.icon} presets={presets} />
+              <span className="pf-art-hint">Change</span>
+            </button>
+            {custom && (
               <button
-                className="pf-folder"
-                title={`Open ${p.game_dir}`}
-                onClick={() => api.revealPath(p.game_dir, false)}
+                className="pf-art-clear"
+                disabled={locked}
+                title={lockedTitle ?? "Remove image"}
+                aria-label={`Remove image from ${p.name}`}
+                onClick={() =>
+                  run(async () => {
+                    await api.setProfileIcon(p.id, null);
+                    return `Removed the image from ${p.name}`;
+                  })
+                }
               >
-                {folderLabel(p)}
+                ×
               </button>
             )}
           </div>
-          {isArmed ? (
-            <p className="pf-note">Removes it from the launcher and stores its unshared files. You can restore it anytime.</p>
-          ) : (
-            issue && <p className="pf-note warn">{issue}</p>
-          )}
+          <div className="pf-main">
+            <div className="pf-title">
+              <span className="pf-name">{p.name}</span>
+              {version && <span className="pf-version" title={p.version_id ?? undefined}>{version}</span>}
+            </div>
+            <div className="pf-meta">
+              <span>{playedLabel(p.last_used)}</span>
+              {p.missing ? (
+                <span className="pf-folder gone" title={p.game_dir}>{folderLabel(p)}</span>
+              ) : (
+                <button
+                  className="pf-folder"
+                  title={`Open ${p.game_dir}`}
+                  onClick={() => api.revealPath(p.game_dir, false)}
+                >
+                  {folderLabel(p)}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
+        {isArmed ? (
+          <p className="pf-note">Removes it from the launcher and stores its unshared files. You can restore it anytime.</p>
+        ) : (
+          issue && <p className="pf-note warn">{issue}</p>
+        )}
         <div className="pf-actions">
           {p.outside && !p.missing && (
             <button
@@ -187,14 +257,14 @@ export function ProfilesView({
       {attention.length > 0 && (
         <section className="pf-section">
           <h2>Needs attention</h2>
-          <ul className="pf-list">{attention.map(row)}</ul>
+          <ul className="pf-grid">{attention.map(row)}</ul>
         </section>
       )}
 
       {ready.length > 0 && (
         <section className="pf-section">
           {attention.length > 0 && <h2>Ready to play</h2>}
-          <ul className="pf-list">{ready.map(row)}</ul>
+          <ul className="pf-grid">{ready.map(row)}</ul>
         </section>
       )}
 
@@ -206,37 +276,60 @@ export function ProfilesView({
             Archived <span>{archived.length}</span>
           </summary>
           <ul className="pf-list">
-            {archived.map((a) => (
-              <li key={a.id} className="pf-row">
-                <div className="pf-main">
-                  <div className="pf-title">
-                    <span className="pf-name">{a.profile.name || a.id}</span>
-                    {a.profile.lastVersionId && (
-                      <span className="pf-version">{versionLabel(a.profile.lastVersionId)}</span>
+            {archived.map((a) => {
+              const name = a.profile.name || a.id;
+              const deleting = armed === `delete:${a.id}`;
+              return (
+                <li key={a.id} className="pf-row">
+                  <span className="pf-art small"><ProfileArt name={name} icon={a.profile.icon} presets={presets} /></span>
+                  <div className="pf-main">
+                    <div className="pf-title">
+                      <span className="pf-name">{name}</span>
+                      {a.profile.lastVersionId && (
+                        <span className="pf-version">{versionLabel(a.profile.lastVersionId)}</span>
+                      )}
+                    </div>
+                    <div className="pf-meta">
+                      <span>Archived {timeAgo(a.archived)}</span>
+                      <span title={a.game_dir}>{a.moved_dir ? "Folder stored in archive" : "Folder left in place"}</span>
+                    </div>
+                    {deleting && (
+                      <p className="pf-note">
+                        {a.moved_dir
+                          ? "Moves the profile and its stored game folder to the Trash."
+                          : "Moves the stored profile to the Trash. Its shared folder stays."}
+                      </p>
                     )}
                   </div>
-                  <div className="pf-meta">
-                    <span>Archived {timeAgo(a.archived)}</span>
-                    <span title={a.game_dir}>{a.moved_dir ? "Folder stored in archive" : "Folder left in place"}</span>
+                  <div className="pf-actions">
+                    <button
+                      className="pf-btn"
+                      disabled={locked}
+                      title={lockedTitle}
+                      onClick={() =>
+                        run(async () => {
+                          await api.restoreProfile(a.id);
+                          return `Restored ${name}`;
+                        })
+                      }
+                    >
+                      Restore
+                    </button>
+                    <button
+                      className={`pf-btn danger${deleting ? " armed" : ""}`}
+                      onClick={() =>
+                        confirm(`delete:${a.id}`, async () => {
+                          await api.deleteArchivedProfile(a.id);
+                          return `Moved ${name} to Trash`;
+                        })
+                      }
+                    >
+                      {deleting ? "Confirm delete" : "Delete"}
+                    </button>
                   </div>
-                </div>
-                <div className="pf-actions">
-                  <button
-                    className="pf-btn"
-                    disabled={locked}
-                    title={lockedTitle}
-                    onClick={() =>
-                      run(async () => {
-                        await api.restoreProfile(a.id);
-                        return `Restored ${a.profile.name || a.id}`;
-                      })
-                    }
-                  >
-                    Restore
-                  </button>
-                </div>
-              </li>
-            ))}
+                </li>
+              );
+            })}
           </ul>
         </details>
       )}

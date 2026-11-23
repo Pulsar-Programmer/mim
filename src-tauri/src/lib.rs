@@ -2046,18 +2046,24 @@ fn adopt_file(standard: String, source: String, dest: String) -> CmdResult<()> {
 // Custom images
 // ---------------------------------------------------------------------------
 
+/// A 128px square PNG, the size the launcher shows profile icons at.
+fn icon_png(image_path: &Path) -> CmdResult<Vec<u8>> {
+    let img = image::open(image_path).map_err(err)?;
+    let thumb = img.resize_to_fill(128, 128, image::imageops::FilterType::Lanczos3);
+    let mut buf = Vec::new();
+    thumb
+        .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+        .map_err(err)?;
+    Ok(buf)
+}
+
 #[tauri::command(async)]
 fn set_custom_icon(name: String, image_path: String) -> CmdResult<String> {
     let inst = installations_dir().join(&name);
     if !inst.is_dir() {
         return Err(format!("no installation named \"{name}\""));
     }
-    let img = image::open(&image_path).map_err(err)?;
-    let thumb = img.resize_to_fill(128, 128, image::imageops::FilterType::Lanczos3);
-    let mut buf = Vec::new();
-    thumb
-        .write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
-        .map_err(err)?;
+    let buf = icon_png(Path::new(&image_path))?;
 
     let mim = inst.join(".mim");
     fs::create_dir_all(&mim).map_err(err)?;
@@ -4708,6 +4714,8 @@ struct Profile {
     /// not under installations/ (and not the Minecraft folder itself)
     outside: bool,
     missing: bool,
+    /// a launcher preset name ("Grass") or a data: URL
+    icon: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -4726,6 +4734,8 @@ struct ArchivedProfile {
 struct ProfilesOverview {
     profiles: Vec<Profile>,
     archived: Vec<ArchivedProfile>,
+    /// launcher preset name -> its block texture from an installed version
+    preset_icons: std::collections::HashMap<String, String>,
     launcher_running: bool,
     backups: String,
 }
@@ -4768,7 +4778,7 @@ fn version_parent(mc: &Path, vid: &str) -> Option<String> {
 }
 
 fn archive_dir(mc: &Path, id: &str) -> CmdResult<PathBuf> {
-    if !valid_name(id) {
+    if !valid_name(id) || id.contains('\\') {
         return Err("invalid profile id".into());
     }
     Ok(mc.join(".mim/archive").join(id))
@@ -4792,6 +4802,7 @@ fn list_profiles_in(mc: &Path) -> CmdResult<ProfilesOverview> {
                 kind: s("type").unwrap_or_else(|| "custom".into()),
                 version_id: s("lastVersionId"),
                 last_used: s("lastUsed"),
+                icon: s("icon"),
                 shares_root: dir == root,
                 outside: dir != root && !dir.starts_with(&insts),
                 missing: !dir.is_dir(),
@@ -4810,8 +4821,14 @@ fn list_profiles_in(mc: &Path) -> CmdResult<ProfilesOverview> {
         })
         .unwrap_or_default();
     archived.sort_by(|a, b| b.archived.cmp(&a.archived));
+    let presets: Vec<String> = profiles
+        .iter()
+        .filter_map(|p| p.icon.clone())
+        .chain(archived.iter().filter_map(|a| a.profile["icon"].as_str().map(String::from)))
+        .collect();
 
     Ok(ProfilesOverview {
+        preset_icons: preset_icons_in(mc, &presets),
         profiles,
         archived,
         launcher_running: false,
@@ -4956,6 +4973,183 @@ fn restore_profile_in(mc: &Path, id: &str) -> CmdResult<()> {
     Ok(())
 }
 
+/// The block texture for a launcher preset, with the color the game would tint
+/// it. Presets with no single block face (Chest, skulls) have none.
+fn preset_texture(preset: &str) -> Option<(String, Option<[u8; 3]>)> {
+    const SAME: &[&str] = &[
+        "Bedrock", "Bookshelf", "Carved_Pumpkin", "Clay", "Coal_Block", "Coal_Ore", "Cobblestone",
+        "Diamond_Block", "Diamond_Ore", "Dirt", "Emerald_Block", "Emerald_Ore", "End_Stone", "Glass",
+        "Glowstone", "Gold_Block", "Gold_Ore", "Gravel", "Iron_Block", "Iron_Ore", "Lapis_Ore",
+        "Netherrack", "Obsidian", "Red_Sand", "Red_Sandstone", "Redstone_Block", "Redstone_Ore",
+        "Sand", "Sandstone", "Snow", "Soul_Sand", "Stone",
+    ];
+    let wood = |w: &str| match w {
+        "Acacia" | "Birch" | "Jungle" | "Oak" | "Spruce" => Some(w.to_lowercase()),
+        "DarkOak" => Some("dark_oak".to_string()),
+        _ => None,
+    };
+    if SAME.contains(&preset) {
+        return Some((preset.to_lowercase(), None));
+    }
+    if let Some(w) = preset.strip_prefix("Log_") {
+        return Some((format!("{}_log", wood(w)?), None));
+    }
+    if let Some(w) = preset.strip_prefix("Planks_") {
+        return Some((format!("{}_planks", wood(w)?), None));
+    }
+    if let Some(c) = preset.strip_prefix("Glazed_Terracotta_") {
+        if c.is_empty() || !c.chars().all(|ch| ch.is_ascii_alphabetic() || ch == '_') {
+            return None;
+        }
+        return Some((format!("{}_glazed_terracotta", c.to_lowercase()), None));
+    }
+    let (tex, tint) = match preset {
+        "Brick" => ("bricks", None),
+        "Cake" => ("cake_side", None),
+        "Crafting_Table" => ("crafting_table_front", None),
+        "Dirt_Podzol" => ("podzol_side", None),
+        "Dirt_Snow" => ("grass_block_snow", None),
+        "Enchanting_Table" => ("enchanting_table_top", None),
+        "Farmland" => ("farmland_moist", None),
+        "Furnace" => ("furnace_front", None),
+        "Furnace_On" => ("furnace_front_on", None),
+        "Grass" => ("grass_block_side", None),
+        "Hardened_Clay" => ("terracotta", None),
+        "Ice_Packed" => ("packed_ice", None),
+        "Leaves_Birch" => ("birch_leaves", Some([0x80, 0xA7, 0x55])),
+        "Leaves_Jungle" => ("jungle_leaves", Some([0x30, 0xBB, 0x0B])),
+        "Leaves_Oak" => ("oak_leaves", Some([0x48, 0xB5, 0x18])),
+        "Leaves_Spruce" => ("spruce_leaves", Some([0x61, 0x99, 0x61])),
+        "Lectern_Book" => ("lectern_front", None),
+        "Mycelium" => ("mycelium_side", None),
+        "Nether_Brick" => ("nether_bricks", None),
+        "Quartz_Ore" => ("nether_quartz_ore", None),
+        "Stone_Andesite" => ("andesite", None),
+        "Stone_Diorite" => ("diorite", None),
+        "Stone_Granite" => ("granite", None),
+        "TNT" => ("tnt_side", None),
+        "Water" => ("water_still", Some([0x3F, 0x76, 0xE4])),
+        "Wool" => ("white_wool", None),
+        _ => return None,
+    };
+    Some((tex.to_string(), tint))
+}
+
+/// One frame of a block texture; animated ones are vertical strips.
+fn jar_texture(jar: &mut zip::ZipArchive<fs::File>, tex: &str, tint: Option<[u8; 3]>) -> Option<image::RgbaImage> {
+    let mut bytes = vec![];
+    {
+        let f = jar.by_name(&format!("assets/minecraft/textures/block/{tex}.png")).ok()?;
+        std::io::Read::read_to_end(&mut std::io::Read::take(f, 4 << 20), &mut bytes).ok()?;
+    }
+    let img = image::load_from_memory(&bytes).ok()?;
+    let side = img.width().min(img.height());
+    let mut img = img.crop_imm(0, 0, side, side).to_rgba8();
+    if let Some(t) = tint {
+        for px in img.pixels_mut() {
+            for i in 0..3 {
+                px[i] = (px[i] as u16 * t[i] as u16 / 255) as u8;
+            }
+        }
+    }
+    Some(img)
+}
+
+/// The newest installed version that holds vanilla block textures. Modded
+/// version folders often have no jar, or one without them.
+fn textures_jar(mc: &Path) -> Option<zip::ZipArchive<fs::File>> {
+    let mut jars: Vec<(std::time::SystemTime, PathBuf)> = fs::read_dir(mc.join("versions"))
+        .ok()?
+        .flatten()
+        .map(|e| e.path().join(format!("{}.jar", e.file_name().to_string_lossy())))
+        .filter_map(|j| Some((fs::metadata(&j).ok()?.modified().ok()?, j)))
+        .collect();
+    jars.sort_by(|a, b| b.0.cmp(&a.0));
+    jars.into_iter().find_map(|(_, j)| {
+        let mut zip = zip::ZipArchive::new(fs::File::open(j).ok()?).ok()?;
+        zip.by_name("assets/minecraft/textures/block/stone.png").is_ok().then_some(())?;
+        Some(zip)
+    })
+}
+
+/// Textures come from the user's own game files and are cached in .mim, so
+/// the jar is only opened for a preset not seen before.
+fn preset_icons_in(mc: &Path, presets: &[String]) -> std::collections::HashMap<String, String> {
+    let cache = mc.join(".mim/preset-icons");
+    let mut out = std::collections::HashMap::new();
+    let mut jar = None;
+    let mut opened = false;
+    for preset in presets {
+        if out.contains_key(preset) {
+            continue;
+        }
+        let Some((tex, tint)) = preset_texture(preset) else { continue };
+        let file = cache.join(format!("{tex}.png"));
+        if let Ok(b) = fs::read(&file) {
+            out.insert(preset.clone(), data_url_from_png(&b));
+            continue;
+        }
+        if !opened {
+            opened = true;
+            jar = textures_jar(mc);
+        }
+        let Some(zip) = jar.as_mut() else { continue };
+        let Some(mut img) = jar_texture(zip, &tex, tint) else { continue };
+        if tex == "grass_block_side" {
+            // the green edge is a grey overlay the game tints
+            if let Some(top) = jar_texture(zip, "grass_block_side_overlay", Some([0x91, 0xBD, 0x59])) {
+                image::imageops::overlay(&mut img, &top, 0, 0);
+            }
+        }
+        let mut png = vec![];
+        if img.write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png).is_ok() {
+            let _ = fs::create_dir_all(&cache);
+            let _ = fs::write(&file, &png);
+            out.insert(preset.clone(), data_url_from_png(&png));
+        }
+    }
+    out
+}
+
+/// Sets or clears a profile's image. A profile living in installations/ keeps
+/// that installation's card image in step.
+fn set_profile_icon_in(mc: &Path, id: &str, image: Option<&Path>) -> CmdResult<()> {
+    let png = image.map(icon_png).transpose()?;
+    let mut file = read_profiles_in(mc)?;
+    let p = file["profiles"].get_mut(id).filter(|p| p.is_object()).ok_or("no such profile")?;
+    let dir = profile_dir(mc, p);
+    match &png {
+        Some(b) => p["icon"] = json!(data_url_from_png(b)),
+        None => {
+            p.as_object_mut().unwrap().remove("icon");
+        }
+    }
+    write_profiles_in(mc, &file)?;
+    if dir.parent() == Some(canon(&mc.join("installations")).as_path()) && dir.is_dir() {
+        let icon = dir.join(".mim/icon.png");
+        match &png {
+            Some(b) => {
+                fs::create_dir_all(dir.join(".mim")).map_err(err)?;
+                fs::write(icon, b).map_err(err)?;
+            }
+            None => {
+                let _ = fs::remove_file(icon);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Only an archived profile can be deleted. Its stored files go to the Trash;
+/// a shared game folder was never moved into the archive, so it's untouched.
+fn delete_archived_profile_in(mc: &Path, id: &str) -> CmdResult<()> {
+    let arch = archive_dir(mc, id)?;
+    if !arch.join("archive.json").is_file() {
+        return Err("not archived".into());
+    }
+    trash::delete(&arch).map_err(err)
+}
+
 /// The launcher rewrites launcher_profiles.json when it quits, undoing edits.
 fn launcher_running() -> bool {
     std::env::var_os(MC_DIR_ENV).is_none() // a sample folder isn't the launcher's
@@ -5011,6 +5205,18 @@ fn archive_profile(id: String) -> CmdResult<()> {
 fn restore_profile(id: String) -> CmdResult<()> {
     launcher_closed()?;
     restore_profile_in(&mc_dir(), &id)
+}
+
+#[tauri::command(async)]
+fn set_profile_icon(id: String, image_path: Option<String>) -> CmdResult<()> {
+    launcher_closed()?;
+    set_profile_icon_in(&mc_dir(), &id, image_path.as_deref().map(Path::new))
+}
+
+// the archive isn't the launcher's file, so this works while it's open
+#[tauri::command(async)]
+fn delete_archived_profile(id: String) -> CmdResult<()> {
+    delete_archived_profile_in(&mc_dir(), &id)
 }
 
 #[cfg(test)]
@@ -5927,6 +6133,66 @@ mod tests {
     }
 
     #[test]
+    fn presets_use_block_textures_from_a_jar() {
+        let mc = temp_root("preset-icons");
+        fs::create_dir_all(mc.join("versions/1.21.10")).unwrap();
+        fs::create_dir_all(mc.join("versions/fabric")).unwrap(); // no jar, skipped
+        let png = |w, h, c| {
+            let mut b = vec![];
+            image::RgbaImage::from_pixel(w, h, image::Rgba([c, c, c, 255]))
+                .write_to(&mut Cursor::new(&mut b), image::ImageFormat::Png)
+                .unwrap();
+            b
+        };
+        let jar = mc.join("versions/1.21.10/1.21.10.jar");
+        let mut z = zip::ZipWriter::new(fs::File::create(&jar).unwrap());
+        for (tex, data) in [("stone", png(16, 16, 120)), ("oak_leaves", png(16, 16, 255)), ("furnace_front_on", png(16, 48, 80))] {
+            z.start_file(format!("assets/minecraft/textures/block/{tex}.png"), zip::write::SimpleFileOptions::default()).unwrap();
+            std::io::Write::write_all(&mut z, &data).unwrap();
+        }
+        z.finish().unwrap();
+
+        let names = ["Stone", "Leaves_Oak", "Furnace_On", "Chest", "../../evil", "data:image/png;base64,x"].map(String::from);
+        let icons = preset_icons_in(&mc, &names);
+        assert_eq!(icons.len(), 3);
+        let decode = |tex: &str| image::open(mc.join(format!(".mim/preset-icons/{tex}.png"))).unwrap().to_rgba8();
+        assert_eq!(decode("oak_leaves").get_pixel(0, 0).0, [0x48, 0xB5, 0x18, 255]); // tinted
+        assert_eq!(decode("furnace_front_on").dimensions(), (16, 16)); // one animation frame
+
+        // served from the cache once the jar is gone
+        fs::remove_file(&jar).unwrap();
+        assert_eq!(preset_icons_in(&mc, &names).len(), 3);
+        fs::remove_dir_all(&mc).unwrap();
+    }
+
+    #[test]
+    fn profile_icon_and_delete_guard() {
+        let mc = temp_root("profile-icon");
+        let inst = mc.join("installations/Pack");
+        fs::create_dir_all(&inst).unwrap();
+        let file = json!({"profiles": {"p": {"name": "Pack", "gameDir": inst, "icon": "Grass"}}});
+        fs::write(mc.join("launcher_profiles.json"), file.to_string()).unwrap();
+        let src = mc.join("art.png");
+        image::RgbImage::from_pixel(300, 200, image::Rgb([90, 160, 80])).save(&src).unwrap();
+
+        set_profile_icon_in(&mc, "p", Some(&src)).unwrap();
+        let icon = list_profiles_in(&mc).unwrap().profiles[0].icon.clone().unwrap();
+        assert!(icon.starts_with("data:image/png;base64,"));
+        assert_eq!(image::image_dimensions(inst.join(".mim/icon.png")).unwrap(), (128, 128));
+        set_profile_icon_in(&mc, "p", None).unwrap();
+        assert!(list_profiles_in(&mc).unwrap().profiles[0].icon.is_none());
+        assert!(!inst.join(".mim/icon.png").exists());
+        assert!(set_profile_icon_in(&mc, "nope", Some(&src)).is_err());
+
+        // a live profile can't be deleted, nor can a path escape the archive
+        assert!(delete_archived_profile_in(&mc, "p").is_err());
+        assert!(delete_archived_profile_in(&mc, "..").is_err());
+        assert!(delete_archived_profile_in(&mc, "a\\..\\..").is_err());
+        assert!(inst.is_dir());
+        fs::remove_dir_all(&mc).unwrap();
+    }
+
+    #[test]
     fn removing_entries_keeps_or_drops_links() {
         let root = temp_root("remove-entries");
         let (std, a) = (root.join("std"), root.join("a"));
@@ -6263,7 +6529,9 @@ pub fn run() {
             relink_profile,
             move_profile,
             archive_profile,
-            restore_profile
+            restore_profile,
+            set_profile_icon,
+            delete_archived_profile
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
