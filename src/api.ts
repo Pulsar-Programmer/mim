@@ -15,7 +15,15 @@ export async function okToChangeShared(paths: string[], what: string, followLink
   );
 }
 
-export type InstanceItem = "mods" | "resourcepacks" | "saves" | "screenshots" | "options.txt";
+export type InstanceItem =
+  | "mods"
+  | "resourcepacks"
+  | "saves"
+  | "screenshots"
+  | "options.txt"
+  | "servers.dat"
+  | "config"
+  | "logs";
 
 export interface Installation {
   name: string;
@@ -29,6 +37,8 @@ export interface Installation {
   mods_count: number;
   /** which shareable items are links, and to what */
   links: Partial<Record<InstanceItem, { from: string; dir: string }>>;
+  /** what it keeps itself, outside any standard */
+  standalone: InstanceItem[];
   registered: boolean;
   linked: string[];
   unlinked: string[];
@@ -210,7 +220,7 @@ export interface WorldDetails {
 
 export interface OptionsSource {
   label: string;
-  kind: "base" | "installation";
+  kind: "base" | "standard" | "installation";
   path: string;
   exists: boolean;
   /** where it's linked from ("Shared", a standard, "elsewhere"); null: its own */
@@ -234,10 +244,6 @@ export interface ServerList {
   label: string;
   path: string;
   exists: boolean;
-  /** the standard it's linked from, or "Shared" */
-  link: string | null;
-  /** the real file: lists with the same one are one instance */
-  target: string;
   servers: Server[];
   backup: Server[];
 }
@@ -288,11 +294,13 @@ export interface Profile {
   shares_root: boolean;
   outside: boolean;
   missing: boolean;
+  /** a launcher preset name or a data: URL */
+  icon: string | null;
 }
 
 export interface ArchivedProfile {
   id: string;
-  profile: { name?: string; lastVersionId?: string };
+  profile: { name?: string; lastVersionId?: string; icon?: string };
   game_dir: string;
   moved_dir: boolean;
   versions: string[];
@@ -302,6 +310,8 @@ export interface ArchivedProfile {
 export interface ProfilesOverview {
   profiles: Profile[];
   archived: ArchivedProfile[];
+  /** launcher preset name to its block texture */
+  preset_icons: Record<string, string>;
   launcher_running: boolean;
   backups: string;
 }
@@ -500,6 +510,10 @@ export const api = {
   moveProfile: (id: string) => invoke<string>("move_profile", { id }),
   archiveProfile: (id: string) => invoke<void>("archive_profile", { id }),
   restoreProfile: (id: string) => invoke<void>("restore_profile", { id }),
+  /** null puts the launcher's default image back */
+  setProfileIcon: (id: string, imagePath: string | null) =>
+    invoke<void>("set_profile_icon", { id, imagePath }),
+  deleteArchivedProfile: (id: string) => invoke<void>("delete_archived_profile", { id }),
 };
 
 /** Links pasted together, split on spaces, commas or new lines. */

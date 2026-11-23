@@ -25,7 +25,7 @@ import { ModsView } from "./ModsView";
 import { ScreenshotsView } from "./ScreenshotsView";
 import { SettingsView } from "./SettingsView";
 import { ProfilesView } from "./ProfilesView";
-import { PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
+import { instancePlaces, PlaceChip, PlacePicker, StandardAvatar, nameGradient } from "./Places";
 import { ProgressBar, useProgress } from "./Progress";
 import { PacksView } from "./PacksView";
 import { UpdateButton } from "./UpdateButton";
@@ -1650,7 +1650,14 @@ function LogsView({
   notify: (m: string) => void;
   installations: Installation[];
 }) {
-  const [scope, setScope] = useState<string | null>(null);
+  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const places = useMemo(
+    () => instancePlaces("logs", installations, standards),
+    [installations, standards]
+  );
+  const [picked, setPicked] = useState<string>();
+  const section = places.find((p) => p.key === picked || p.members?.some((m) => m.name === picked)) ?? places[0];
+  const scope = section.kind === "root" ? null : section.key;
   const [logs = [], load] = useCached<LogEntry[]>(
     `logs:${scope}`,
     () => api.listLogs(scope),
@@ -1730,13 +1737,10 @@ function LogsView({
       </header>
 
       <PlacePicker
-        places={[
-          { key: "", label: "Minecraft folder", kind: "root", sub: "game & launcher logs" },
-          ...installations.map((i) => ({ key: i.name, label: i.name, inst: i, sub: "game logs" })),
-        ]}
-        value={scope ?? ""}
+        places={places}
+        value={section.key}
         onChange={(k) => {
-          setScope(k || null);
+          setPicked(k);
           setKind("all");
         }}
       />
