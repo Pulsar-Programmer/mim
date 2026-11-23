@@ -2,7 +2,7 @@ import Image from "next/image";
 import type { ReactNode } from "react";
 import { latestVersion, RELEASES } from "../lib/release";
 import { Sprite, type SpriteName } from "./Sprite";
-import { DownloadCta, Inventory, Recipe } from "./widgets";
+import { DownloadCta, Inventory, Recipe, ThemeToggle } from "./widgets";
 
 export const revalidate = 300;
 
@@ -48,6 +48,7 @@ export default async function Page() {
             <a href="#inventory"><Sprite name="chest" size={18} />Features</a>
             <a href="https://github.com/Pulsar-Programmer/mim"><Sprite name="compass" size={18} />GitHub</a>
             <a className="nav-get" href="#download"><Sprite name="pickaxe" size={18} />Download</a>
+            <ThemeToggle />
           </div>
         </nav>
 

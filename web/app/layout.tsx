@@ -14,11 +14,22 @@ export const metadata: Metadata = {
   icons: { icon: "/img/icon.png", apple: "/img/icon.png" },
 };
 
-export const viewport: Viewport = { themeColor: "#17111f" };
+export const viewport: Viewport = {
+  themeColor: [
+    { media: "(prefers-color-scheme: dark)", color: "#17111f" },
+    { media: "(prefers-color-scheme: light)", color: "#fff6ea" },
+  ],
+};
+
+// Runs before first paint so a saved or system theme never flashes the wrong colors.
+const THEME = `(function(){var t;try{t=localStorage.getItem("mim-theme")}catch(e){}if(t!=="light"&&t!=="dark")t=matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";document.documentElement.dataset.theme=t})()`;
 
 export default function RootLayout({ children }: { children: ReactNode }) {
   return (
-    <html lang="en" className={`${body.variable} ${pixel.variable}`}>
+    <html lang="en" className={`${body.variable} ${pixel.variable}`} suppressHydrationWarning>
+      <head>
+        <script dangerouslySetInnerHTML={{ __html: THEME }} />
+      </head>
       <body>{children}</body>
     </html>
   );
