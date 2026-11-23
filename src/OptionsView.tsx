@@ -246,7 +246,7 @@ export function OptionsView({
   );
   const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
   const places = useMemo(
-    () => instancePlaces("options.txt", installations, standards, () => "own options.txt"),
+    () => instancePlaces("options.txt", installations, standards),
     [installations, standards]
   );
   const [selected, setSelected] = useState<string>();

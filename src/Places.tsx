@@ -140,7 +140,9 @@ export function PlacePicker({
         ))}
       {hidden.length > 0 && (
         <button className="place place-add" aria-label="Add an instance" title="Add an instance" onClick={() => setAdding(true)}>
-          +
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden>
+            <path d="M8 2.5v11M2.5 8h11" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+          </svg>
         </button>
       )}
       {adding && (

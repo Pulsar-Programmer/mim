@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
+import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   api,
   formatBytes,
@@ -52,41 +52,32 @@ export function PacksView({
   installations: Installation[];
 }) {
   const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [mode, setMode] = useState<"view" | "edit">("view");
+  // View is grouped by who shares the pack folder, Edit by who shares options.txt,
+  // since that's the file holding the active list
   const places = useMemo(
-    () => instancePlaces("resourcepacks", installations, standards),
-    [installations, standards]
+    () => instancePlaces(mode === "view" ? "resourcepacks" : "options.txt", installations, standards),
+    [mode, installations, standards]
   );
+  const [pickedFolder, setPickedFolder] = useState<string>();
+  const [pickedOptions, setPickedOptions] = useState<string>();
+  const picked = mode === "view" ? pickedFolder : pickedOptions;
   // a picked installation that now uses a standard lands on that standard
-  const [picked, setPicked] = useState<string>();
   const section = places.find((p) => p.key === picked || p.members?.some((m) => m.name === picked)) ?? places[0];
   const scope = section.kind === "root" ? null : section.key;
-  const isStandard = !!section.std && !section.std.builtin;
-  const members = section.members ?? [];
   // a standard's downloads match the newest version using it
   const importTo = section.key || "standards/Shared";
-  const [mode, setMode] = useState<"view" | "edit">("view");
-  // a standard has no active list of its own: read it from an installation using it
-  const listScope = isStandard ? (members[0]?.name ?? scope) : scope;
-  const canToggle = !isStandard || members.length > 0;
-  // one game folder per options.txt: linked ones already share their list
-  const optionsOf = (i: Installation) => {
-    const l = i.links["options.txt"];
-    return l ? (l.from === "Shared" ? "" : l.dir) : i.name;
-  };
-  const writers: (string | null)[] = [
-    ...(scope === null ? [null] : []),
-    ...(members.length ? members : installations.filter((i) => i.name === scope))
-      .filter((m) => scope !== null || optionsOf(m) !== "")
-      .filter((m, n, all) => all.findIndex((o) => optionsOf(o) === optionsOf(m)) === n)
-      .map((m) => m.name),
-  ];
-  const [list, reload] = useCached<PackList>(
-    `packs:${listScope}`,
-    () => api.listPacks(listScope),
+  const [list, reload] = useCached<PackList>(`packs:${scope}`, () => api.listPacks(scope), notify);
+  // an options.txt can turn on packs from any folder its installations use
+  const users = mode === "edit" ? (section.members ?? []).map((m) => m.name) : [];
+  const [userPacks = [], reloadUsers] = useCached<PackInfo[]>(
+    `pack-users:${users.join("\n")}`,
+    async () => (await Promise.all(users.map((u) => api.listPacks(u)))).flatMap((l) => l.packs),
     notify
   );
   const refresh = () => {
     reload();
+    reloadUsers();
     reloadStandards();
   };
   const { armed, confirm } = useConfirm(notify, refresh);
@@ -97,8 +88,11 @@ export function PacksView({
   const [report, setReport] = useState<ImportReport | null>(null);
   const progress = useProgress(busy);
 
-  const packs = list?.packs ?? [];
-  const byFile = useMemo(() => new Map(packs.map((p) => [p.file, p])), [packs]);
+  const byFile = useMemo(
+    () => new Map([...userPacks, ...(list?.packs ?? [])].map((p) => [p.file, p])),
+    [userPacks, list]
+  );
+  const packs = [...byFile.values()].sort((a, b) => a.file.toLowerCase().localeCompare(b.file.toLowerCase()));
   // on, top first — only packs that are still in the folder
   const enabled = (list?.enabled ?? []).filter((f) => byFile.has(f));
   const missing = (list?.enabled ?? []).filter((f) => !byFile.has(f));
@@ -112,23 +106,8 @@ export function PacksView({
 
   async function save(next: string[]) {
     try {
-      // the active list lives in each options.txt, so an instance sets them all
-      const others = writers.filter((w) => w !== listScope);
-      const lists = await Promise.all(others.map((w) => api.listPacks(w)));
-      const mine = (list?.enabled ?? []).join("\n");
-      const differ = others.filter((_, n) => lists[n].enabled.join("\n") !== mine);
-      if (
-        differ.length &&
-        !(await ask(`${differ.join(", ")} ${differ.length === 1 ? "has" : "have"} different active packs. Continuing gives this whole instance the same list.`, {
-          title: "Different active packs",
-          kind: "warning",
-          okLabel: "Continue",
-          cancelLabel: "Cancel",
-        }))
-      )
-        return;
-      for (const w of writers) await api.setPacks(w, next);
-      reload();
+      await api.setPacks(scope, next);
+      refresh();
     } catch (e) {
       notify(String(e));
     }
@@ -194,7 +173,6 @@ export function PacksView({
               </span>
             )}
             {p.is_dir && <span className="chip">folder</span>}
-            {mode === "view" && enabled.includes(p.file) && <span className="chip">active</span>}
           </div>
           {p.description && <p className="mod-desc">{p.description}</p>}
           <div className="mod-meta">
@@ -238,7 +216,7 @@ export function PacksView({
             <span />
           </button>
           )}
-          {mode === "view" && !enabled.includes(p.file) && (
+          {mode === "view" && (
             <button
               className="linklike danger-link"
               onClick={() =>
@@ -265,34 +243,54 @@ export function PacksView({
         <div>
           <h1>Resource Packs</h1>
           <p className="sub">
-            {packs.length} pack{packs.length === 1 ? "" : "s"} · {enabled.length} on
-            {list?.linked && " · shared folder"}
+            {packs.length} pack{packs.length === 1 ? "" : "s"}
+            {mode === "edit" && ` · ${enabled.length} on`}
+            {mode === "view" && list?.linked && " · shared folder"}
           </p>
         </div>
-        <div className="row-inline">
-          {list && (
-            <button className="btn" onClick={() => api.revealPath(list.dir, false)}>
-              Open Folder
+        {mode === "view" && (
+          <div className="row-inline">
+            {list && !section.empty && (
+              <button className="btn" onClick={() => api.revealPath(list.dir, false)}>
+                Open Folder
+              </button>
+            )}
+            <button className="btn primary" onClick={add}>
+              + Add Packs
             </button>
-          )}
-          <button className="btn primary" onClick={add}>
-            + Add Packs
-          </button>
-        </div>
+          </div>
+        )}
       </header>
 
       <p className="hint wide">
-        Which packs are on, and their order, lives in each game folder's{" "}
-        <code>options.txt</code>
-        <span className="more"> — changing them here updates every installation using this standard</span>.
-        Close Minecraft first, or it saves its own list over yours.
+        {mode === "view" ? (
+          "The packs in each shared folder."
+        ) : (
+          <>
+            Which packs are on, and their order, lives in <code>options.txt</code>, so these instances
+            follow who shares it. Close Minecraft first, or it saves its own list over yours.
+          </>
+        )}
       </p>
 
-      <PlacePicker places={places} value={section.key} onChange={setPicked} />
+      <div className="segmented kinds" role="tablist" aria-label="Resource pack sections">
+        <button role="tab" aria-selected={mode === "view"} className={mode === "view" ? "active" : ""} onClick={() => setMode("view")}>
+          View
+        </button>
+        <button role="tab" aria-selected={mode === "edit"} className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")}>
+          Edit active
+        </button>
+      </div>
+
+      <PlacePicker
+        places={places}
+        value={section.key}
+        onChange={mode === "view" ? setPickedFolder : setPickedOptions}
+      />
 
       <div className="options-layout">
         <section className="options-editor">
-          {importTo && (
+          {mode === "view" && (
             <form
               className="options-toolbar import-row"
               onSubmit={(e) => {
@@ -321,19 +319,7 @@ export function PacksView({
             </p>
           )}
 
-          <div className="segmented kinds" role="tablist" aria-label="Resource pack sections">
-            <button role="tab" aria-selected={mode === "view"} className={mode === "view" ? "active" : ""} onClick={() => setMode("view")}>
-              View
-            </button>
-            <button role="tab" aria-selected={mode === "edit"} className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")}>
-              Edit active
-            </button>
-          </div>
-
-          {mode === "edit" && !canToggle && (
-            <div className="empty">No installation uses this standard yet, so there's no active list to edit.</div>
-          )}
-          {mode === "edit" && canToggle && (
+          {mode === "edit" && (
             <>
               <h3 className="pack-heading">Active</h3>
               {enabled.length > 0 ? (
@@ -353,38 +339,38 @@ export function PacksView({
             </>
           )}
 
-          {(mode === "view" || canToggle) && (
-            <div className="options-toolbar">
-              <h3 className="pack-heading">{mode === "view" ? "Packs" : "Available"}</h3>
-              <input
-                className="search"
-                placeholder="Search packs…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-              <select
-                className="sort"
-                value={sort}
-                onChange={(e) => setSort(e.target.value as typeof sort)}
-                title="Sort"
-              >
-                <option value="name">A–Z</option>
-                <option value="newest">Newest</option>
-                <option value="size">Largest</option>
-              </select>
-            </div>
-          )}
-          {mode === "view" && <ul className="mod-list">{matching.map((p) => row(p, null))}</ul>}
-          {mode === "edit" && canToggle && <ul className="mod-list">{off.map((p) => row(p, null))}</ul>}
-          {packs.length === 0 && (
-            <div className="empty">
-              No resource packs here yet.{" "}
-              <button className="linklike" onClick={add}>
-                Add some
-              </button>
-              .
-            </div>
-          )}
+          <div className="options-toolbar">
+            <h3 className="pack-heading">{mode === "view" ? "Packs" : "Available"}</h3>
+            <input
+              className="search"
+              placeholder="Search packs…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+            <select
+              className="sort"
+              value={sort}
+              onChange={(e) => setSort(e.target.value as typeof sort)}
+              title="Sort"
+            >
+              <option value="name">A–Z</option>
+              <option value="newest">Newest</option>
+              <option value="size">Largest</option>
+            </select>
+          </div>
+          <ul className="mod-list">{(mode === "view" ? matching : off).map((p) => row(p, null))}</ul>
+          {packs.length === 0 &&
+            (mode === "view" ? (
+              <div className="empty">
+                No resource packs here yet.{" "}
+                <button className="linklike" onClick={add}>
+                  Add some
+                </button>
+                .
+              </div>
+            ) : (
+              <div className="empty">No packs available here. Add some under View.</div>
+            ))}
           {packs.length > 0 && matching.length === 0 && <div className="empty">Nothing matches.</div>}
         </section>
       </div>

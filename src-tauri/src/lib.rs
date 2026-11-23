@@ -2217,7 +2217,7 @@ fn list_packs(installation: Option<String>) -> CmdResult<PackList> {
 /// "vanilla" and mod-provided ones stay underneath, as Minecraft expects.
 #[tauri::command(async)]
 fn set_packs(installation: Option<String>, enabled: Vec<String>) -> CmdResult<()> {
-    set_packs_in(&game_dir(installation.as_deref())?, &enabled)
+    set_packs_in(&scope_dir(installation.as_deref())?, &enabled)
 }
 
 fn set_packs_in(game: &Path, enabled: &[String]) -> CmdResult<()> {
