@@ -1660,9 +1660,32 @@ fn shared_without(items: &[String], gone: &[String], listed: &[String]) -> Vec<S
     out
 }
 
+/// Swaps a folder link for a real folder of links to what's inside it, so one
+/// item in it can become a real copy while the rest stay linked.
+fn expand_link(link: &Path) -> std::io::Result<()> {
+    let real = fs::canonicalize(link)?;
+    let name = link.file_name().unwrap_or_default().to_string_lossy();
+    let staged = link.with_file_name(format!(".{name}.mim-expand"));
+    let built = fs::create_dir(&staged).and_then(|_| {
+        fs::read_dir(&real)?.try_for_each(|e| {
+            let e = e?;
+            symlink(e.path(), staged.join(e.file_name()))
+        })
+    });
+    if let Err(e) = built {
+        let _ = fs::remove_dir_all(&staged); // only links; doesn't follow them
+        return Err(e);
+    }
+    remove_link(link)?;
+    fs::rename(&staged, link).inspect_err(|_| {
+        let _ = symlink(&real, link);
+        let _ = fs::remove_dir_all(&staged);
+    })
+}
+
 /// Removes every installation's links to these entries; with `keep`, each
-/// becomes a real copy. An entry seen through a whole linked folder has no
-/// link of its own: it just follows the folder, so it can't keep a copy.
+/// becomes a real copy. An entry seen through a whole linked folder just
+/// follows that folder, unless it's keeping a copy: then the folder opens up.
 fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool) -> CmdResult<()> {
     let mut links = vec![];
     for i in insts {
@@ -1671,12 +1694,16 @@ fn free_entries(insts: &[PathBuf], pairs: &[(PathBuf, String)], keep: bool) -> C
             if state.state != "linked" {
                 continue;
             }
-            if link == i.join(dest) {
-                links.push(link);
-            } else if keep {
-                let inst = i.file_name().unwrap_or_default().to_string_lossy();
-                return Err(format!("{inst} has {dest} through a linked folder, so it can't keep a copy — choose Delete there too"));
+            let item = i.join(dest);
+            if link != item {
+                if !keep {
+                    continue;
+                }
+                while let Some(folder) = linked_ancestor(i, &item) {
+                    expand_link(&folder).map_err(err)?;
+                }
             }
+            links.push(item);
         }
     }
     detach(&links, keep)
@@ -4198,6 +4225,7 @@ async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: S
 
 async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
+    let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
     let mut report = ImportReport::default();
     let mut titles = vec![];
     let mut queue = vec![];
@@ -4282,8 +4310,31 @@ async fn update_mods(app: tauri::AppHandle, installation: String) -> CmdResult<I
     update_in(&installation, &Progress::new(Some(app))).await
 }
 
+/// Who uses this game folder's real mods folder, and on what version.
+fn mods_sharing(dir: &Path) -> Vec<(String, String)> {
+    let real = canon(&dir.join("mods"));
+    installation_names()
+        .into_iter()
+        .filter(|n| canon(&installations_dir().join(n).join("mods")) == real)
+        .filter_map(|n| inst_target(&n).ok().map(|(_, g, l)| (g, l)))
+        .collect()
+}
+
+/// The version a shared mods folder gets builds for: its newest modded one.
+/// Vanilla members never load mods. On a tie, `game` and `loader` win.
+fn newest_version(game: String, loader: String, sharing: Vec<(String, String)>) -> (String, String) {
+    let key = |g: &str| -> Vec<u32> { g.split(['.', '-']).map_while(|n| n.parse().ok()).collect() };
+    sharing
+        .into_iter()
+        .chain(std::iter::once((game.clone(), loader.clone())))
+        .filter(|(_, l)| l != "vanilla")
+        .max_by_key(|(g, _)| key(g))
+        .unwrap_or((game, loader))
+}
+
 async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
+    let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
     p.say("Checking for updates");
     let mods = dir.join("mods");
     let current = jar_hashes(&mods, false);
@@ -4390,16 +4441,6 @@ async fn loader_games(loader: &str) -> CmdResult<Option<std::collections::HashSe
     Ok(Some(games.into_iter().collect()))
 }
 
-/// The mods folder, unless it's linked: upgrading it would change every
-/// installation sharing it.
-fn own_mods(dir: &Path) -> CmdResult<PathBuf> {
-    let mods = dir.join("mods");
-    if mods.is_symlink() {
-        return Err("This installation's mods folder is linked from somewhere else — unlink it before upgrading".into());
-    }
-    Ok(mods)
-}
-
 fn file_name(p: &Path) -> String {
     p.file_name().unwrap_or_default().to_string_lossy().into()
 }
@@ -4414,7 +4455,7 @@ async fn scan_upgrade(app: tauri::AppHandle, installation: String) -> CmdResult<
 async fn scan_upgrade_in(installation: &str, p: &Progress) -> CmdResult<UpgradeScan> {
     let (dir, game, loader) = inst_target(installation)?;
     p.say("Reading mods");
-    let current = jar_hashes(&own_mods(&dir)?, false);
+    let current = jar_hashes(&dir.join("mods"), false);
     let hashes: Vec<String> = current.iter().map(|(h, _)| h.clone()).collect();
     let known = if hashes.is_empty() {
         json!({})
@@ -4484,7 +4525,7 @@ async fn upgrade_installation(
 async fn upgrade_in(installation: &str, game: &str, remove: &[String], p: &Progress) -> CmdResult<ImportReport> {
     launcher_closed()?;
     let (dir, _, loader) = inst_target(installation)?;
-    let mods = own_mods(&dir)?;
+    let mods = dir.join("mods"); // through a link, this upgrades the shared jars
     let current = jar_hashes(&mods, false);
     let hashes: Vec<String> = current.iter().map(|(h, _)| h.clone()).collect();
     p.say(format!("Checking mods for {game}"));
@@ -5869,8 +5910,13 @@ mod tests {
         // a file seen through a whole linked folder just follows that folder
         free_entries(&[a.clone()], &[inner.clone()], false).unwrap();
         assert!(a.join("config").is_symlink());
-        assert!(free_entries(&[a.clone()], &[opt.clone(), inner], true).is_err());
-        assert!(a.join("config").is_symlink() && a.join("options.txt").is_symlink());
+        // leaving a copy of it: that file turns real, the rest stay linked
+        fs::write(std.join("config/y.json"), "y").unwrap();
+        free_entries(&[a.clone()], &[inner], true).unwrap();
+        assert!(!a.join("config").is_symlink() && !a.join("config/x.json").is_symlink());
+        assert_eq!(fs::read_to_string(a.join("config/x.json")).unwrap(), "x");
+        assert!(links_to(&a.join("config/y.json"), &std.join("config/y.json")));
+        assert!(!a.join(".config.mim-expand").exists());
 
         free_entries(&[a.clone()], &[opt.clone()], false).unwrap();
         assert!(a.join("options.txt").symlink_metadata().is_err());
@@ -5928,6 +5974,20 @@ mod tests {
         assert!(a.join("x.jar").exists() && std.join("x.jar").is_file() && b.join("x.jar").exists());
         assert!(entry_inside(&root, "/etc/hosts").is_err());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn shared_mods_follow_the_newest_version() {
+        let v = |g: &str, l: &str| (g.to_string(), l.to_string());
+        let newest = |own: (String, String), all: &[(String, String)]| newest_version(own.0, own.1, all.to_vec());
+        // numbers, not text: 1.21.10 is newer than 1.21.4
+        let group = [v("1.21.4", "fabric"), v("1.21.10", "fabric")];
+        assert_eq!(newest(v("1.21.4", "fabric"), &group), v("1.21.10", "fabric"));
+        // vanilla never loads mods, even on a newer version
+        assert_eq!(newest(v("1.21.11", "vanilla"), &[v("1.21.11", "vanilla"), v("1.21.4", "fabric")]), v("1.21.4", "fabric"));
+        assert_eq!(newest(v("1.21.4", "vanilla"), &[v("1.21.4", "vanilla")]), v("1.21.4", "vanilla"));
+        // same version on two loaders: this installation's loader wins
+        assert_eq!(newest(v("1.21.4", "quilt"), &[v("1.21.4", "fabric"), v("1.21.4", "quilt")]), v("1.21.4", "quilt"));
     }
 
     #[test]
