@@ -1,5 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, entriesFor, Installation, LinkState, Standard, StandardEntry } from "./api";
+import { Modal } from "./Modal";
 import { Avatar, StandardAvatar } from "./Places";
 
 export const DIR = (
@@ -65,8 +66,6 @@ export function LinkEditor({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  useEffect(() => ref.current?.showModal(), []);
   const entries = useMemo(() => entriesFor(std, inst.game_version), [std, inst]);
   const rels = entries.map((e) => e.rel_path);
   const tree = useMemo(() => buildTree(entries), [entries]);
@@ -111,7 +110,7 @@ export function LinkEditor({
       })
       .catch((e) => {
         notify(String(e));
-        ref.current?.close();
+        onClose();
       });
     // only on open
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -206,7 +205,7 @@ export function LinkEditor({
           .replace(/^u/, "U")
       );
       onDone();
-      ref.current?.close();
+      onClose();
     } catch (e) {
       notify(String(e));
       setBusy(false);
@@ -356,17 +355,12 @@ export function LinkEditor({
   const others = std.entries.length - entries.length;
 
   return (
-    <dialog
-      ref={ref}
+    <Modal
       className="share-dialog le-dialog"
+      label={`Link ${std.name} to ${inst.name}`}
+      locked={busy}
       onClose={onClose}
-      onCancel={(e) => {
-        if (review && !busy) {
-          e.preventDefault(); // Esc steps back first
-          setReview(false);
-        }
-      }}
-      onClick={(e) => e.target === ref.current && !busy && ref.current.close()}
+      onEscape={review ? () => setReview(false) : undefined} // Esc steps back first
       onKeyDown={(e) => {
         if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) review ? apply() : confirm();
       }}
@@ -554,7 +548,7 @@ export function LinkEditor({
             </>
           ) : (
             <>
-              <button className="btn" onClick={() => ref.current?.close()} disabled={busy}>
+              <button className="btn" onClick={onClose} disabled={busy}>
                 Cancel
               </button>
               <button className="btn primary" onClick={confirm} disabled={!changed || busy}>
@@ -564,6 +558,6 @@ export function LinkEditor({
           )}
         </footer>
       </div>
-    </dialog>
+    </Modal>
   );
 }

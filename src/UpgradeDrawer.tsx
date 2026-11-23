@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, ImportReport, Installation, UpgradeMod, UpgradeScan, UpgradeTarget } from "./api";
+import { Drawer } from "./Modal";
 import { Avatar } from "./Places";
 import { ProgressBar, useProgress } from "./Progress";
 import { brief } from "./settings";
@@ -16,11 +17,13 @@ function bestTarget(targets: UpgradeTarget[]) {
 
 /** Moves one installation, loader and mods, to a newer Minecraft. */
 export function UpgradeDrawer({
+  sidebarToggle,
   inst,
   notify,
   onChanged,
   onClose,
 }: {
+  sidebarToggle: React.ReactNode;
   inst: Installation;
   notify: (m: string) => void;
   onChanged: () => void;
@@ -44,12 +47,6 @@ export function UpgradeDrawer({
       })
       .catch((e) => setFailed(String(e)));
   }, [inst.name]);
-
-  useEffect(() => {
-    const key = (e: KeyboardEvent) => e.key === "Escape" && !busy && onClose();
-    window.addEventListener("keydown", key);
-    return () => window.removeEventListener("keydown", key);
-  }, [onClose, busy]);
 
   const target = scan?.targets.find((t) => t.game === pick);
   const best = scan && bestTarget(scan.targets);
@@ -115,140 +112,138 @@ export function UpgradeDrawer({
     );
 
   return (
-    <div className="viewer-backdrop drawer-backdrop" onClick={() => !busy && onClose()}>
-      <aside className="drawer up-drawer" onClick={(e) => e.stopPropagation()}>
-        <div className="drawer-hero">
-          <Avatar inst={inst} />
-          <div className="links-title">
-            <h2 className="drawer-title">Upgrade {inst.name}</h2>
-            <span className="place-sub">
-              {[inst.game_version, inst.loader].filter(Boolean).join(" · ")}
-              {inst.mods_count > 0 && ` · ${inst.mods_count} mods`}
-            </span>
-          </div>
-          <button className="linklike drawer-close" disabled={busy} onClick={onClose}>
-            close
-          </button>
+    <Drawer sidebarToggle={sidebarToggle} className="up-drawer" label={`Upgrade ${inst.name}`} locked={busy} onClose={onClose}>
+      <div className="drawer-hero">
+        <Avatar inst={inst} />
+        <div className="links-title">
+          <h2 className="drawer-title">Upgrade {inst.name}</h2>
+          <span className="place-sub">
+            {[inst.game_version, inst.loader].filter(Boolean).join(" · ")}
+            {inst.mods_count > 0 && ` · ${inst.mods_count} mods`}
+          </span>
         </div>
+        <button className="linklike drawer-close" disabled={busy} onClick={onClose}>
+          close
+        </button>
+      </div>
 
-        {done ? (
-          <div className="lw-done">
-            <div className="lw-done-mark">✓</div>
-            <h2>Now on {done.r.title}</h2>
-            <ul>
-              <li>{done.r.added.length} mods updated</li>
-              {done.r.skipped.length > 0 && <li>{done.r.skipped.length} removed to the Trash</li>}
-              {done.kept > 0 && <li>{done.kept} kept without an update</li>}
-            </ul>
-            <div className="row-inline lw-done-actions">
-              <button className="btn primary" onClick={onClose}>
-                Done
+      {done ? (
+        <div className="lw-done">
+          <div className="lw-done-mark">✓</div>
+          <h2>Now on {done.r.title}</h2>
+          <ul>
+            <li>{done.r.added.length} mods updated</li>
+            {done.r.skipped.length > 0 && <li>{done.r.skipped.length} removed to the Trash</li>}
+            {done.kept > 0 && <li>{done.kept} kept without an update</li>}
+          </ul>
+          <div className="row-inline lw-done-actions">
+            <button className="btn primary" onClick={onClose}>
+              Done
+            </button>
+          </div>
+        </div>
+      ) : failed ? (
+        <p className="hint links-intro">{failed}</p>
+      ) : !scan ? (
+        <div className="links-intro">
+          <ProgressBar p={progress} fallback="Checking your mods…" />
+        </div>
+      ) : scan.targets.length === 0 ? (
+        <p className="hint links-intro">{inst.name} is already on the newest Minecraft release.</p>
+      ) : (
+        <>
+          <p className="hint links-intro">
+            {best && fits(best)
+              ? `${best.game} is the newest version every mod is ready for.`
+              : `No newer version has a build of every mod yet.`}
+            <span className="more">
+              {" "}
+              Each mod is checked against Modrinth for {loaderName} on every newer release. Turned-off mods are left as they
+              are.
+            </span>
+          </p>
+
+          <div className={`up-versions ${busy ? "busy" : ""}`}>
+            {scan.targets.map((t) => (
+              <button
+                key={t.game}
+                className={`up-version ${t.game === pick ? "on" : ""}`}
+                disabled={!t.loader_ok}
+                onClick={() => setPick(t.game)}
+              >
+                <code>{t.game}</code>
+                {t === best && fits(t) && <span className="chip up-best">best fit</span>}
+                <span className={`up-status ${fits(t) ? "ok" : ""}`}>
+                  {!t.loader_ok
+                    ? `no ${loaderName} yet`
+                    : t.missing.length === 0
+                      ? "every mod ready"
+                      : `${t.missing.length} mod${t.missing.length === 1 ? "" : "s"} not ready`}
+                </span>
               </button>
-            </div>
+            ))}
           </div>
-        ) : failed ? (
-          <p className="hint links-intro">{failed}</p>
-        ) : !scan ? (
-          <div className="links-intro">
-            <ProgressBar p={progress} fallback="Checking your mods…" />
-          </div>
-        ) : scan.targets.length === 0 ? (
-          <p className="hint links-intro">{inst.name} is already on the newest Minecraft release.</p>
-        ) : (
-          <>
-            <p className="hint links-intro">
-              {best && fits(best)
-                ? `${best.game} is the newest version every mod is ready for.`
-                : `No newer version has a build of every mod yet.`}
-              <span className="more">
-                {" "}
-                Each mod is checked against Modrinth for {loaderName} on every newer release. Turned-off mods are left as they
-                are.
-              </span>
-            </p>
 
-            <div className={`up-versions ${busy ? "busy" : ""}`}>
-              {scan.targets.map((t) => (
-                <button
-                  key={t.game}
-                  className={`up-version ${t.game === pick ? "on" : ""}`}
-                  disabled={!t.loader_ok}
-                  onClick={() => setPick(t.game)}
-                >
-                  <code>{t.game}</code>
-                  {t === best && fits(t) && <span className="chip up-best">best fit</span>}
-                  <span className={`up-status ${fits(t) ? "ok" : ""}`}>
-                    {!t.loader_ok
-                      ? `no ${loaderName} yet`
-                      : t.missing.length === 0
-                        ? "every mod ready"
-                        : `${t.missing.length} mod${t.missing.length === 1 ? "" : "s"} not ready`}
-                  </span>
-                </button>
-              ))}
-            </div>
+          {target && groups && (
+            <>
+              {groups.updates.length > 0 && (
+                <details className="up-group">
+                  <summary className="drawer-h">
+                    Updates to {target.game} <span className="count">{groups.updates.length}</span>
+                  </summary>
+                  <ul className="up-mods">
+                    {groups.updates.map((m) => (
+                      <li key={m.file}>
+                        <ModIcon m={m} />
+                        <span className="up-mod-name" title={m.file}>
+                          {m.name}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </details>
+              )}
+              {stuckList(
+                `No ${target.game} build`,
+                `These would likely crash ${target.game}. Removed ones go to the Trash; pick an older version above to keep them.`,
+                groups.noBuild,
+              )}
+              {stuckList(
+                "Not on Modrinth",
+                "MIM can't check or update these. Keep one only if you know it works on " + target.game + ".",
+                groups.unknown,
+              )}
+            </>
+          )}
 
-            {target && groups && (
+          <div className="up-foot">
+            {busy ? (
+              <ProgressBar p={progress} fallback={`Upgrading to ${pick}…`} />
+            ) : (
               <>
-                {groups.updates.length > 0 && (
-                  <details className="up-group">
-                    <summary className="drawer-h">
-                      Updates to {target.game} <span className="count">{groups.updates.length}</span>
-                    </summary>
-                    <ul className="up-mods">
-                      {groups.updates.map((m) => (
-                        <li key={m.file}>
-                          <ModIcon m={m} />
-                          <span className="up-mod-name" title={m.file}>
-                            {m.name}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </details>
-                )}
-                {stuckList(
-                  `No ${target.game} build`,
-                  `These would likely crash ${target.game}. Removed ones go to the Trash; pick an older version above to keep them.`,
-                  groups.noBuild,
-                )}
-                {stuckList(
-                  "Not on Modrinth",
-                  "MIM can't check or update these. Keep one only if you know it works on " + target.game + ".",
-                  groups.unknown,
-                )}
+                <span className="lw-foot-sum">
+                  {target && groups
+                    ? [
+                        `${groups.updates.length} update`,
+                        remove.length && `${remove.length} to Trash`,
+                        stuck.length - remove.length && `${stuck.length - remove.length} kept`,
+                      ]
+                        .filter(Boolean)
+                        .join(" · ")
+                    : "Pick a version"}
+                </span>
+                <button className="btn ghost" onClick={onClose}>
+                  Cancel
+                </button>
+                <button className="btn primary" disabled={!target} onClick={upgrade}>
+                  Upgrade to {pick ?? "…"}
+                </button>
               </>
             )}
-
-            <div className="up-foot">
-              {busy ? (
-                <ProgressBar p={progress} fallback={`Upgrading to ${pick}…`} />
-              ) : (
-                <>
-                  <span className="lw-foot-sum">
-                    {target && groups
-                      ? [
-                          `${groups.updates.length} update`,
-                          remove.length && `${remove.length} to Trash`,
-                          stuck.length - remove.length && `${stuck.length - remove.length} kept`,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")
-                      : "Pick a version"}
-                  </span>
-                  <button className="btn ghost" onClick={onClose}>
-                    Cancel
-                  </button>
-                  <button className="btn primary" disabled={!target} onClick={upgrade}>
-                    Upgrade to {pick ?? "…"}
-                  </button>
-                </>
-              )}
-            </div>
-          </>
-        )}
-      </aside>
-    </div>
+          </div>
+        </>
+      )}
+    </Drawer>
   );
 }
 

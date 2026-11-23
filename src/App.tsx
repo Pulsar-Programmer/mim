@@ -143,19 +143,23 @@ function App() {
 
   useEffect(refresh, [refresh]);
 
+  const sidebarToggle = (
+    <button
+      className="sidebar-toggle"
+      onClick={toggleSidebar}
+      title={collapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)"}
+      aria-label={collapsed ? "Show sidebar" : "Hide sidebar"}
+    >
+      <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
+        <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+        <path d="M6 2.5v11" stroke="currentColor" strokeWidth="1.3" />
+      </svg>
+    </button>
+  );
+
   return (
     <div className={`app ${collapsed ? "collapsed" : ""}`}>
-      <button
-        className="sidebar-toggle"
-        onClick={toggleSidebar}
-        title={collapsed ? "Show sidebar (⌘\\)" : "Hide sidebar (⌘\\)"}
-        aria-label={collapsed ? "Show sidebar" : "Hide sidebar"}
-      >
-        <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
-          <rect x="1.5" y="2.5" width="13" height="11" rx="2" fill="none" stroke="currentColor" strokeWidth="1.3" />
-          <path d="M6 2.5v11" stroke="currentColor" strokeWidth="1.3" />
-        </svg>
-      </button>
+      {sidebarToggle}
       <aside className="sidebar">
         <div className="titlebar" data-tauri-drag-region />
         <div className="wordmark" data-tauri-drag-region>MIM</div>
@@ -218,6 +222,7 @@ function App() {
         <Crashed onBack={() => setView("installations")}>
         {view === "installations" && (
           <InstallationsView
+            sidebarToggle={sidebarToggle}
             installations={installations}
             refresh={refresh}
             notify={notify}
@@ -307,6 +312,7 @@ class Crashed extends Component<{ children: ReactNode; onBack: () => void }, { e
 // ---------------------------------------------------------------------------
 
 function InstallationsView({
+  sidebarToggle,
   installations,
   refresh,
   notify,
@@ -314,6 +320,7 @@ function InstallationsView({
   onLink,
   onStandards,
 }: {
+  sidebarToggle: React.ReactNode;
   installations: Installation[];
   refresh: () => void;
   notify: (m: string) => void;
@@ -516,6 +523,7 @@ function InstallationsView({
 
       {upgradingInst && (
         <UpgradeDrawer
+          sidebarToggle={sidebarToggle}
           inst={upgradingInst}
           notify={notify}
           onChanged={refresh}
@@ -524,6 +532,7 @@ function InstallationsView({
       )}
       {linkingInst && (
         <LinksDrawer
+          sidebarToggle={sidebarToggle}
           inst={linkingInst}
           standards={standards}
           notify={notify}
