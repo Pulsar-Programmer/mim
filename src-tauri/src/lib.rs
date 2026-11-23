@@ -3243,6 +3243,7 @@ struct ServerList {
     exists: bool,
     servers: Vec<Server>,
     backup: Vec<Server>,
+    archived: Vec<Server>,
 }
 
 #[tauri::command(async)]
@@ -3265,6 +3266,7 @@ fn list_servers() -> Vec<ServerList> {
                 exists: p.exists(),
                 servers: read_servers(&p),
                 backup: read_servers(&dir.join("servers.dat_old")),
+                archived: read_archived(&dir).unwrap_or_default(),
                 path: p.to_string_lossy().into(),
                 installation: inst,
             })
@@ -3280,10 +3282,83 @@ fn write_servers(installation: Option<String>, servers: Vec<Server>) -> CmdResul
     if servers.iter().any(|s| s.ip.trim().is_empty()) {
         return Err("every server needs an address".into());
     }
-    if p.exists() {
+    store_servers(&dir, &servers)
+}
+
+fn store_servers(dir: &Path, servers: &[Server]) -> CmdResult<()> {
+    let p = dir.join("servers.dat");
+    // a reorder loses nothing, so it must not push a removed server out of the backup
+    let sorted = |l: &[Server]| {
+        let mut v: Vec<String> = l.iter().map(|s| serde_json::to_string(s).unwrap_or_default()).collect();
+        v.sort();
+        v
+    };
+    if p.exists() && sorted(&read_servers(&p)) != sorted(servers) {
         fs::copy(&p, dir.join("servers.dat_old")).map_err(err)?;
     }
-    fs::write(&p, servers_nbt(&servers)).map_err(err)
+    fs::write(&p, servers_nbt(servers)).map_err(err)
+}
+
+/// Minecraft would drop unknown entries from servers.dat, so archived servers
+/// sit in a hidden file beside the real one and follow a linked list.
+fn archive_file(dir: &Path) -> PathBuf {
+    let p = dir.join("servers.dat");
+    fs::canonicalize(&p).unwrap_or(p).with_file_name(".servers_archived.json")
+}
+
+fn read_archived(dir: &Path) -> CmdResult<Vec<Server>> {
+    match fs::read_to_string(archive_file(dir)) {
+        Ok(t) => serde_json::from_str(&t).map_err(|e| format!("archived servers file is damaged: {e}")),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(vec![]),
+        Err(e) => Err(err(e)),
+    }
+}
+
+fn write_archived(dir: &Path, servers: &[Server]) -> CmdResult<()> {
+    let p = archive_file(dir);
+    let tmp = p.with_extension("json.tmp");
+    fs::write(&tmp, serde_json::to_string_pretty(servers).map_err(err)?).map_err(err)?;
+    fs::rename(&tmp, &p).map_err(err)
+}
+
+fn take_server(list: &mut Vec<Server>, s: &Server) -> CmdResult<Server> {
+    let ip = s.ip.trim().to_lowercase();
+    let i = list
+        .iter()
+        .position(|x| x == s)
+        .or_else(|| list.iter().position(|x| x.ip.trim().to_lowercase() == ip))
+        .ok_or("that server is no longer in the list")?;
+    Ok(list.remove(i))
+}
+
+/// Writes the list gaining the server first: a failure leaves a duplicate, never a loss.
+fn set_server_archived_in(dir: &Path, server: &Server, archived: bool) -> CmdResult<()> {
+    let mut active = read_servers(&dir.join("servers.dat"));
+    let mut stored = read_archived(dir)?;
+    if archived {
+        let s = take_server(&mut active, server)?;
+        stored.push(s);
+        write_archived(dir, &stored)?;
+        store_servers(dir, &active)
+    } else {
+        let s = take_server(&mut stored, server)?;
+        active.push(s);
+        store_servers(dir, &active)?;
+        write_archived(dir, &stored)
+    }
+}
+
+#[tauri::command(async)]
+fn set_server_archived(installation: Option<String>, server: Server, archived: bool) -> CmdResult<()> {
+    set_server_archived_in(&scope_dir(installation.as_deref())?, &server, archived)
+}
+
+#[tauri::command(async)]
+fn delete_archived_server(installation: Option<String>, server: Server) -> CmdResult<()> {
+    let dir = scope_dir(installation.as_deref())?;
+    let mut stored = read_archived(&dir)?;
+    take_server(&mut stored, &server)?;
+    write_archived(&dir, &stored)
 }
 
 /// Swaps servers.dat and servers.dat_old, so a restore can itself be undone.
@@ -5888,6 +5963,37 @@ mod tests {
     }
 
     #[test]
+    fn archives_servers_and_reorders_without_losing_the_backup() {
+        let dir = std::env::temp_dir().join(format!("mim-archive-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let srv = |n: &str| Server { name: n.into(), ip: format!("{n}.net"), icon: None, accept_textures: None, hidden: false };
+        let (a, b, c) = (srv("a"), srv("b"), srv("c"));
+        fs::write(dir.join("servers.dat"), servers_nbt(&[a.clone(), b.clone(), c.clone()])).unwrap();
+
+        set_server_archived_in(&dir, &b, true).unwrap();
+        assert_eq!(read_servers(&dir.join("servers.dat")), [a.clone(), c.clone()]);
+        assert_eq!(read_archived(&dir).unwrap(), [b.clone()]);
+        assert_eq!(read_servers(&dir.join("servers.dat_old")).len(), 3);
+
+        // a reorder keeps the backup that still holds the full list
+        store_servers(&dir, &[c.clone(), a.clone()]).unwrap();
+        assert_eq!(read_servers(&dir.join("servers.dat")), [c.clone(), a.clone()]);
+        assert_eq!(read_servers(&dir.join("servers.dat_old")).len(), 3);
+
+        set_server_archived_in(&dir, &b, false).unwrap();
+        assert_eq!(read_servers(&dir.join("servers.dat")), [c.clone(), a.clone(), b.clone()]);
+        assert!(read_archived(&dir).unwrap().is_empty());
+        assert!(set_server_archived_in(&dir, &b, false).is_err());
+
+        // a damaged archive is refused rather than overwritten
+        fs::write(archive_file(&dir), "not json").unwrap();
+        assert!(set_server_archived_in(&dir, &a, true).is_err());
+        assert_eq!(fs::read_to_string(archive_file(&dir)).unwrap(), "not json");
+        assert_eq!(read_servers(&dir.join("servers.dat")).len(), 3);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn zips_and_unzips_a_world() {
         let root = std::env::temp_dir().join(format!("mim-zip-{}", uuid::Uuid::new_v4()));
         let world = root.join("My World");
@@ -6642,6 +6748,8 @@ pub fn run() {
             write_options,
             list_servers,
             write_servers,
+            set_server_archived,
+            delete_archived_server,
             restore_servers_backup,
             ping_server,
             import_world,
