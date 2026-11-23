@@ -8,6 +8,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "web": "bun install --cwd web && bun run --cwd web dev",
+    "web:build": "bun install --cwd web && bun run --cwd web build",
     "dev:sample": "python3 scripts/seed_sample.py && MIM_MINECRAFT_DIR=\"$PWD/sample-minecraft\" tauri dev"
   },
   "dependencies": {

@@ -6,6 +6,12 @@
       "command": "bun run dev:sample",
       "icon": "play",
       "runOnWorktreeCreate": false
+    },
+    {
+      "name": "Run Website",
+      "command": "bun run web",
+      "icon": "play",
+      "runOnWorktreeCreate": false
     }
   ]
 }
