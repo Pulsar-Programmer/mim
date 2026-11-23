@@ -55,6 +55,14 @@ export interface LinkState {
   from: string | null;
 }
 
+export interface FolderLink {
+  folder: string;
+  /** the installation's folder is itself one link to the standard's */
+  whole: boolean;
+  /** what linking it whole would replace */
+  in_way: string[];
+}
+
 /** Entries that apply to a game version: global ones plus that version's folder. */
 export const entriesFor = (s: Standard, gameVersion: string | null) => {
   // Possible future feature: version-only items, kept in a subfolder like 1.21.10/.
@@ -352,6 +360,9 @@ export const api = {
   ensureStandardsDir: () => invoke<string>("ensure_standards_dir"),
   createStandard: (name: string) => invoke<string>("create_standard", { name }),
   deleteStandard: (name: string) => invoke<void>("delete_standard", { name }),
+  /** moves its folder and repoints every installation's links */
+  renameStandard: (name: string, newName: string) =>
+    invoke<void>("rename_standard", { name, newName }),
   /** Returns what's in the way; when non-empty and !replace, nothing was linked. */
   linkStandard: (name: string, installation: string, relPaths: string[], replace: boolean) =>
     invoke<string[]>("link_standard", { name, installation, relPaths, replace }),
@@ -359,6 +370,12 @@ export const api = {
    * relPaths: just those entries, otherwise all of it */
   unlinkStandard: (name: string, installation: string, keep: boolean, relPaths?: string[]) =>
     invoke<void>("unlink_standard", { name, installation, keep, relPaths }),
+  /** how config folders stand in the installation; ones that can't be linked whole are left out */
+  folderLinks: (name: string, installation: string, folders: [string, string[]][]) =>
+    invoke<FolderLink[]>("folder_links", { name, installation, folders }),
+  /** makes a config folder one link. Returns what's in the way; with !replace nothing changed then. */
+  linkFolder: (name: string, installation: string, folder: string, relPaths: string[], replace: boolean) =>
+    invoke<string[]>("link_folder", { name, installation, folder, relPaths, replace }),
   /** how each entry stands in the installation, in the order asked */
   linkStates: (name: string, installation: string, relPaths: string[]) =>
     invoke<LinkState[]>("link_states", { name, installation, relPaths }),

@@ -181,13 +181,14 @@ function chooser(maps: Map<string, string>[], base: number, picks: Record<string
   };
 }
 
-/** One file with every version's settings, in `base`'s layout. Null if it can't be written. */
+/** One file with every version's settings except `skip`, in `base`'s layout. Null if it can't be written. */
 export function mergeText(
   texts: string[],
   cmp: Comparison,
   dest: string,
   base: number,
-  picks: Record<string, number> = {}
+  picks: Record<string, number> = {},
+  skip: ReadonlySet<string> = new Set()
 ): string | null {
   if (!cmp.mergeable) return null;
   const choose = chooser(cmp.maps, base, picks, dest);
@@ -200,9 +201,10 @@ export function mergeText(
         const p = at ? `${at}.${n}` : n;
         const vals = objs.map((o) => o?.[n]);
         const present = vals.filter((v) => v !== undefined);
-        if (present.every((v) => isObj(v) && Object.keys(v).length))
-          out[n] = join(vals.map((v) => v as Record<string, unknown> | undefined), p);
-        else {
+        if (present.every((v) => isObj(v) && Object.keys(v).length)) {
+          const inner = join(vals.map((v) => v as Record<string, unknown> | undefined), p);
+          if (Object.keys(inner).length) out[n] = inner; // empty only if all of it was skipped
+        } else if (!skip.has(p)) {
           const c = choose(p);
           out[n] = c >= 0 && vals[c] !== undefined ? vals[c] : vals[base] !== undefined ? vals[base] : present[0];
         }
@@ -224,16 +226,16 @@ export function mergeText(
   };
   const raws = texts.map(rawOf);
   const seen = new Set<string>();
-  const out = texts[base].split(/\r?\n/).map((line) => {
+  const out = texts[base].split(/\r?\n/).flatMap((line) => {
     const l = line.trim();
     const x = l && !/^[#;!]/.test(l) ? KEY.exec(l) : null;
-    if (!x) return line;
+    if (!x) return [line];
     const k = unquote(x[1].trim());
     seen.add(k);
-    return raws[choose(k)]?.get(k) ?? line;
+    return skip.has(k) ? [] : [raws[choose(k)]?.get(k) ?? line];
   });
   while (out.length && !out[out.length - 1].trim()) out.pop();
   for (const k of new Set(cmp.maps.flatMap((m) => [...m.keys()])))
-    if (!seen.has(k)) out.push(raws[choose(k)].get(k)!);
+    if (!seen.has(k) && !skip.has(k)) out.push(raws[choose(k)].get(k)!);
   return out.join("\n") + "\n";
 }

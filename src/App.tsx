@@ -12,6 +12,7 @@ import {
   GameVersion,
   LoaderVersion,
   Standard,
+  StandardEntry,
   entriesFor,
   LogEntry,
   FolderItem,
@@ -32,6 +33,7 @@ import { UpdateButton } from "./UpdateButton";
 import { ConfigView } from "./ConfigView";
 import { LinkEditor } from "./LinkEditor";
 import { AddToStandard } from "./AddToStandard";
+import { StandardFiles, StandardSummary } from "./StandardFiles";
 import { LinksDrawer } from "./LinksDrawer";
 import { LinkWizard } from "./LinkWizard";
 import { UpgradeDrawer } from "./UpgradeDrawer";
@@ -272,7 +274,7 @@ function App() {
         </Crashed>
       </main>
 
-      {toast && <div className="toast">{toast}</div>}
+      {toast && <Toast message={toast} />}
     </div>
   );
 }
@@ -993,6 +995,23 @@ function NewInstallView({
 
 // ---------------------------------------------------------------------------
 
+/** In the top layer, so it stays sharp above an open dialog's blurred backdrop. */
+function Toast({ message }: { message: string }) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el?.showPopover) return; // older webviews just show it as a normal element
+    // re-showing puts it above any dialog opened since
+    if (el.matches(":popover-open")) el.hidePopover();
+    el.showPopover();
+  }, [message]);
+  return (
+    <div ref={ref} className="toast" popover="manual" role="status">
+      {message}
+    </div>
+  );
+}
+
 /** The installations using a standard; + reveals the rest to link. */
 function StandardLinks({
   s,
@@ -1057,6 +1076,22 @@ function StandardsView({
   // the link editor, open for one standard and installation
   const [editing, setEditing] = useState<{ s: Standard; i: Installation } | null>(null);
   const [adding, setAdding] = useState<Standard | null>(null);
+  const [renaming, setRenaming] = useState<string | null>(null);
+  // the file browser: a standard's name, null for all of them, undefined when closed
+  const [viewing, setViewing] = useState<string | null | undefined>(undefined);
+
+  async function rename(s: Standard, to: string) {
+    if (renaming !== s.name) return; // Enter already handled it before the blur
+    setRenaming(null);
+    if (!to.trim() || to.trim() === s.name) return;
+    try {
+      await api.renameStandard(s.name, to.trim());
+      notify(brief(`Renamed to "${to.trim()}" — linked installations follow`));
+      load();
+    } catch (e) {
+      notify(String(e));
+    }
+  }
 
   async function removeItem(name: string) {
     try {
@@ -1072,6 +1107,9 @@ function StandardsView({
       await api.removeFromStandard(s.name, rel);
       return brief(`Moved ${name} to Trash — installations using it keep a copy`);
     });
+
+  const removeAny = (s: Standard, e: StandardEntry) =>
+    s.builtin ? removeItem(e.name) : removeEntry(s, e.rel_path, e.name);
 
   async function create() {
     if (!newName.trim()) return;
@@ -1103,9 +1141,14 @@ function StandardsView({
           <h1>Standards</h1>
           <p className="sub">folders you link into installations</p>
         </div>
-        <button className="btn" onClick={openFolder}>
-          Open Folder
-        </button>
+        <div className="row-inline">
+          <button className="btn" onClick={() => setViewing(null)}>
+            View All Files
+          </button>
+          <button className="btn" onClick={openFolder}>
+            Open Folder
+          </button>
+        </div>
       </header>
 
       <p className="hint wide">
@@ -1131,15 +1174,40 @@ function StandardsView({
           <div className="std-head">
             <StandardAvatar s={s} />
             <div className="std-title">
-              <h2>{s.name}</h2>
+              {renaming === s.name ? (
+                <input
+                  className="card-rename"
+                  autoFocus
+                  defaultValue={s.name}
+                  aria-label={`New name for ${s.name}`}
+                  onFocus={(e) => e.target.select()}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") rename(s, e.currentTarget.value);
+                    if (e.key === "Escape") setRenaming(null);
+                  }}
+                  onBlur={(e) => rename(s, e.target.value)}
+                />
+              ) : (
+                <h2>{s.name}</h2>
+              )}
               <span className="place-sub">
                 {s.builtin ? "built in · the Minecraft folder" : `minecraft/standards/${s.name}`}
               </span>
             </div>
             <div className="row-inline std-actions">
+              {s.entries.length > 0 && (
+                <button className="btn small" onClick={() => setViewing(s.name)}>
+                  View Files
+                </button>
+              )}
               <button className="btn small" onClick={() => api.revealPath(s.path, false)}>
                 Open
               </button>
+              {!s.builtin && (
+                <button className="btn small" onClick={() => setRenaming(s.name)}>
+                  Rename
+                </button>
+              )}
               {!s.builtin && (
                 <button className="btn small danger" onClick={() => remove(s)}>
                   {armed === `del:${s.name}` ? "Sure?" : "Delete"}
@@ -1148,46 +1216,25 @@ function StandardsView({
             </div>
           </div>
 
-          <div className={`std-files ${s.entries.length ? "" : "empty-list"}`}>
-            {s.entries.map((e) => (
-              <span
-                key={e.rel_path}
-                className={`std-file ${e.missing ? "missing" : ""}`}
-                title={e.missing ? "Not in the Minecraft folder yet" : undefined}
-              >
-                {e.name}
-                {e.is_dir ? "/" : ""}
-                {/* version-only items: see entriesFor
-                {e.scope !== "global" && <span className="chip">{e.scope} only</span>} */}
-                <button
-                  className={`std-file-x ${armed === `rm:${e.rel_path}` ? "armed" : ""}`}
-                  aria-label={s.builtin ? `Take ${e.name} off Shared` : `Remove ${e.name} from ${s.name}`}
-                  title={
-                    s.builtin
-                      ? "Take off the list — its files stay"
-                      : "Move to Trash — installations using it keep their own copy"
-                  }
-                  onClick={() => (s.builtin ? removeItem(e.name) : removeEntry(s, e.rel_path, e.name))}
-                >
-                  {armed === `rm:${e.rel_path}` ? "Sure?" : "×"}
-                </button>
-              </span>
-            ))}
-            <button
-              className="std-add-btn"
-              aria-label={`Add to ${s.name}`}
-              title="Add a file or folder"
-              onClick={() => setAdding(s)}
-            >
-              +{s.entries.length === 0 && " Add files or folders"}
-            </button>
-          </div>
+          <StandardSummary s={s} armed={armed} onRemove={removeAny} onAdd={() => setAdding(s)} onView={() => setViewing(s.name)} />
 
           <div className="std-label">Linked installations</div>
           <StandardLinks s={s} installations={installations} onEdit={(i) => setEditing({ s, i })} />
         </section>
       ))}
 
+      {viewing !== undefined && (
+        <StandardFiles
+          standards={standards}
+          installations={installations}
+          initial={viewing}
+          armed={armed}
+          onRemove={removeAny}
+          onAdd={setAdding}
+          onEdit={(s, i) => setEditing({ s, i })}
+          onClose={() => setViewing(undefined)}
+        />
+      )}
       {editing && (
         <LinkEditor
           std={editing.s}

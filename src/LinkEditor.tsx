@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api, entriesFor, Installation, LinkState, Standard, StandardEntry } from "./api";
 import { Avatar, StandardAvatar } from "./Places";
 
-const DIR = (
+export const DIR = (
   <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
     <path
       d="M1.5 4.5a1 1 0 0 1 1-1h3.6l1.4 1.5h6a1 1 0 0 1 1 1v6.5a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1z"
@@ -10,22 +10,25 @@ const DIR = (
     />
   </svg>
 );
-const FILE = (
+export const CARET = (
+  <svg viewBox="0 0 10 10" width="10" height="10" aria-hidden><path d="M3.5 1.5 7 5 3.5 8.5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" /></svg>
+);
+export const FILE = (
   <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
     <path d="M4 1.5h5l3.5 3.5v8.5a1 1 0 0 1-1 1h-7.5a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1z" fill="currentColor" />
   </svg>
 );
 
 /** config/ files come in one by one ("config/fabric/x.toml"): fold them into folders. */
-interface Node {
+export interface TreeNode {
   name: string;
   path: string;
   entry?: StandardEntry;
-  kids: Node[];
+  kids: TreeNode[];
 }
 
-function buildTree(entries: StandardEntry[]): Node[] {
-  const root: Node = { name: "", path: "", kids: [] };
+export function buildTree(entries: StandardEntry[]): TreeNode[] {
+  const root: TreeNode = { name: "", path: "", kids: [] };
   for (const e of entries) {
     const parts = e.name.split("/");
     let at = root;
@@ -40,8 +43,10 @@ function buildTree(entries: StandardEntry[]): Node[] {
   return root.kids;
 }
 
-const leaves = (n: Node): string[] => (n.entry ? [n.entry.rel_path] : n.kids.flatMap(leaves));
-const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+export const leaves = (n: TreeNode): string[] => (n.entry ? [n.entry.rel_path] : n.kids.flatMap(leaves));
+const foldersOf = (nodes: TreeNode[]): TreeNode[] =>
+  nodes.filter((n) => !n.entry).flatMap((n) => [n, ...foldersOf(n.kids)]);
+export const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 /**
  * Pick what of a standard is linked into one installation. Nothing changes
@@ -73,14 +78,31 @@ export function LinkEditor({
   const [review, setReview] = useState(false);
   const [keep, setKeep] = useState(true);
   const [busy, setBusy] = useState(false);
+  // folders that are (or will be) one link instead of a link per file
+  const [wholeNow, setWholeNow] = useState<Set<string>>(new Set());
+  const [wantWhole, setWantWhole] = useState<Set<string>>(new Set());
+  const [canWhole, setCanWhole] = useState<Set<string>>(new Set());
+  const [inWay, setInWay] = useState<string[]>([]);
+
+  const nameOf = useMemo(() => new Map(entries.map((e) => [e.rel_path, e.name])), [entries]);
+  const inFolder = (r: string, f: string) => nameOf.get(r)?.startsWith(`${f}/`) ?? false;
+  const covered = (r: string) => [...wantWhole].some((f) => inFolder(r, f));
+  const relsIn = (f: string) => rels.filter((r) => inFolder(r, f));
 
   const st = (r: string) => states?.[r]?.state;
   const linkedNow = rels.filter((r) => st(r) === "linked");
 
   useEffect(() => {
-    api
-      .linkStates(std.name, inst.name, rels)
-      .then((list) => {
+    const folders = foldersOf(tree).map((f): [string, string[]] => [f.path, leaves(f)]);
+    Promise.all([
+      api.linkStates(std.name, inst.name, rels),
+      std.builtin ? Promise.resolve([]) : api.folderLinks(std.name, inst.name, folders),
+    ])
+      .then(([list, flinks]) => {
+        const whole = new Set(flinks.filter((f) => f.whole).map((f) => f.folder));
+        setCanWhole(new Set(flinks.map((f) => f.folder)));
+        setWholeNow(whole);
+        setWantWhole(whole);
         const map = Object.fromEntries(rels.map((r, k) => [r, list[k]]));
         setStates(map);
         const linked = rels.filter((r) => map[r].state === "linked");
@@ -97,20 +119,31 @@ export function LinkEditor({
 
   const isDir = (r: string) => entries.find((e) => e.rel_path === r)?.is_dir ?? false;
   const modeOf = (r: string) => modes[r] ?? (st(r) === "linked" || isDir(r) ? "link" : "copy");
-  const toLink = rels.filter((r) => want.has(r) && modeOf(r) === "link" && st(r) !== "linked");
-  const toCopy = rels.filter((r) => want.has(r) && modeOf(r) === "copy");
-  const toUnlink = linkedNow.filter((r) => !want.has(r));
+  const toLink = rels.filter((r) => want.has(r) && !covered(r) && modeOf(r) === "link" && st(r) !== "linked");
+  const toCopy = rels.filter((r) => want.has(r) && !covered(r) && modeOf(r) === "copy");
+  const toUnlink = linkedNow.filter((r) => !want.has(r) && !covered(r));
+  const toWhole = [...wantWhole].filter((f) => !wholeNow.has(f));
+  const toSplit = [...wholeNow].filter((f) => !wantWhole.has(f));
   // Shared folders the installation has its own of get merged in; the rest are replaced
   const merge = std.builtin ? toLink.filter((r) => st(r) === "own" && isDir(r)) : [];
   const trash = [...toLink, ...toCopy].filter((r) => st(r) === "own" && !merge.includes(r));
   const swap = [...toLink, ...toCopy].filter((r) => st(r) === "other");
-  const changed = toLink.length + toCopy.length + toUnlink.length > 0;
-  const risky = trash.length > 0 || (toUnlink.length > 0 && !keep);
+  const changed = toLink.length + toCopy.length + toUnlink.length + toWhole.length + toSplit.length > 0;
+  const risky = trash.length > 0 || inWay.length > 0 || (toUnlink.length > 0 && !keep);
 
   function flip(rs: string[], on: boolean) {
     const next = new Set(want);
     for (const r of rs) on ? next.add(r) : next.delete(r);
     setWant(next);
+  }
+
+  /** A folder as one link, a link per file, or the installation's own copy. */
+  function setFolderMode(f: string, m: "whole" | "files" | "copy") {
+    const next = new Set([...wantWhole].filter((x) => x !== f && !x.startsWith(`${f}/`)));
+    if (m === "whole") next.add(f);
+    setWantWhole(next);
+    setWant(new Set([...want, ...relsIn(f)]));
+    setModes({ ...modes, ...Object.fromEntries(relsIn(f).map((r) => [r, m === "copy" ? "copy" : "link"])) });
   }
 
   const label = (r: string) => {
@@ -125,8 +158,19 @@ export function LinkEditor({
     </span>
   );
 
-  function confirm() {
+  async function confirm() {
     if (!changed || busy) return;
+    if (toWhole.length) {
+      try {
+        const found = await api.folderLinks(std.name, inst.name, toWhole.map((f) => [f, relsIn(f)]));
+        setInWay(found.flatMap((f) => f.in_way));
+        setReview(true);
+      } catch (e) {
+        notify(String(e));
+      }
+      return;
+    }
+    setInWay([]);
     if (trash.length || toUnlink.length) setReview(true);
     else apply();
   }
@@ -137,17 +181,23 @@ export function LinkEditor({
     try {
       let renamed: string[] = [];
       if (merge.length) renamed = await api.mergeShared(inst.name, merge.map((r) => r.split("/")[1]));
-      // the whole wanted set, so already-linked items stay put (and old whole-folder links split up)
-      const links = rels.filter((r) => want.has(r) && modeOf(r) === "link");
+      // every file first, so unticked ones can still keep a copy below
+      const split = rels.filter((r) => toSplit.some((f) => inFolder(r, f)));
+      if (split.length) await api.linkStandard(std.name, inst.name, split, true);
+      for (const f of toWhole) await api.linkFolder(std.name, inst.name, f, relsIn(f), true);
+      // the whole wanted set, so already-linked items stay put
+      const links = rels.filter((r) => want.has(r) && !covered(r) && modeOf(r) === "link");
       if (links.length) await api.linkStandard(std.name, inst.name, links, true);
       if (toCopy.length) await api.copyStandard(std.name, inst.name, toCopy);
       if (toUnlink.length) await api.unlinkStandard(std.name, inst.name, keep, toUnlink);
       notify(
         [
+          toWhole.length && `Linked ${toWhole.map((f) => `${f}/`).join(", ")} as a whole into ${inst.name}`,
+          toSplit.length && `${toSplit.map((f) => `${f}/`).join(", ")} now linked file by file`,
           toLink.length && `Linked ${plural(toLink.length, "item")} from "${std.name}" into ${inst.name}`,
           toCopy.length && `copied ${plural(toCopy.length, "item")}`,
           toUnlink.length && `unlinked ${toUnlink.length}${keep ? ", kept copies" : ""}`,
-          trash.length && `${trash.length} moved to Trash`,
+          trash.length + inWay.length > 0 && `${trash.length + inWay.length} moved to Trash`,
           merge.length && `${inst.name}'s own merged into Shared`,
           renamed.length && `kept both of ${renamed.join(", ")}`,
         ]
@@ -168,6 +218,7 @@ export function LinkEditor({
     const s = states?.[r];
     const on = want.has(r);
     if (!s) return ["idle", "…"];
+    if (covered(r)) return s.state === "linked" ? ["linked", "Via folder"] : ["add", "Via folder"];
     if (s.state === "linked")
       return !on ? ["drop", "Will unlink"] : modeOf(r) === "copy" ? ["add", "Becomes its own copy"] : ["linked", "Linked"];
     if (on) {
@@ -187,12 +238,13 @@ export function LinkEditor({
         : ["idle", "Not linked"];
   }
 
-  const row = (n: Node, depth: number) => {
+  const row = (n: TreeNode, depth: number) => {
     const ls = leaves(n);
     const k = ls.filter((r) => want.has(r)).length;
     const pad = { paddingLeft: 12 + depth * 20 };
     if (!n.entry) {
       const open = !closed.has(n.path);
+      const parentWhole = [...wantWhole].some((f) => n.path.startsWith(`${f}/`));
       return (
         <div key={n.path} className="le-group">
           <div className="le-row folder" style={pad}>
@@ -205,12 +257,14 @@ export function LinkEditor({
                 setClosed(next);
               }}
             >
-              ›
+              {CARET}
             </button>
             <label className="le-main">
               <input
                 type="checkbox"
                 checked={k === ls.length}
+                disabled={ls.some(covered)}
+                title={ls.some(covered) ? "Linked as a folder. Switch to Files to choose." : undefined}
                 ref={(el) => {
                   if (el) el.indeterminate = k > 0 && k < ls.length;
                 }}
@@ -219,6 +273,37 @@ export function LinkEditor({
               <span className="le-ico dir">{DIR}</span>
               <span className="le-name">{n.name}/</span>
             </label>
+            {!parentWhole && (
+              <span className="le-mode" role="radiogroup" aria-label={`How ${n.name}/ is shared`}>
+                {(
+                  [
+                    ...(canWhole.has(n.path)
+                      ? ([["whole", "Link folder", "One link for the whole folder: new files are shared too, and it replaces everything in this installation's folder"]] as const)
+                      : []),
+                    ["files", "Link files", "A link per file: the installation keeps its other files"],
+                    ["copy", "Copy", "This installation gets its own copy of every file here"],
+                  ] as const
+                ).map(([m, text, tip]) => {
+                  const isWhole = wantWhole.has(n.path);
+                  const on =
+                    m === "whole"
+                      ? isWhole
+                      : !isWhole && ls.every((r) => want.has(r) && modeOf(r) === (m === "copy" ? "copy" : "link"));
+                  return (
+                    <button
+                      key={m}
+                      role="radio"
+                      aria-checked={on}
+                      className={on ? "on" : ""}
+                      title={tip}
+                      onClick={() => setFolderMode(n.path, m)}
+                    >
+                      {text}
+                    </button>
+                  );
+                })}
+              </span>
+            )}
             <span className="le-count">
               {k} of {ls.length}
             </span>
@@ -235,6 +320,7 @@ export function LinkEditor({
         <input
           type="checkbox"
           checked={want.has(e.rel_path)}
+          disabled={covered(e.rel_path)}
           onChange={() => flip([e.rel_path], !want.has(e.rel_path))}
         />
         <span className={`le-ico ${e.is_dir ? "dir" : ""}`}>{e.is_dir ? DIR : FILE}</span>
@@ -243,7 +329,7 @@ export function LinkEditor({
           {e.is_dir ? "/" : ""}
         </span>
         {/* version-only items: see entriesFor */}
-        {want.has(e.rel_path) && (
+        {want.has(e.rel_path) && !covered(e.rel_path) && (
           <span className="le-mode" role="radiogroup" aria-label={`How ${n.name} is shared`}>
             {(["link", "copy"] as const).map((m) => (
               <button
@@ -318,13 +404,22 @@ export function LinkEditor({
                   <button className="linklike" onClick={() => setWant(new Set(rels))}>
                     all
                   </button>
-                  <button className="linklike" onClick={() => setWant(new Set())}>
+                  <button
+                    className="linklike"
+                    onClick={() => {
+                      setWant(new Set());
+                      setWantWhole(new Set());
+                    }}
+                  >
                     none
                   </button>
                   <button
                     className="linklike"
                     disabled={!changed}
-                    onClick={() => setWant(new Set(linkedNow))}
+                    onClick={() => {
+                      setWant(new Set(linkedNow));
+                      setWantWhole(wholeNow);
+                    }}
                   >
                     reset
                   </button>
@@ -354,6 +449,32 @@ export function LinkEditor({
           </>
         ) : (
           <div className="le-review">
+            {toWhole.length > 0 && (
+              <section className="le-sec add">
+                <h3>Link {plural(toWhole.length, "whole folder")}</h3>
+                <span className="le-list">
+                  {toWhole.map((f) => (
+                    <code key={f}>{f}/</code>
+                  ))}
+                </span>
+                <p>New files mods create there go into {std.name} and reach every installation linking it.</p>
+              </section>
+            )}
+            {inWay.length > 0 && (
+              <section className="le-sec trash">
+                <h3>Move {plural(inWay.length, "item")} to the Trash</h3>
+                <span className="le-list">
+                  {inWay.slice(0, 8).map((f) => (
+                    <code key={f}>{f}</code>
+                  ))}
+                  {inWay.length > 8 && <code>+{inWay.length - 8} more</code>}
+                </span>
+                <p>
+                  {inst.name} has these in the folder and {std.name} doesn't supply them through this link. You can put
+                  real files back from the Trash.
+                </p>
+              </section>
+            )}
             {toLink.length > 0 && (
               <section className="le-sec add">
                 <h3>Link {plural(toLink.length, "item")}</h3>
@@ -417,6 +538,7 @@ export function LinkEditor({
           {!review && changed && (
             <span className="le-sum">
               {toLink.length + toCopy.length > 0 && <b className="add">+{toLink.length + toCopy.length}</b>}
+              {toWhole.length > 0 && <b className="add">{plural(toWhole.length, "whole folder")}</b>}
               {toUnlink.length > 0 && <b className="drop">−{toUnlink.length}</b>}
               {trash.length > 0 && <b className="trash">{trash.length} to Trash</b>}
             </span>
@@ -427,7 +549,7 @@ export function LinkEditor({
                 Back
               </button>
               <button className={`btn ${risky ? "danger solid" : "primary"}`} onClick={apply} disabled={busy}>
-                {busy ? "Working…" : trash.length ? "Move to Trash & link" : "Apply"}
+                {busy ? "Working…" : trash.length || inWay.length ? "Move to Trash & link" : "Apply"}
               </button>
             </>
           ) : (
