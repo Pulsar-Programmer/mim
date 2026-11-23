@@ -3974,19 +3974,58 @@ async fn download(url: &str, sha512: Option<&str>, dest: &Path) -> CmdResult<()>
 
 /// Newest version for the game version (and loader, for mods and modpacks) —
 /// releases before betas. Nothing for that version means nothing is installed.
-async fn pick_version(project: &str, kind: &str, game: &str, loader: &str) -> CmdResult<Option<Value>> {
+/// With `fits`, only a build that officially supports all of those will do.
+async fn pick_version(
+    project: &str,
+    kind: &str,
+    game: &str,
+    loader: &str,
+    fits: &[(String, String)],
+) -> CmdResult<Option<Value>> {
     let url = format!("{MR}/v2/project/{project}/version");
     let mut q = vec![("game_versions", json!([game]).to_string())];
     if kind == "mod" || kind == "modpack" {
         q.push(("loaders", json!([loader]).to_string()));
     }
     let vs = send_json(http().get(&url).query(&q)).await?;
-    let vs = vs.as_array().cloned().unwrap_or_default();
-    Ok(vs
+    Ok(newest_fitting(vs.as_array().map_or(&[], Vec::as_slice), fits))
+}
+
+fn newest_fitting(versions: &[Value], fits: &[(String, String)]) -> Option<Value> {
+    let ok: Vec<&Value> = versions
         .iter()
-        .find(|v| v["version_type"] == "release")
-        .or(vs.first())
-        .cloned())
+        .filter(|v| {
+            let (games, loaders) = (strs(&v["game_versions"]), strs(&v["loaders"]));
+            fits.iter().all(|(g, l)| games.contains(g) && loaders.contains(l))
+        })
+        .collect();
+    ok.iter().find(|v| v["version_type"] == "release").or(ok.first()).map(|v| (*v).clone())
+}
+
+/// Who uses this game folder's real mods folder, and on what version.
+fn mods_sharing(dir: &Path) -> Vec<(String, Option<(String, String)>)> {
+    let real = canon(&dir.join("mods"));
+    installation_names()
+        .into_iter()
+        .filter(|n| canon(&installations_dir().join(n).join("mods")) == real)
+        .map(|n| {
+            let version = inst_target(&n).ok().map(|(_, g, l)| (g, l));
+            (n, version)
+        })
+        .collect()
+}
+
+/// What a mod must support to go in a folder shared across versions: empty
+/// when they all match. Vanilla members never load mods, so they don't count.
+fn shared_targets(sharing: &[(String, Option<(String, String)>)]) -> Vec<(String, String)> {
+    let mut all: Vec<_> = sharing.iter().filter_map(|(_, v)| v.clone()).collect();
+    all.sort();
+    all.dedup();
+    if all.len() < 2 {
+        return vec![];
+    }
+    all.retain(|(_, l)| l != "vanilla");
+    all
 }
 
 /// (url, safe file name, sha512) of a version's main file.
@@ -4097,23 +4136,40 @@ enum Fetched {
 }
 
 /// Puts one project (a mod, resource pack or shader) into the installation.
-async fn fetch_project(p: Value, dir: PathBuf, game: String, loader: String, have: bool, dep: bool) -> Fetched {
+async fn fetch_project(
+    p: Value,
+    dir: PathBuf,
+    game: String,
+    loader: String,
+    shared: Vec<(String, String)>,
+    have: bool,
+    dep: bool,
+) -> Fetched {
     let title = p["title"].as_str().unwrap_or("?").to_string();
     let kind = p["project_type"].as_str().unwrap_or("");
     if have {
         return if dep { Fetched::Quiet } else { Fetched::Skipped(format!("{title} (already installed)")) };
     }
     let folder = match kind {
-        "mod" if loader == "vanilla" => return Fetched::Skipped(format!("{title} (needs Fabric)")),
+        "mod" if loader == "vanilla" && shared.is_empty() => {
+            return Fetched::Skipped(format!("{title} (needs Fabric)"))
+        }
         "mod" => "mods",
         "resourcepack" => "resourcepacks",
         "shader" => "shaderpacks",
         other => return Fetched::Skipped(format!("{title} ({other}s import on their own)")),
     };
     let id = p["id"].as_str().unwrap_or("");
-    let v = match pick_version(id, kind, &game, &loader).await {
+    // only the mods folder is what's shared across versions
+    let fits: &[(String, String)] = if kind == "mod" { &shared } else { &[] };
+    let (g, l) = fits.first().map_or((&game, &loader), |(g, l)| (g, l));
+    let v = match pick_version(id, kind, g, l, fits).await {
         Ok(Some(v)) => v,
-        Ok(None) => return Fetched::Skipped(format!("{title} (no {game} {loader} version)")),
+        Ok(None) if fits.len() > 1 => {
+            let all: Vec<String> = fits.iter().map(|(g, l)| format!("{g} {l}")).collect();
+            return Fetched::Skipped(format!("{title} (no build supports {} — unlink to give each its own)", all.join(" + ")));
+        }
+        Ok(None) => return Fetched::Skipped(format!("{title} (no {g} {l} version)")),
         Err(e) => return Fetched::Skipped(format!("{title} ({e})")),
     };
     let Some((url, name, hash)) = primary_file(&v) else {
@@ -4163,7 +4219,7 @@ async fn install_mrpack(
     report: &mut ImportReport,
     p: &Progress,
 ) -> CmdResult<()> {
-    let v = pick_version(project, "modpack", game, loader)
+    let v = pick_version(project, "modpack", game, loader, &[])
         .await?
         .ok_or(format!("This pack has no {game} {loader} version"))?;
     let (url, name, hash) = primary_file(&v).ok_or("This pack has no file")?;
@@ -4231,6 +4287,7 @@ async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: S
 
 async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
+    let shared = shared_targets(&mods_sharing(&dir));
     let mut report = ImportReport::default();
     let mut titles = vec![];
     let mut queue = vec![];
@@ -4244,7 +4301,9 @@ async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdRes
             }
         };
         titles.push(info.title.clone());
-        if info.kind == "modpack" {
+        if info.kind == "modpack" && !shared.is_empty() {
+            report.skipped.push(format!("{} (a modpack is built for one version — unlink this folder first)", info.title));
+        } else if info.kind == "modpack" {
             install_mrpack(&info.projects[0], &dir, &game, &loader, &mut report, p).await?;
         } else {
             queue.extend(info.projects);
@@ -4285,7 +4344,7 @@ async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdRes
             .into_iter()
             .map(|p| {
                 let has = p["id"].as_str().is_some_and(|id| have.contains(id));
-                fetch_project(p, dir.clone(), game.clone(), loader.clone(), has, dep)
+                fetch_project(p, dir.clone(), game.clone(), loader.clone(), shared.clone(), has, dep)
             })
             .collect();
         let label = |f: &Fetched| match f {
@@ -4327,16 +4386,7 @@ fn mixed_versions(game: &str, loader: &str, sharing: &[(String, Option<(String, 
 
 async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> {
     let (dir, game, loader) = inst_target(installation)?;
-    let real = canon(&dir.join("mods"));
-    let sharing: Vec<_> = installation_names()
-        .into_iter()
-        .filter(|n| canon(&installations_dir().join(n).join("mods")) == real)
-        .map(|n| {
-            let version = inst_target(&n).ok().map(|(_, g, l)| (g, l));
-            (n, version)
-        })
-        .collect();
-    if let Some(e) = mixed_versions(&game, &loader, &sharing) {
+    if let Some(e) = mixed_versions(&game, &loader, &mods_sharing(&dir)) {
         return Err(e);
     }
     p.say("Checking for updates");
@@ -6038,6 +6088,31 @@ mod tests {
         }
         assert!(saves.join("W/level.dat").is_file());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn shared_folders_only_take_builds_that_fit_everyone() {
+        let t = |g: &str, l: &str| (g.to_string(), l.to_string());
+        let m = |n: &str, g: &str, l: &str| (n.to_string(), Some(t(g, l)));
+        assert!(shared_targets(&[m("A", "1.21.10", "fabric"), m("B", "1.21.10", "fabric")]).is_empty());
+        let mixed = shared_targets(&[m("A", "1.21.10", "fabric"), m("B", "1.21.4", "fabric"), ("C".into(), None)]);
+        assert_eq!(mixed, vec![t("1.21.10", "fabric"), t("1.21.4", "fabric")]);
+        // vanilla never loads mods, so only the Fabric install has to fit
+        let with_vanilla = shared_targets(&[m("A", "1.21.10", "fabric"), m("V", "1.21.4", "vanilla")]);
+        assert_eq!(with_vanilla, vec![t("1.21.10", "fabric")]);
+
+        let v = |id: &str, kind: &str, games: &[&str]| {
+            json!({"id": id, "version_type": kind, "game_versions": games, "loaders": ["fabric"]})
+        };
+        let builds = [
+            v("new-only", "release", &["1.21.10"]),
+            v("both-beta", "beta", &["1.21.4", "1.21.10"]),
+            v("both", "release", &["1.21.4", "1.21.10"]),
+        ];
+        assert_eq!(newest_fitting(&builds, &mixed).unwrap()["id"], "both");
+        assert_eq!(newest_fitting(&builds, &[]).unwrap()["id"], "new-only");
+        assert!(newest_fitting(&builds[..1], &mixed).is_none());
+        assert!(newest_fitting(&builds, &[t("1.21.10", "quilt")]).is_none());
     }
 
     #[test]

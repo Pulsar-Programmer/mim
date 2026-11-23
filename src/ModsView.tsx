@@ -69,12 +69,8 @@ export function ModsView({
   const mixedVersions =
     new Set(section?.members.map((m) => `${m.game_version}/${m.loader}`)).size > 1;
   const linkedFolder = !!installations.find((i) => i.name === current)?.mods_link;
-  // a shared section imports into its shared folder, for one member's version
-  const importers = (section?.members.length ? section.members : section?.inst ? [section.inst] : []).filter(
-    (m, n, all) => all.findIndex((o) => o.game_version === m.game_version && o.loader === m.loader) === n
-  );
-  const [importFor, setImportFor] = useState<string | null>(null);
-  const importTo = importers.find((m) => m.name === importFor)?.name ?? importers[0]?.name;
+  // a shared section imports into its shared folder, through any member
+  const importTo = section?.members[0]?.name ?? section?.inst?.name;
 
   const [mods = [], reload] = useCached<Mod[]>(
     `mods:${current}`,
@@ -229,25 +225,14 @@ export function ModsView({
             >
               <input
                 className="search"
-                placeholder={brief("Paste Modrinth or CurseForge links — mods, collections or modpacks")}
+                placeholder={
+                  mixedVersions
+                    ? "Paste links — only builds that support every version here are added"
+                    : brief("Paste Modrinth or CurseForge links — mods, collections or modpacks")
+                }
                 value={link}
                 onChange={(e) => setLink(e.target.value)}
               />
-              {importers.length > 1 && (
-                <select
-                  className="sort"
-                  value={importTo}
-                  onChange={(e) => setImportFor(e.target.value)}
-                  title="Which version's builds to download into this shared folder"
-                  aria-label="Download builds for"
-                >
-                  {importers.map((m) => (
-                    <option key={m.name} value={m.name}>
-                      {m.game_version ?? m.name} {m.loader ?? ""}
-                    </option>
-                  ))}
-                </select>
-              )}
               <button className="btn" disabled={!link.trim() || !!busy}>
                 {busy === "import" ? "Importing…" : "Import"}
               </button>
