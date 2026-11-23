@@ -7,6 +7,7 @@ import {
   Installation,
   PackInfo,
   PackList,
+  Standard,
   okToChangeShared,
   reportSummary,
   splitLinks,
@@ -50,16 +51,22 @@ export function PacksView({
   notify: (m: string) => void;
   installations: Installation[];
 }) {
+  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
   const places = useMemo(
-    () => instancePlaces("resourcepacks", installations, () => "", "shared folder"),
-    [installations]
+    () => instancePlaces("resourcepacks", installations, standards),
+    [installations, standards]
   );
-  // a picked installation that now shares a folder lands on that instance
+  // a picked installation that now uses a standard lands on that standard
   const [picked, setPicked] = useState<string>();
   const section = places.find((p) => p.key === picked || p.members?.some((m) => m.name === picked)) ?? places[0];
   const scope = section.kind === "root" ? null : section.key;
-  // a shared instance imports into its folder through any member
-  const importTo = section.members?.[0]?.name ?? scope;
+  const isStandard = !!section.std && !section.std.builtin;
+  const members = section.members ?? [];
+  // a standard imports through an installation using it, for its game version
+  const importTo = members[0]?.name ?? (isStandard ? null : scope);
+  // a standard has no active list of its own: read it from an installation using it
+  const listScope = isStandard ? (members[0]?.name ?? scope) : scope;
+  const canToggle = !isStandard || members.length > 0;
   // one game folder per options.txt: linked ones already share their list
   const optionsOf = (i: Installation) => {
     const l = i.links["options.txt"];
@@ -67,14 +74,14 @@ export function PacksView({
   };
   const writers: (string | null)[] = [
     ...(scope === null ? [null] : []),
-    ...(section.members?.length ? section.members : installations.filter((i) => i.name === scope))
+    ...(members.length ? members : installations.filter((i) => i.name === scope))
       .filter((m) => scope !== null || optionsOf(m) !== "")
       .filter((m, n, all) => all.findIndex((o) => optionsOf(o) === optionsOf(m)) === n)
       .map((m) => m.name),
   ];
   const [list, reload] = useCached<PackList>(
-    `packs:${scope}`,
-    () => api.listPacks(scope),
+    `packs:${listScope}`,
+    () => api.listPacks(listScope),
     notify
   );
   const { armed, confirm } = useConfirm(notify, reload);
@@ -102,7 +109,7 @@ export function PacksView({
   async function save(next: string[]) {
     try {
       // the active list lives in each options.txt, so an instance sets them all
-      const others = writers.filter((w) => w !== scope);
+      const others = writers.filter((w) => w !== listScope);
       const lists = await Promise.all(others.map((w) => api.listPacks(w)));
       const mine = (list?.enabled ?? []).join("\n");
       const differ = others.filter((_, n) => lists[n].enabled.join("\n") !== mine);
@@ -116,7 +123,7 @@ export function PacksView({
         }))
       )
         return;
-      for (const w of [scope, ...others]) await api.setPacks(w, next);
+      for (const w of writers) await api.setPacks(w, next);
       reload();
     } catch (e) {
       notify(String(e));
@@ -217,7 +224,8 @@ export function PacksView({
             className={`switch ${on ? "on" : ""}`}
             role="switch"
             aria-checked={on}
-            title={on ? "Turn off" : brief("Turn on — goes on top")}
+            disabled={!canToggle}
+            title={!canToggle ? "Link an installation to turn packs on" : on ? "Turn off" : brief("Turn on — goes on top")}
             onClick={() =>
               save(on ? enabled.filter((f) => f !== p.file) : [p.file, ...enabled])
             }
@@ -270,7 +278,7 @@ export function PacksView({
       <p className="hint wide">
         Which packs are on, and their order, lives in each game folder's{" "}
         <code>options.txt</code>
-        <span className="more"> — changing them here updates every installation in this instance</span>.
+        <span className="more"> — changing them here updates every installation using this standard</span>.
         Close Minecraft first, or it saves its own list over yours.
       </p>
 

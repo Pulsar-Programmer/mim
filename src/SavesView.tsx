@@ -1,7 +1,7 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { api, formatBytes, okToChangeShared, timeAgo, Installation, World, WorldDetails } from "./api";
-import { PlacePicker, sharedPlaces } from "./Places";
+import { api, formatBytes, okToChangeShared, timeAgo, Installation, Standard, World, WorldDetails } from "./api";
+import { PlacePicker, scopeName, sharedPlaces } from "./Places";
 import { useCached, useConfirm } from "./hooks";
 
 const MODES = ["Survival", "Creative", "Adventure", "Spectator"];
@@ -39,7 +39,7 @@ export function SavesView({
   const [location, setLocation] = useState("all");
   const [open, setOpen] = useState<World | null>(null);
 
-  const locations = useMemo(() => [...new Set(worlds.map((w) => w.location))], [worlds]);
+  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
   const shown = worlds.filter((w) => location === "all" || w.location === location);
   const total = worlds.reduce((n, w) => n + w.size_bytes, 0);
   // imports land in the location being viewed ("all" → shared saves)
@@ -47,7 +47,7 @@ export function SavesView({
 
   async function importWorld(kind: "folder" | "zip") {
     const src = await openDialog({
-      title: `Import a world into ${target}`,
+      title: `Import a world into ${scopeName(target)}`,
       directory: kind === "folder",
       multiple: false,
       filters: kind === "zip" ? [{ name: "World zip", extensions: ["zip"] }] : undefined,
@@ -55,7 +55,7 @@ export function SavesView({
     if (typeof src !== "string") return;
     try {
       const name = await api.importWorld(src, target === "Shared" ? null : target);
-      notify(`Imported “${name}” into ${target}`);
+      notify(`Imported “${name}” into ${scopeName(target)}`);
       reload();
     } catch (e) {
       notify(String(e));
@@ -87,7 +87,7 @@ export function SavesView({
       </p>
 
       <PlacePicker
-        places={sharedPlaces("saves", locations, installations, (l) =>
+        places={sharedPlaces("saves", installations, standards, (l) =>
           worlds.filter((w) => w.location === l).length
         )}
         value={location}
@@ -117,7 +117,7 @@ export function SavesView({
                 </span>
                 <span>{formatBytes(w.size_bytes)}</span>
               </div>
-              {w.location !== "Shared" && <div className="world-loc">{w.location}</div>}
+              {w.location !== "Shared" && <div className="world-loc">{scopeName(w.location)}</div>}
             </div>
           </button>
         ))}
@@ -229,7 +229,7 @@ function WorldDrawer({
             )}
           </dd>
           <dt>Lives in</dt>
-          <dd>{w.location === "Shared" ? "Shared saves (all linked installations)" : w.location}</dd>
+          <dd>{w.location === "Shared" ? "Shared saves (all linked installations)" : scopeName(w.location)}</dd>
           <dt>Players</dt>
           <dd>{details ? details.players : "…"}</dd>
           <dt>Size</dt>

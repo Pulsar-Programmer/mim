@@ -7,6 +7,7 @@ import {
   Installation,
   Mod,
   okToChangeShared,
+  Standard,
   reportSummary,
   splitLinks,
   timeAgo,
@@ -15,14 +16,6 @@ import { ProgressBar, useProgress } from "./Progress";
 import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
 import { instancePlaces, PlacePicker } from "./Places";
-
-interface ModScope {
-  key: string | null;
-  label: string;
-  inst?: Installation;
-  sub: string;
-  members: Installation[];
-}
 
 export function ModsView({
   notify,
@@ -33,24 +26,24 @@ export function ModsView({
   installations: Installation[];
   onChanged: () => void;
 }) {
-  // installations with mods first, the main folder last. Installations linking
-  // the same mods folder are one section, since they have the same mods.
-  const scopes = useMemo<ModScope[]>(() => {
-    const sorted = [...installations].sort((a, b) => b.mods_count - a.mods_count);
-    return instancePlaces(
-      "mods",
-      sorted,
-      (i) => `${i.mods_count} mod${i.mods_count === 1 ? "" : "s"}`,
-      "root mods folder"
-    ).map((p) => ({ ...p, key: p.kind === "root" ? null : p.key, sub: p.sub ?? "", members: p.members ?? [] }));
-  }, [installations]);
-  const [scope, setScope] = useState<string | null | undefined>(undefined);
-  // a picked installation that now shares a folder lands on that section
-  const picked = scopes.find((s) => s.key === scope || s.members.some((m) => m.name === scope));
-  const current = picked ? picked.key : scopes[0]?.key ?? null;
-  const section = scopes.find((s) => s.key === current);
-  // a shared section imports into its shared folder, through any member
-  const importTo = section?.members[0]?.name ?? section?.inst?.name;
+  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  // standards first, then installations with their own mods, most mods first
+  const scopes = useMemo(
+    () =>
+      instancePlaces(
+        "mods",
+        [...installations].sort((a, b) => b.mods_count - a.mods_count),
+        standards,
+        (i) => `${i.mods_count} mod${i.mods_count === 1 ? "" : "s"}`
+      ),
+    [installations, standards]
+  );
+  const [scope, setScope] = useState<string>();
+  // a picked installation that now uses a standard lands on that standard
+  const section = scopes.find((s) => s.key === scope || s.members?.some((m) => m.name === scope)) ?? scopes[0];
+  const current = section.kind === "root" ? null : section.key;
+  // Modrinth needs a game version, so a standard imports through an installation using it
+  const importTo = section.members?.[0]?.name ?? section.inst?.name;
 
   const [mods = [], reload] = useCached<Mod[]>(
     `mods:${current}`,
@@ -115,7 +108,7 @@ export function ModsView({
   }
 
   async function fromModrinth(kind: "import" | "update") {
-    const target = kind === "import" ? importTo : current;
+    const target = importTo;
     if (!target) return;
     setBusy(kind);
     setReport(null);
@@ -135,9 +128,11 @@ export function ModsView({
     }
   }
 
-  const folder = current
-    ? installations.find((i) => i.name === current)?.path + "/mods"
-    : null;
+  const folder = section.inst
+    ? `${section.inst.path}/mods`
+    : section.std && !section.std.builtin
+      ? `${section.std.path}/mods`
+      : null;
 
   return (
     <>
@@ -155,7 +150,7 @@ export function ModsView({
               Open Folder
             </button>
           )}
-          {current && (
+          {current && importTo && (
             <button
               className="btn"
               onClick={() => fromModrinth("update")}
@@ -176,18 +171,7 @@ export function ModsView({
             launcher and mod managers use — the game skips it.
           </p>
 
-      <PlacePicker
-        places={scopes.map((s) => ({
-          key: s.key ?? "",
-          label: s.label,
-          kind: s.key == null ? ("root" as const) : undefined,
-          inst: s.inst,
-          sub: s.sub,
-          members: s.members,
-        }))}
-        value={current ?? ""}
-        onChange={(k) => setScope(k || null)}
-      />
+      <PlacePicker places={scopes} value={section.key} onChange={setScope} />
       <div className="options-layout">
 
         <section className="options-editor">
@@ -211,8 +195,8 @@ export function ModsView({
             </form>
           ) : (
             <p className="hint">
-              Pick an installation to import from Modrinth
-              <span className="more"> — the Minecraft folder has no fixed version to match mods to.</span>
+              Link an installation here to import from Modrinth
+              <span className="more"> — mods are matched to its game version.</span>
             </p>
           )}
           {busy && (

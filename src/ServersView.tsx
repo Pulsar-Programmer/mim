@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { api, Installation, Ping, Server, ServerList } from "./api";
-import { PlacePicker } from "./Places";
+import { api, Installation, Ping, Server, ServerList, Standard } from "./api";
+import { instancePlaces, PlacePicker } from "./Places";
 import { brief } from "./settings";
 import { useCached } from "./hooks";
 
@@ -33,21 +33,24 @@ export function ServersView({
   installations: Installation[];
 }) {
   const [lists = [], reload] = useCached<ServerList[]>("servers", api.listServers, notify);
-  const [selected, setSelected] = useState<string | null>(null);
+  const [selected, setSelected] = useState<string>();
   const [, bump] = useState(0);
   const [form, setForm] = useState<{ index: number | null; name: string; ip: string } | null>(
     null
   );
   const [showBackup, setShowBackup] = useState(false);
 
-  // lists that are the same file are one instance, shown as the first of them
-  const instances = lists.filter((l, n) => lists.findIndex((o) => o.target === l.target) === n);
-  const sharersOf = (l: ServerList) => lists.filter((o) => o.target === l.target);
-  const nameOf = (l: ServerList) =>
-    l.installation == null ? "Minecraft folder" : sharersOf(l).length > 1 ? (l.link ?? l.label) : l.label;
-  const pickedList = lists.find((l) => l.label === selected) ?? lists[0];
-  const list = instances.find((l) => l.target === pickedList?.target);
-  const sharers = list ? sharersOf(list).flatMap((l) => l.installation ?? []) : [];
+  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const keyOf = (l: ServerList) => l.installation ?? "";
+  const places = instancePlaces("servers.dat", installations, standards, (i) => {
+    const n = lists.find((l) => l.installation === i.name)?.servers.length ?? 0;
+    return `${n} server${n === 1 ? "" : "s"}`;
+  });
+  const section = places.find((p) => p.key === selected || p.members?.some((m) => m.name === selected)) ?? places[0];
+  const list = lists.find((l) => keyOf(l) === section.key);
+  const sharers = (section.members ?? []).map((m) => m.name);
+  const nameOf = (l: ServerList) => places.find((p) => p.key === keyOf(l))?.label ?? l.label;
+  const others = lists.filter((l) => l !== list && places.some((p) => p.key === keyOf(l)));
 
   function pingAll(force = false) {
     for (const s of list?.servers ?? []) {
@@ -99,8 +102,8 @@ export function ServersView({
     save(next, "Reordered");
   }
 
-  function copyTo(s: Server, label: string) {
-    const target = lists.find((l) => l.label === label);
+  function copyTo(s: Server, key: string) {
+    const target = lists.find((l) => keyOf(l) === key);
     if (!target) return;
     const name = nameOf(target);
     if (target.servers.some((t) => same(t, s))) return notify(`${name} already has ${s.name}`);
@@ -132,24 +135,8 @@ export function ServersView({
           </p>
 
       <PlacePicker
-        places={instances.map((l) => {
-          const group = sharersOf(l);
-          const members = group.length > 1
-            ? group.flatMap((g) => installations.filter((i) => i.name === g.installation))
-            : [];
-          const count = l.exists
-            ? `${l.servers.length} server${l.servers.length === 1 ? "" : "s"}`
-            : "no servers.dat yet";
-          return {
-            key: l.label,
-            label: nameOf(l),
-            kind: l.installation == null ? ("root" as const) : undefined,
-            inst: members.length ? undefined : installations.find((i) => i.name === l.installation),
-            members,
-            sub: members.length ? `${count} · ${members.length} linked` : l.link ? `${count} · from ${l.link}` : count,
-          };
-        })}
-        value={list?.label ?? ""}
+        places={places}
+        value={section.key}
         onChange={(k) => {
           setSelected(k);
           setForm(null);
@@ -158,9 +145,9 @@ export function ServersView({
       <div className="options-layout">
 
         <section className="options-editor">
-          {sharers.length > (list?.installation == null ? 0 : 1) && (
+          {sharers.length > 0 && (
             <p className="hint">
-              Shared by <b>{sharers.join(", ")}</b> — changes here apply to all of them.
+              Used by <b>{sharers.join(", ")}</b> — changes here apply to all of them.
             </p>
           )}
           {form && (
@@ -242,20 +229,18 @@ export function ServersView({
                       ↓
                     </button>
                     <button onClick={() => setForm({ index: i, name: s.name, ip: s.ip })}>Edit</button>
-                    {instances.length > 1 && (
+                    {others.length > 0 && (
                       <select
                         value=""
                         onChange={(e) => e.target.value && copyTo(s, e.target.value)}
-                        title="Copy to another installation"
+                        title="Copy to another instance"
                       >
                         <option value="">Copy to…</option>
-                        {instances
-                          .filter((l) => l.path !== list.path)
-                          .map((l) => (
-                            <option key={l.path} value={l.label}>
-                              {nameOf(l)}
-                            </option>
-                          ))}
+                        {others.map((l) => (
+                          <option key={l.path} value={keyOf(l)}>
+                            {nameOf(l)}
+                          </option>
+                        ))}
                       </select>
                     )}
                     <button
