@@ -1,6 +1,6 @@
 [package]
 name = "mim"
-version = "0.1.4"
+version = "0.1.5"
 description = "MIM — Minecraft Installation Manager"
 authors = ["maze"]
 edition = "2021"
