@@ -14,7 +14,7 @@ import {
 import { ProgressBar, useProgress } from "./Progress";
 import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
-import { PlacePicker } from "./Places";
+import { instancePlaces, PlacePicker } from "./Places";
 
 interface ModScope {
   key: string | null;
@@ -37,28 +37,12 @@ export function ModsView({
   // the same mods folder are one section, since they have the same mods.
   const scopes = useMemo<ModScope[]>(() => {
     const sorted = [...installations].sort((a, b) => b.mods_count - a.mods_count);
-    const sharing = (i: Installation) => sorted.filter((o) => o.mods_link?.dir === i.mods_link?.dir);
-    const places = sorted.flatMap<ModScope>((i) => {
-      const count = `${i.mods_count} mod${i.mods_count === 1 ? "" : "s"}`;
-      if (!i.mods_link) return [{ key: i.name, label: i.name, inst: i, sub: count, members: [] }];
-      if (i.mods_link.from === "Shared") return [];
-      const group = sharing(i);
-      if (group[0] !== i) return [];
-      return group.length > 1
-        ? [{ key: i.name, label: i.mods_link.from, inst: undefined, sub: `${count} · ${group.length} linked`, members: group }]
-        : [{ key: i.name, label: i.name, inst: i, sub: `${count} · from ${i.mods_link.from}`, members: [] }];
-    });
-    const inRoot = sorted.filter((i) => i.mods_link?.from === "Shared");
-    return [
-      ...places,
-      {
-        key: null,
-        label: "Minecraft folder",
-        inst: undefined,
-        sub: inRoot.length ? `${inRoot.length} linked` : "root mods folder",
-        members: inRoot,
-      },
-    ];
+    return instancePlaces(
+      "mods",
+      sorted,
+      (i) => `${i.mods_count} mod${i.mods_count === 1 ? "" : "s"}`,
+      "root mods folder"
+    ).map((p) => ({ ...p, key: p.kind === "root" ? null : p.key, sub: p.sub ?? "", members: p.members ?? [] }));
   }, [installations]);
   const [scope, setScope] = useState<string | null | undefined>(undefined);
   // a picked installation that now shares a folder lands on that section

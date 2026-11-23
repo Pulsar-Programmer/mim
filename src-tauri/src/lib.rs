@@ -307,33 +307,36 @@ struct Installation {
     last_used: Option<String>,
     created: Option<String>,
     mods_count: usize,
-    /// set when the whole mods folder is a link
-    mods_link: Option<ModsLink>,
+    /// which of INSTANCE_ITEMS are links, and to what
+    links: std::collections::HashMap<String, ItemLink>,
     registered: bool,
     linked: Vec<String>,
     unlinked: Vec<String>,
 }
 
 #[derive(Serialize)]
-struct ModsLink {
+struct ItemLink {
     /// the standard it comes from, or "Shared" for the Minecraft folder's
     from: String,
-    /// the real folder: installations with the same one share their mods
+    /// the real path: installations with the same one are one instance
     dir: String,
 }
 
-fn mods_link(game: &Path) -> Option<ModsLink> {
-    let mods = game.join("mods");
-    if !mods.is_symlink() {
+/// What installations can share whole, so the views can group them.
+const INSTANCE_ITEMS: [&str; 5] = ["mods", "resourcepacks", "saves", "screenshots", "options.txt"];
+
+fn item_link(game: &Path, name: &str) -> Option<ItemLink> {
+    let item = game.join(name);
+    if !item.is_symlink() {
         return None;
     }
-    let dir = canon(&mods);
-    let from = if dir == canon(&mc_dir().join("mods")) {
+    let dir = canon(&item);
+    let from = if dir == canon(&mc_dir().join(name)) {
         SHARED.to_string()
     } else {
-        link_source(&mods).unwrap_or_else(|| "Linked folder".into())
+        link_source(&item).unwrap_or_else(|| "Linked folder".into())
     };
-    Some(ModsLink { from, dir: dir.to_string_lossy().into() })
+    Some(ItemLink { from, dir: dir.to_string_lossy().into() })
 }
 
 #[tauri::command(async)]
@@ -397,7 +400,10 @@ fn list_installations() -> CmdResult<Vec<Installation>> {
         }
 
         out.push(Installation {
-            mods_link: mods_link(&path),
+            links: INSTANCE_ITEMS
+                .iter()
+                .filter_map(|n| item_link(&path, n).map(|l| (n.to_string(), l)))
+                .collect(),
             name,
             path: path.to_string_lossy().into(),
             version_id,
@@ -2917,19 +2923,25 @@ fn read_world(dir: &Path, location: &str) -> World {
     }
 }
 
-/// Root saves, plus any installation that keeps its own (non-linked) saves.
-fn world_dirs(root: &Path) -> Vec<(String, PathBuf)> {
-    let mut locations = vec![("Shared".to_string(), root.join("saves"))];
-    if let Ok(rd) = fs::read_dir(root.join("installations")) {
-        for e in rd.flatten() {
-            let saves = e.path().join("saves");
-            if saves.is_dir() && !saves.is_symlink() {
-                locations.push((e.file_name().to_string_lossy().into(), saves));
-            }
+/// The Minecraft folder's `sub`, then each other real folder installations
+/// use, once, under the first installation that uses it.
+fn instance_dirs(root: &Path, sub: &str) -> Vec<(String, PathBuf)> {
+    let shared = root.join(sub);
+    let mut seen = std::collections::HashSet::from([canon(&shared)]);
+    let mut out = vec![(SHARED.to_string(), shared)];
+    let insts = root.join("installations");
+    for name in names_in(&insts) {
+        let d = insts.join(&name).join(sub);
+        if name != SHARED && d.is_dir() && seen.insert(canon(&d)) {
+            out.push((name, d));
         }
     }
+    out
+}
+
+fn world_dirs(root: &Path) -> Vec<(String, PathBuf)> {
     let mut out = vec![];
-    for (loc, saves) in locations {
+    for (loc, saves) in instance_dirs(root, "saves") {
         for e in fs::read_dir(&saves).into_iter().flatten().flatten() {
             if e.path().is_dir() && !e.file_name().to_string_lossy().starts_with('.') {
                 out.push((loc.clone(), e.path()));
@@ -3159,6 +3171,10 @@ struct ServerList {
     label: String,
     path: String,
     exists: bool,
+    /// the standard it's linked from, or "Shared"
+    link: Option<String>,
+    /// the file it really is: lists with the same one are one instance
+    target: String,
     servers: Vec<Server>,
     backup: Vec<Server>,
 }
@@ -3175,6 +3191,8 @@ fn list_servers() -> Vec<ServerList> {
             Some(ServerList {
                 label: inst.clone().unwrap_or("Main folder".into()),
                 exists: p.exists(),
+                link: p.is_symlink().then(|| link_source(&p)).flatten(),
+                target: canon(&p).to_string_lossy().into(),
                 servers: read_servers(&p),
                 backup: read_servers(&dir.join("servers.dat_old")),
                 path: p.to_string_lossy().into(),
@@ -4644,15 +4662,8 @@ struct Screenshot {
 
 #[tauri::command(async)]
 fn list_screenshots() -> Vec<Screenshot> {
-    let mut dirs = vec![("Shared".to_string(), mc_dir().join("screenshots"))];
-    for name in installation_names() {
-        let d = installations_dir().join(&name).join("screenshots");
-        if d.is_dir() && !d.is_symlink() {
-            dirs.push((name, d));
-        }
-    }
     let mut out = vec![];
-    for (loc, d) in dirs {
+    for (loc, d) in instance_dirs(&mc_dir(), "screenshots") {
         for e in fs::read_dir(&d).into_iter().flatten().flatten() {
             let name = e.file_name().to_string_lossy().to_string();
             if !name.to_lowercase().ends_with(".png") {
@@ -5459,6 +5470,27 @@ mod tests {
         assert_eq!(w.version.as_deref(), Some("1.21.10"));
         assert_eq!(w.seed.as_deref(), Some("-42"));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instance_dirs_lists_each_real_folder_once() {
+        use std::os::unix::fs::symlink;
+        let root = std::env::temp_dir().join(format!("mim-instances-{}", uuid::Uuid::new_v4()));
+        let insts = root.join("installations");
+        for d in ["saves", "standards/Pack/saves", "installations/Own/saves"] {
+            fs::create_dir_all(root.join(d)).unwrap();
+        }
+        for n in ["A", "B", "Root"] {
+            fs::create_dir_all(insts.join(n)).unwrap();
+        }
+        symlink(root.join("standards/Pack/saves"), insts.join("A/saves")).unwrap();
+        symlink(root.join("standards/Pack/saves"), insts.join("B/saves")).unwrap();
+        symlink(root.join("saves"), insts.join("Root/saves")).unwrap();
+
+        let names: Vec<_> = instance_dirs(&root, "saves").into_iter().map(|(n, _)| n).collect();
+        assert_eq!(names, ["Shared", "A", "Own"]);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     /// `python3 scripts/seed_sample.py && cargo test -- --ignored`

@@ -40,7 +40,14 @@ export function ServersView({
   );
   const [showBackup, setShowBackup] = useState(false);
 
-  const list = lists.find((l) => l.label === selected) ?? lists[0];
+  // lists that are the same file are one instance, shown as the first of them
+  const instances = lists.filter((l, n) => lists.findIndex((o) => o.target === l.target) === n);
+  const sharersOf = (l: ServerList) => lists.filter((o) => o.target === l.target);
+  const nameOf = (l: ServerList) =>
+    l.installation == null ? "Minecraft folder" : sharersOf(l).length > 1 ? (l.link ?? l.label) : l.label;
+  const pickedList = lists.find((l) => l.label === selected) ?? lists[0];
+  const list = instances.find((l) => l.target === pickedList?.target);
+  const sharers = list ? sharersOf(list).flatMap((l) => l.installation ?? []) : [];
 
   function pingAll(force = false) {
     for (const s of list?.servers ?? []) {
@@ -95,8 +102,9 @@ export function ServersView({
   function copyTo(s: Server, label: string) {
     const target = lists.find((l) => l.label === label);
     if (!target) return;
-    if (target.servers.some((t) => same(t, s))) return notify(`${label} already has ${s.name}`);
-    save([...target.servers, s], `Copied ${s.name} to ${label}`, target);
+    const name = nameOf(target);
+    if (target.servers.some((t) => same(t, s))) return notify(`${name} already has ${s.name}`);
+    save([...target.servers, s], `Copied ${s.name} to ${name}`, target);
   }
 
   const backupOnly = list ? list.backup.filter((b) => !list.servers.some((s) => same(s, b))) : [];
@@ -124,15 +132,23 @@ export function ServersView({
           </p>
 
       <PlacePicker
-        places={lists.map((l) => ({
-          key: l.label,
-          label: l.installation == null ? "Minecraft folder" : l.label,
-          kind: l.installation == null ? ("root" as const) : undefined,
-          inst: installations.find((i) => i.name === l.installation),
-          sub: l.exists
+        places={instances.map((l) => {
+          const group = sharersOf(l);
+          const members = group.length > 1
+            ? group.flatMap((g) => installations.filter((i) => i.name === g.installation))
+            : [];
+          const count = l.exists
             ? `${l.servers.length} server${l.servers.length === 1 ? "" : "s"}`
-            : "no servers.dat yet",
-        }))}
+            : "no servers.dat yet";
+          return {
+            key: l.label,
+            label: nameOf(l),
+            kind: l.installation == null ? ("root" as const) : undefined,
+            inst: members.length ? undefined : installations.find((i) => i.name === l.installation),
+            members,
+            sub: members.length ? `${count} · ${members.length} linked` : l.link ? `${count} · from ${l.link}` : count,
+          };
+        })}
         value={list?.label ?? ""}
         onChange={(k) => {
           setSelected(k);
@@ -142,6 +158,11 @@ export function ServersView({
       <div className="options-layout">
 
         <section className="options-editor">
+          {sharers.length > (list?.installation == null ? 0 : 1) && (
+            <p className="hint">
+              Shared by <b>{sharers.join(", ")}</b> — changes here apply to all of them.
+            </p>
+          )}
           {form && (
             <div className="server-form">
               <input
@@ -221,18 +242,18 @@ export function ServersView({
                       ↓
                     </button>
                     <button onClick={() => setForm({ index: i, name: s.name, ip: s.ip })}>Edit</button>
-                    {lists.length > 1 && (
+                    {instances.length > 1 && (
                       <select
                         value=""
                         onChange={(e) => e.target.value && copyTo(s, e.target.value)}
                         title="Copy to another installation"
                       >
                         <option value="">Copy to…</option>
-                        {lists
+                        {instances
                           .filter((l) => l.path !== list.path)
                           .map((l) => (
                             <option key={l.path} value={l.label}>
-                              {l.label}
+                              {nameOf(l)}
                             </option>
                           ))}
                       </select>

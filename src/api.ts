@@ -15,6 +15,8 @@ export async function okToChangeShared(paths: string[], what: string, followLink
   );
 }
 
+export type InstanceItem = "mods" | "resourcepacks" | "saves" | "screenshots" | "options.txt";
+
 export interface Installation {
   name: string;
   path: string;
@@ -25,8 +27,8 @@ export interface Installation {
   last_used: string | null;
   created: string | null;
   mods_count: number;
-  /** set when the whole mods folder is a link */
-  mods_link: { from: string; dir: string } | null;
+  /** which shareable items are links, and to what */
+  links: Partial<Record<InstanceItem, { from: string; dir: string }>>;
   registered: boolean;
   linked: string[];
   unlinked: string[];
@@ -232,6 +234,10 @@ export interface ServerList {
   label: string;
   path: string;
   exists: boolean;
+  /** the standard it's linked from, or "Shared" */
+  link: string | null;
+  /** the real file: lists with the same one are one instance */
+  target: string;
   servers: Server[];
   backup: Server[];
 }

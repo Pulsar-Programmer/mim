@@ -1,5 +1,5 @@
 import { useMemo, useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { ask, open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   api,
   formatBytes,
@@ -13,7 +13,7 @@ import {
 } from "./api";
 import { brief } from "./settings";
 import { useCached, useConfirm } from "./hooks";
-import { PlacePicker } from "./Places";
+import { instancePlaces, PlacePicker } from "./Places";
 import { ProgressBar, useProgress } from "./Progress";
 
 // pack_format → the game versions that read it
@@ -50,9 +50,28 @@ export function PacksView({
   notify: (m: string) => void;
   installations: Installation[];
 }) {
-  // undefined until picked: then the first installation, once they've loaded
-  const [picked, setScope] = useState<string | null | undefined>(undefined);
-  const scope = picked === undefined ? (installations[0]?.name ?? null) : picked;
+  const places = useMemo(
+    () => instancePlaces("resourcepacks", installations, () => "", "shared folder"),
+    [installations]
+  );
+  // a picked installation that now shares a folder lands on that instance
+  const [picked, setPicked] = useState<string>();
+  const section = places.find((p) => p.key === picked || p.members?.some((m) => m.name === picked)) ?? places[0];
+  const scope = section.kind === "root" ? null : section.key;
+  // a shared instance imports into its folder through any member
+  const importTo = section.members?.[0]?.name ?? scope;
+  // one game folder per options.txt: linked ones already share their list
+  const optionsOf = (i: Installation) => {
+    const l = i.links["options.txt"];
+    return l ? (l.from === "Shared" ? "" : l.dir) : i.name;
+  };
+  const writers: (string | null)[] = [
+    ...(scope === null ? [null] : []),
+    ...(section.members?.length ? section.members : installations.filter((i) => i.name === scope))
+      .filter((m) => scope !== null || optionsOf(m) !== "")
+      .filter((m, n, all) => all.findIndex((o) => optionsOf(o) === optionsOf(m)) === n)
+      .map((m) => m.name),
+  ];
   const [list, reload] = useCached<PackList>(
     `packs:${scope}`,
     () => api.listPacks(scope),
@@ -82,7 +101,22 @@ export function PacksView({
 
   async function save(next: string[]) {
     try {
-      await api.setPacks(scope, next);
+      // the active list lives in each options.txt, so an instance sets them all
+      const others = writers.filter((w) => w !== scope);
+      const lists = await Promise.all(others.map((w) => api.listPacks(w)));
+      const mine = (list?.enabled ?? []).join("\n");
+      const differ = others.filter((_, n) => lists[n].enabled.join("\n") !== mine);
+      if (
+        differ.length &&
+        !(await ask(`${differ.join(", ")} ${differ.length === 1 ? "has" : "have"} different active packs. Continuing gives this whole instance the same list.`, {
+          title: "Different active packs",
+          kind: "warning",
+          okLabel: "Continue",
+          cancelLabel: "Cancel",
+        }))
+      )
+        return;
+      for (const w of [scope, ...others]) await api.setPacks(w, next);
       reload();
     } catch (e) {
       notify(String(e));
@@ -111,11 +145,11 @@ export function PacksView({
   }
 
   async function importLinks() {
-    if (!scope) return;
+    if (!importTo) return;
     setBusy(true);
     setReport(null);
     try {
-      const r = await api.importLinks(splitLinks(link), scope);
+      const r = await api.importLinks(splitLinks(link), importTo);
       notify(reportSummary(r));
       if (r.skipped.length) setReport(r);
       setLink("");
@@ -127,7 +161,7 @@ export function PacksView({
     }
   }
 
-  const inst = installations.find((i) => i.name === scope);
+  const inst = installations.find((i) => i.name === importTo);
 
   function row(p: PackInfo, i: number | null) {
     const on = i !== null;
@@ -236,27 +270,15 @@ export function PacksView({
       <p className="hint wide">
         Which packs are on, and their order, lives in each game folder's{" "}
         <code>options.txt</code>
-        <span className="more"> — installations linked to the shared folder see the same packs but can turn on
-        different ones</span>. Close Minecraft first, or it saves its own list over yours.
+        <span className="more"> — changing them here updates every installation in this instance</span>.
+        Close Minecraft first, or it saves its own list over yours.
       </p>
 
-      <PlacePicker
-        places={[
-          ...installations.map((i) => ({
-            key: i.name,
-            label: i.name,
-            inst: i,
-            sub: i.linked.includes("resourcepacks") ? "shared folder" : "own folder",
-          })),
-          { key: "", label: "Minecraft folder", kind: "root" as const, sub: "shared folder" },
-        ]}
-        value={scope ?? ""}
-        onChange={(k) => setScope(k || null)}
-      />
+      <PlacePicker places={places} value={section.key} onChange={setPicked} />
 
       <div className="options-layout">
         <section className="options-editor">
-          {scope && (
+          {importTo && (
             <form
               className="options-toolbar import-row"
               onSubmit={(e) => {
