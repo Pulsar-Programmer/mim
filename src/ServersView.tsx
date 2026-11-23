@@ -40,7 +40,7 @@ export function ServersView({
   );
   const [showBackup, setShowBackup] = useState(false);
 
-  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
   const keyOf = (l: ServerList) => l.installation ?? "";
   const places = instancePlaces("servers.dat", installations, standards, (i) => {
     const n = lists.find((l) => l.installation === i.name)?.servers.length ?? 0;
@@ -73,6 +73,7 @@ export function ServersView({
       await api.writeServers(target.installation, servers);
       notify(msg);
       reload();
+      reloadStandards();
     } catch (e) {
       notify(String(e));
     }

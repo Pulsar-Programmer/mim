@@ -244,7 +244,7 @@ export function OptionsView({
     api.optionsSources,
     notify
   );
-  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
   const places = useMemo(
     () => instancePlaces("options.txt", installations, standards, () => "own options.txt"),
     [installations, standards]
@@ -343,6 +343,7 @@ export function OptionsView({
       await api.writeOptions(source.path, await api.readOptions(seed.path));
       notify(`Copied ${nameOf(seed)} options into ${source.label}`);
       reloadSources();
+      reloadStandards();
       reload();
     } catch (e) {
       notify(String(e));

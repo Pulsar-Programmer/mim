@@ -156,6 +156,7 @@ fn game_dir(installation: Option<&str>) -> CmdResult<PathBuf> {
 /// `game_dir`, or a standard's own folder for a "standards/<name>" scope.
 fn scope_dir(scope: Option<&str>) -> CmdResult<PathBuf> {
     match scope.and_then(|s| s.strip_prefix("standards/")) {
+        Some(SHARED) => Ok(mc_dir()),
         Some(name) => standard_dir(name),
         None => game_dir(scope),
     }
@@ -2755,7 +2756,7 @@ fn list_logs(installation: Option<String>) -> CmdResult<Vec<LogEntry>> {
 
 #[tauri::command(async)]
 fn sort_logs(installation: Option<String>) -> CmdResult<usize> {
-    sort_logs_in(&game_dir(installation.as_deref())?).map_err(err)
+    sort_logs_in(&scope_dir(installation.as_deref())?).map_err(err)
 }
 
 /// Reads a log (gunzipping .gz) — last 2 MB only, logs can be huge.
@@ -2775,9 +2776,24 @@ fn read_log(path: String) -> CmdResult<String> {
     Ok(String::from_utf8_lossy(&bytes[start..]).into())
 }
 
+/// What a purge trashes: stray logs and what's inside the log folders. The
+/// folders stay, since installations may link to them.
+fn log_items(root: &Path) -> Vec<PathBuf> {
+    root_entries(root, "logs")
+        .into_iter()
+        .flat_map(|p| {
+            if p.is_dir() {
+                fs::read_dir(&p).into_iter().flatten().flatten().map(|e| e.path()).collect()
+            } else {
+                vec![p]
+            }
+        })
+        .collect()
+}
+
 #[tauri::command(async)]
 fn purge_logs(installation: Option<String>) -> CmdResult<usize> {
-    let t = root_entries(&game_dir(installation.as_deref())?, "logs");
+    let t = log_items(&scope_dir(installation.as_deref())?);
     if !t.is_empty() {
         trash::delete_all(&t).map_err(err)?;
     }
@@ -4290,8 +4306,7 @@ async fn import_links(app: tauri::AppHandle, links: Vec<String>, installation: S
 }
 
 async fn import_in(links: &[String], installation: &str, p: &Progress) -> CmdResult<ImportReport> {
-    let (dir, game, loader) = inst_target(installation)?;
-    let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
+    let (dir, game, loader) = import_target(installation)?;
     let mut report = ImportReport::default();
     let mut titles = vec![];
     let mut queue = vec![];
@@ -4398,13 +4413,35 @@ fn newest_version(game: String, loader: String, sharing: Vec<(String, String)>) 
         .unwrap_or((game, loader))
 }
 
+/// Where an installation or "standards/<name>" scope downloads to, and the
+/// version it matches: the newest of what uses it. A standard nothing modded
+/// uses yet follows the newest modded installation.
+fn import_target(scope: &str) -> CmdResult<(PathBuf, String, String)> {
+    if !scope.starts_with("standards/") {
+        let (dir, game, loader) = inst_target(scope)?;
+        let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
+        return Ok((dir, game, loader));
+    }
+    let dir = scope_dir(Some(scope))?;
+    let versions = |names: Vec<String>| -> Vec<(String, String)> {
+        names.iter().filter_map(|n| inst_target(n).ok().map(|(_, g, l)| (g, l))).collect()
+    };
+    let mut users = mods_sharing(&dir);
+    users.extend(versions(read_links(&dir)));
+    if users.iter().all(|(_, l)| l == "vanilla") {
+        users.extend(versions(installation_names()));
+    }
+    let (game, loader) = users.first().cloned().ok_or("Create an installation first, so MIM knows which version to match")?;
+    let (game, loader) = newest_version(game, loader, users);
+    Ok((dir, game, loader))
+}
+
 async fn update_in(installation: &str, p: &Progress) -> CmdResult<ImportReport> {
-    let (dir, game, loader) = inst_target(installation)?;
-    let (game, loader) = newest_version(game, loader, mods_sharing(&dir));
+    let (dir, game, loader) = import_target(installation)?;
     p.say("Checking for updates");
     let mods = dir.join("mods");
     let current = jar_hashes(&mods, false);
-    let mut report = ImportReport { title: installation.into(), ..Default::default() };
+    let mut report = ImportReport { title: installation.trim_start_matches("standards/").into(), ..Default::default() };
     if current.is_empty() {
         return Ok(report);
     }
@@ -5551,6 +5588,18 @@ mod tests {
         assert!(!has_own_file(&root.join("config")));
         fs::write(root.join("config/sub/own.json"), "{}").unwrap();
         assert!(has_own_file(&root.join("config")));
+        fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn purging_logs_keeps_the_log_folder() {
+        let root = std::env::temp_dir().join(format!("mim-purge-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(root.join("logs")).unwrap();
+        fs::write(root.join("logs/latest.log"), "x").unwrap();
+        fs::write(root.join("hs_err_pid1.log"), "x").unwrap();
+        let mut items = log_items(&root);
+        items.sort();
+        assert_eq!(items, [root.join("hs_err_pid1.log"), root.join("logs/latest.log")]);
         fs::remove_dir_all(&root).unwrap();
     }
 

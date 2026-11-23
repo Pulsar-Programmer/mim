@@ -1,5 +1,7 @@
+import { useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { Installation, InstanceItem, Standard } from "./api";
+import { Modal } from "./Modal";
 
 // deterministic soft gradient for installations without a custom image
 export function nameGradient(name: string): string {
@@ -69,6 +71,8 @@ export interface Place {
   sub?: string;
   /** installations that use this place through a link */
   members?: Installation[];
+  /** has none of this yet: stays behind the + until picked */
+  empty?: boolean;
 }
 
 /** One selectable place — the same chip everywhere a folder is picked. */
@@ -121,15 +125,54 @@ export function PlacePicker({
   value: string;
   onChange: (key: string) => void;
 }) {
+  const [adding, setAdding] = useState(false);
   if (places.length < 2) return null;
+  const hidden = places.filter((p) => p.empty && p.key !== value);
   return (
     <div className="places" role="group" aria-label="Instances">
       <span className="places-label" aria-hidden>
         Instances
       </span>
-      {places.map((p) => (
-        <PlaceChip key={p.key} place={p} active={p.key === value} onClick={() => onChange(p.key)} />
-      ))}
+      {places
+        .filter((p) => !p.empty || p.key === value)
+        .map((p) => (
+          <PlaceChip key={p.key} place={p} active={p.key === value} onClick={() => onChange(p.key)} />
+        ))}
+      {hidden.length > 0 && (
+        <button className="place place-add" aria-label="Add an instance" title="Add an instance" onClick={() => setAdding(true)}>
+          +
+        </button>
+      )}
+      {adding && (
+        <Modal className="share-dialog" label="Add an instance" onClose={() => setAdding(false)}>
+          <div className="share-body">
+            <header className="share-head">
+              <div>
+                <h2>Add an instance</h2>
+                <p className="hint">Pick one to start adding to it. It stays in the bar once it has something.</p>
+              </div>
+            </header>
+            <div className="places">
+              {hidden.map((p) => (
+                <PlaceChip
+                  key={p.key}
+                  place={p}
+                  active={false}
+                  onClick={() => {
+                    setAdding(false);
+                    onChange(p.key);
+                  }}
+                />
+              ))}
+            </div>
+            <footer className="share-foot">
+              <button className="btn" onClick={() => setAdding(false)}>
+                Cancel
+              </button>
+            </footer>
+          </div>
+        </Modal>
+      )}
     </div>
   );
 }
@@ -164,6 +207,8 @@ export function instancePlaces(
       std: s,
       sub: members.length ? `${members.length} linked` : "standard",
       members,
+      empty:
+        !s.builtin && !s.entries.some((e) => e.scope === "global" && (e.name === item || e.name.startsWith(`${item}/`))),
     };
   };
   const root = standards.find((s) => s.builtin);
@@ -180,6 +225,9 @@ export function instancePlaces(
       inst: i,
       sub: [detail(i), i.links[item] ? `from ${i.links[item]!.from}` : "standalone"].filter(Boolean).join(" · "),
     })),
+    ...installations
+      .filter((i) => !i.standalone.includes(item) && !i.links[item] && !standards.some((s) => uses(s, i)))
+      .map((i) => ({ key: i.name, label: i.name, inst: i, sub: "nothing here yet", empty: true })),
   ];
 }
 

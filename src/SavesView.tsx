@@ -39,7 +39,7 @@ export function SavesView({
   const [location, setLocation] = useState("all");
   const [open, setOpen] = useState<World | null>(null);
 
-  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
   const shown = worlds.filter((w) => location === "all" || w.location === location);
   const total = worlds.reduce((n, w) => n + w.size_bytes, 0);
   // imports land in the location being viewed ("all" → shared saves)
@@ -57,6 +57,7 @@ export function SavesView({
       const name = await api.importWorld(src, target === "Shared" ? null : target);
       notify(`Imported “${name}” into ${scopeName(target)}`);
       reload();
+      reloadStandards();
     } catch (e) {
       notify(String(e));
     }

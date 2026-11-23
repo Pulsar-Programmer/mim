@@ -51,7 +51,7 @@ export function PacksView({
   notify: (m: string) => void;
   installations: Installation[];
 }) {
-  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
   const places = useMemo(
     () => instancePlaces("resourcepacks", installations, standards),
     [installations, standards]
@@ -62,8 +62,9 @@ export function PacksView({
   const scope = section.kind === "root" ? null : section.key;
   const isStandard = !!section.std && !section.std.builtin;
   const members = section.members ?? [];
-  // a standard imports through an installation using it, for its game version
-  const importTo = members[0]?.name ?? (isStandard ? null : scope);
+  // a standard's downloads match the newest version using it
+  const importTo = section.key || "standards/Shared";
+  const [mode, setMode] = useState<"view" | "edit">("view");
   // a standard has no active list of its own: read it from an installation using it
   const listScope = isStandard ? (members[0]?.name ?? scope) : scope;
   const canToggle = !isStandard || members.length > 0;
@@ -84,7 +85,11 @@ export function PacksView({
     () => api.listPacks(listScope),
     notify
   );
-  const { armed, confirm } = useConfirm(notify, reload);
+  const refresh = () => {
+    reload();
+    reloadStandards();
+  };
+  const { armed, confirm } = useConfirm(notify, refresh);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"name" | "newest" | "size">("name");
   const [link, setLink] = useState("");
@@ -97,14 +102,13 @@ export function PacksView({
   // on, top first — only packs that are still in the folder
   const enabled = (list?.enabled ?? []).filter((f) => byFile.has(f));
   const missing = (list?.enabled ?? []).filter((f) => !byFile.has(f));
-  const off = packs
-    .filter((p) => !enabled.includes(p.file))
-    .filter((p) => {
-      const q = query.toLowerCase();
-      return !q || p.file.toLowerCase().includes(q) || (p.description ?? "").toLowerCase().includes(q);
-    });
-  if (sort === "newest") off.sort((a, b) => b.modified - a.modified);
-  if (sort === "size") off.sort((a, b) => b.size_bytes - a.size_bytes);
+  const matching = packs.filter((p) => {
+    const q = query.toLowerCase();
+    return !q || p.file.toLowerCase().includes(q) || (p.description ?? "").toLowerCase().includes(q);
+  });
+  if (sort === "newest") matching.sort((a, b) => b.modified - a.modified);
+  if (sort === "size") matching.sort((a, b) => b.size_bytes - a.size_bytes);
+  const off = matching.filter((p) => !enabled.includes(p.file));
 
   async function save(next: string[]) {
     try {
@@ -145,7 +149,7 @@ export function PacksView({
     try {
       const n = await api.addPacks(scope, files as string[]);
       notify(`Added ${n} pack${n === 1 ? "" : "s"}`);
-      reload();
+      refresh();
     } catch (e) {
       notify(String(e));
     }
@@ -160,7 +164,7 @@ export function PacksView({
       notify(reportSummary(r));
       if (r.skipped.length) setReport(r);
       setLink("");
-      reload();
+      refresh();
     } catch (e) {
       notify(String(e));
     } finally {
@@ -168,12 +172,12 @@ export function PacksView({
     }
   }
 
-  const inst = installations.find((i) => i.name === importTo);
+  const inst = section.inst;
 
   function row(p: PackInfo, i: number | null) {
     const on = i !== null;
     return (
-      <li key={p.file} className={`mod pack ${on ? "" : "off"}`}>
+      <li key={p.file} className={`mod pack ${on || mode === "view" ? "" : "off"}`}>
         {on && <span className="pack-rank">{i + 1}</span>}
         <div
           className="mod-icon"
@@ -190,6 +194,7 @@ export function PacksView({
               </span>
             )}
             {p.is_dir && <span className="chip">folder</span>}
+            {mode === "view" && enabled.includes(p.file) && <span className="chip">active</span>}
           </div>
           {p.description && <p className="mod-desc">{p.description}</p>}
           <div className="mod-meta">
@@ -220,19 +225,20 @@ export function PacksView({
               </button>
             </span>
           )}
+          {mode === "edit" && (
           <button
             className={`switch ${on ? "on" : ""}`}
             role="switch"
             aria-checked={on}
-            disabled={!canToggle}
-            title={!canToggle ? "Link an installation to turn packs on" : on ? "Turn off" : brief("Turn on — goes on top")}
+            title={on ? "Turn off" : brief("Turn on — goes on top")}
             onClick={() =>
               save(on ? enabled.filter((f) => f !== p.file) : [p.file, ...enabled])
             }
           >
             <span />
           </button>
-          {!on && (
+          )}
+          {mode === "view" && !enabled.includes(p.file) && (
             <button
               className="linklike danger-link"
               onClick={() =>
@@ -296,7 +302,7 @@ export function PacksView({
             >
               <input
                 className="search"
-                placeholder={brief(`Paste Modrinth resource pack links — matched to ${inst?.game_version ?? "this version"}`)}
+                placeholder={brief(`Paste Modrinth resource pack links — matched to ${inst?.game_version ?? "the newest version here"}`)}
                 value={link}
                 onChange={(e) => setLink(e.target.value)}
               />
@@ -315,42 +321,61 @@ export function PacksView({
             </p>
           )}
 
-          <h3 className="pack-heading">Active</h3>
-          {enabled.length > 0 ? (
-            <ul className="mod-list">{enabled.map((f, i) => row(byFile.get(f)!, i))}</ul>
-          ) : (
-            <div className="empty">{brief("No packs on — Minecraft's default look.")}</div>
+          <div className="segmented kinds" role="tablist" aria-label="Resource pack sections">
+            <button role="tab" aria-selected={mode === "view"} className={mode === "view" ? "active" : ""} onClick={() => setMode("view")}>
+              View
+            </button>
+            <button role="tab" aria-selected={mode === "edit"} className={mode === "edit" ? "active" : ""} onClick={() => setMode("edit")}>
+              Edit active
+            </button>
+          </div>
+
+          {mode === "edit" && !canToggle && (
+            <div className="empty">No installation uses this standard yet, so there's no active list to edit.</div>
           )}
-          {missing.length > 0 && (
-            <p className="hint">
-              options.txt also turns on {missing.join(", ")}, which{" "}
-              {missing.length === 1 ? "isn't" : "aren't"} in the folder.{" "}
-              <button className="linklike" onClick={() => save(enabled)}>
-                Forget {missing.length === 1 ? "it" : "them"}
-              </button>
-            </p>
+          {mode === "edit" && canToggle && (
+            <>
+              <h3 className="pack-heading">Active</h3>
+              {enabled.length > 0 ? (
+                <ul className="mod-list">{enabled.map((f, i) => row(byFile.get(f)!, i))}</ul>
+              ) : (
+                <div className="empty">{brief("No packs on — Minecraft's default look.")}</div>
+              )}
+              {missing.length > 0 && (
+                <p className="hint">
+                  options.txt also turns on {missing.join(", ")}, which{" "}
+                  {missing.length === 1 ? "isn't" : "aren't"} in the folder.{" "}
+                  <button className="linklike" onClick={() => save(enabled)}>
+                    Forget {missing.length === 1 ? "it" : "them"}
+                  </button>
+                </p>
+              )}
+            </>
           )}
 
-          <div className="options-toolbar">
-            <h3 className="pack-heading">Available</h3>
-            <input
-              className="search"
-              placeholder="Search packs…"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-            />
-            <select
-              className="sort"
-              value={sort}
-              onChange={(e) => setSort(e.target.value as typeof sort)}
-              title="Sort"
-            >
-              <option value="name">A–Z</option>
-              <option value="newest">Newest</option>
-              <option value="size">Largest</option>
-            </select>
-          </div>
-          <ul className="mod-list">{off.map((p) => row(p, null))}</ul>
+          {(mode === "view" || canToggle) && (
+            <div className="options-toolbar">
+              <h3 className="pack-heading">{mode === "view" ? "Packs" : "Available"}</h3>
+              <input
+                className="search"
+                placeholder="Search packs…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+              <select
+                className="sort"
+                value={sort}
+                onChange={(e) => setSort(e.target.value as typeof sort)}
+                title="Sort"
+              >
+                <option value="name">A–Z</option>
+                <option value="newest">Newest</option>
+                <option value="size">Largest</option>
+              </select>
+            </div>
+          )}
+          {mode === "view" && <ul className="mod-list">{matching.map((p) => row(p, null))}</ul>}
+          {mode === "edit" && canToggle && <ul className="mod-list">{off.map((p) => row(p, null))}</ul>}
           {packs.length === 0 && (
             <div className="empty">
               No resource packs here yet.{" "}
@@ -360,9 +385,7 @@ export function PacksView({
               .
             </div>
           )}
-          {packs.length > 0 && off.length === 0 && enabled.length < packs.length && (
-            <div className="empty">Nothing matches.</div>
-          )}
+          {packs.length > 0 && matching.length === 0 && <div className="empty">Nothing matches.</div>}
         </section>
       </div>
     </>

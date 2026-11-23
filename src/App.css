@@ -2842,6 +2842,21 @@ kbd {
   margin-bottom: 18px;
 }
 
+.place-add {
+  align-self: stretch;
+  justify-content: center;
+  min-width: 44px;
+  padding: 5px 12px;
+  font-size: 18px;
+  color: var(--muted);
+  background: transparent;
+  border-style: dashed;
+}
+
+.place-add:hover {
+  color: var(--ink);
+}
+
 .places-label {
   flex-basis: 100%;
   font-size: 11px;

@@ -26,7 +26,7 @@ export function ModsView({
   installations: Installation[];
   onChanged: () => void;
 }) {
-  const [standards = []] = useCached<Standard[]>("standards", api.listStandards, notify);
+  const [standards = [], reloadStandards] = useCached<Standard[]>("standards", api.listStandards, notify);
   // standards first, then installations with their own mods, most mods first
   const scopes = useMemo(
     () =>
@@ -42,8 +42,8 @@ export function ModsView({
   // a picked installation that now uses a standard lands on that standard
   const section = scopes.find((s) => s.key === scope || s.members?.some((m) => m.name === scope)) ?? scopes[0];
   const current = section.kind === "root" ? null : section.key;
-  // Modrinth needs a game version, so a standard imports through an installation using it
-  const importTo = section.members?.[0]?.name ?? section.inst?.name;
+  // a standard's downloads match the newest version using it
+  const importTo = section.key || "standards/Shared";
 
   const [mods = [], reload] = useCached<Mod[]>(
     `mods:${current}`,
@@ -52,6 +52,7 @@ export function ModsView({
   );
   const refresh = () => {
     reload();
+    reloadStandards();
     onChanged();
   };
   const { armed, confirm } = useConfirm(notify, refresh);
@@ -109,7 +110,6 @@ export function ModsView({
 
   async function fromModrinth(kind: "import" | "update") {
     const target = importTo;
-    if (!target) return;
     setBusy(kind);
     setReport(null);
     try {
@@ -128,7 +128,9 @@ export function ModsView({
     }
   }
 
-  const folder = section.inst
+  const folder = section.empty
+    ? null
+    : section.inst
     ? `${section.inst.path}/mods`
     : section.std && !section.std.builtin
       ? `${section.std.path}/mods`
@@ -150,7 +152,7 @@ export function ModsView({
               Open Folder
             </button>
           )}
-          {current && importTo && (
+          {mods.length > 0 && (
             <button
               className="btn"
               onClick={() => fromModrinth("update")}
@@ -175,8 +177,7 @@ export function ModsView({
       <div className="options-layout">
 
         <section className="options-editor">
-          {importTo ? (
-            <form
+          <form
               className="options-toolbar import-row"
               onSubmit={(e) => {
                 e.preventDefault();
@@ -193,12 +194,6 @@ export function ModsView({
                 {busy === "import" ? "Importing…" : "Import"}
               </button>
             </form>
-          ) : (
-            <p className="hint">
-              Link an installation here to import from Modrinth
-              <span className="more"> — mods are matched to its game version.</span>
-            </p>
-          )}
           {busy && (
             <ProgressBar
               p={progress}

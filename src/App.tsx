@@ -1597,8 +1597,6 @@ function LogsView({
   const [picked, setPicked] = useState<string>();
   const section = places.find((p) => p.key === picked || p.members?.some((m) => m.name === picked)) ?? places[0];
   const scope = section.kind === "root" ? null : section.key;
-  // sorting and purging would move the folder every linked installation writes to
-  const isStandard = !!section.std && !section.std.builtin;
   const [logs = [], load] = useCached<LogEntry[]>(
     `logs:${scope}`,
     () => api.listLogs(scope),
@@ -1664,19 +1662,17 @@ function LogsView({
             {unsorted > 0 && ` · ${unsorted} unsorted`}
           </p>
         </div>
-        {!isStandard && (
-          <div className="row-inline">
-            <button className="btn primary" onClick={sort}>
-              Sort Logs
-            </button>
-            <button
-              className="btn danger"
-              onClick={() => confirm(`logs:${scope}`, () => purgeLogs(scope))}
-            >
-              {armed === `logs:${scope}` ? "Sure?" : "Purge Logs"}
-            </button>
-          </div>
-        )}
+        <div className="row-inline">
+          <button className="btn primary" onClick={sort}>
+            Sort Logs
+          </button>
+          <button
+            className="btn danger"
+            onClick={() => confirm(`logs:${scope}`, () => purgeLogs(scope))}
+          >
+            {armed === `logs:${scope}` ? "Sure?" : "Purge Logs"}
+          </button>
+        </div>
       </header>
 
       <PlacePicker
