@@ -2333,15 +2333,7 @@ fn read_config(path: String) -> CmdResult<String> {
     }
     if is_nbt(&p) {
         // read-only view: shown as JSON, replaced whole (see write_merged)
-        let raw = fs::read(&p).map_err(err)?;
-        let buf = if raw.starts_with(&[0x1f, 0x8b]) {
-            use std::io::Read;
-            let mut v = vec![];
-            flate2::read::MultiGzDecoder::new(&raw[..]).read_to_end(&mut v).map_err(err)?;
-            v
-        } else {
-            raw
-        };
+        let (_, buf) = nbt_bytes(&p)?;
         let v = nbt_root(&buf).ok_or("That file isn't readable NBT")?;
         return serde_json::to_string_pretty(&v).map_err(err);
     }
@@ -2362,15 +2354,24 @@ fn write_config(path: String, text: String) -> CmdResult<()> {
 }
 
 /// Saves a resolved file through any link, so everyone sharing it gets it.
-/// With `from`, that file's bytes replace it whole (how binary NBT resolves).
-/// A copy of what it replaces goes to the Trash first.
+/// With `from`, that file's bytes replace it whole, or, given `take`/`skip`
+/// (flattened NBT paths like "Data.GameType"), just those tags are taken from
+/// it / removed: how binary NBT resolves. A copy of what it replaces goes to
+/// the Trash first.
 #[tauri::command(async)]
-fn write_merged(path: String, text: String, from: Option<String>) -> CmdResult<()> {
+fn write_merged(
+    path: String,
+    text: String,
+    from: Option<String>,
+    take: Option<Vec<String>>,
+    skip: Option<Vec<String>>,
+) -> CmdResult<()> {
     let p = inside_mc(&path)?;
-    let text = match from {
-        Some(f) => fs::read(inside_mc(&f)?).map_err(err)?,
-        None if is_text_config(&p) => text.into_bytes(),
-        None => return Err("MIM only edits existing text config files".into()),
+    let text = match (from, take) {
+        (Some(f), Some(take)) if is_nbt(&p) => nbt_merge(&p, &inside_mc(&f)?, &take, &skip.unwrap_or_default())?,
+        (Some(f), _) => fs::read(inside_mc(&f)?).map_err(err)?,
+        (None, _) if is_text_config(&p) => text.into_bytes(),
+        (None, _) => return Err("MIM only edits existing text config files".into()),
     };
     if !p.is_file() {
         return Err("MIM only edits existing config files".into());
@@ -2978,6 +2979,148 @@ fn nbt_root(buf: &[u8]) -> Option<Value> {
     let t = be::<1>(&mut r)?[0];
     nbt_str(&mut r)?;
     nbt_payload(t, &mut r, 0)
+}
+
+/// An NBT file's bytes, gunzipped if it was gzipped (and whether it was).
+fn nbt_bytes(p: &Path) -> CmdResult<(bool, Vec<u8>)> {
+    let raw = fs::read(p).map_err(err)?;
+    if !raw.starts_with(&[0x1f, 0x8b]) {
+        return Ok((false, raw));
+    }
+    use std::io::Read;
+    let mut v = vec![];
+    flate2::read::MultiGzDecoder::new(&raw[..]).read_to_end(&mut v).map_err(err)?;
+    Ok((true, v))
+}
+
+/// A lossless NBT tree for merging: compounds are walked, every other tag and
+/// every key stays as its original bytes, so nothing is re-encoded.
+#[derive(Clone)]
+enum Tag {
+    Compound(Vec<(Vec<u8>, Tag)>),
+    Raw(u8, Vec<u8>),
+}
+
+fn nbt_tree(t: u8, r: &mut &[u8], depth: u8) -> Option<Tag> {
+    if t != 10 {
+        let start = *r;
+        nbt_payload(t, r, depth)?;
+        return Some(Tag::Raw(t, start[..start.len() - r.len()].to_vec()));
+    }
+    if depth > 64 {
+        return None;
+    }
+    let mut v = vec![];
+    loop {
+        let ct = be::<1>(r)?[0];
+        if ct == 0 {
+            return Some(Tag::Compound(v));
+        }
+        let n = u16::from_be_bytes(be(r)?) as usize;
+        let name = take(r, n)?.to_vec();
+        v.push((name, nbt_tree(ct, r, depth + 1)?));
+    }
+}
+
+fn nbt_write(b: &mut Vec<u8>, t: &Tag) {
+    match t {
+        Tag::Raw(_, raw) => b.extend(raw),
+        Tag::Compound(v) => {
+            for (k, c) in v {
+                b.push(match c {
+                    Tag::Compound(_) => 10,
+                    Tag::Raw(id, _) => *id,
+                });
+                b.extend((k.len() as u16).to_be_bytes());
+                b.extend(k);
+                nbt_write(b, c);
+            }
+            b.push(0);
+        }
+    }
+}
+
+type Entries = Vec<(Vec<u8>, Tag)>;
+
+/// The entry a flattened path ("Data.GameType") starts in, and the rest of the
+/// path. Keys can hold dots, so the longest key that fits wins.
+fn nbt_find<'a>(v: &[(Vec<u8>, Tag)], path: &'a str) -> Option<(usize, Option<&'a str>)> {
+    v.iter()
+        .enumerate()
+        .filter_map(|(i, (k, _))| {
+            let k = String::from_utf8_lossy(k);
+            if path == k {
+                return Some((i, k.len(), None));
+            }
+            path.strip_prefix(&*k)?.strip_prefix('.').map(|rest| (i, k.len(), Some(rest)))
+        })
+        .max_by_key(|x| x.1)
+        .map(|(i, _, rest)| (i, rest))
+}
+
+/// Copies `other`'s tag at `path` into `base`, making compounds on the way.
+fn nbt_take(base: &mut Entries, other: &[(Vec<u8>, Tag)], path: &str) {
+    let Some((i, rest)) = nbt_find(other, path) else { return };
+    let (k, from) = &other[i];
+    let at = base.iter().position(|(b, _)| b == k).unwrap_or_else(|| {
+        base.push((k.clone(), Tag::Compound(vec![])));
+        base.len() - 1
+    });
+    match (rest, from) {
+        (Some(rest), Tag::Compound(inner)) => {
+            if !matches!(base[at].1, Tag::Compound(_)) {
+                base[at].1 = Tag::Compound(vec![]);
+            }
+            if let Tag::Compound(b) = &mut base[at].1 {
+                nbt_take(b, inner, rest);
+            }
+        }
+        _ => base[at].1 = from.clone(),
+    }
+}
+
+fn nbt_drop(base: &mut Entries, path: &str) {
+    let Some((i, rest)) = nbt_find(base, path) else { return };
+    match (rest, &mut base[i].1) {
+        (None, _) => {
+            base.remove(i);
+        }
+        (Some(rest), Tag::Compound(inner)) => nbt_drop(inner, rest),
+        _ => {}
+    }
+}
+
+/// `base`'s NBT with the `take` tags from `other` and without the `skip` ones,
+/// gzipped again if `base` was.
+fn nbt_merge(base: &Path, other: &Path, take: &[String], skip: &[String]) -> CmdResult<Vec<u8>> {
+    let read = |p: &Path| -> CmdResult<(bool, Vec<u8>, Tag)> {
+        let (gz, buf) = nbt_bytes(p)?;
+        let bad = || "That file isn't readable NBT".to_string();
+        let mut r = &buf[..];
+        if be::<1>(&mut r).ok_or_else(bad)?[0] != 10 {
+            return Err(bad());
+        }
+        let n = u16::from_be_bytes(be(&mut r).ok_or_else(bad)?) as usize;
+        let name = self::take(&mut r, n).ok_or_else(bad)?.to_vec();
+        Ok((gz, name, nbt_tree(10, &mut r, 0).ok_or_else(bad)?))
+    };
+    let (gz, name, mut tree) = read(base)?;
+    let (_, _, o) = read(other)?;
+    if let (Tag::Compound(b), Tag::Compound(o)) = (&mut tree, &o) {
+        take.iter().for_each(|k| nbt_take(b, o, k));
+        skip.iter().for_each(|k| nbt_drop(b, k));
+    }
+    let mut out = vec![10];
+    out.extend((name.len() as u16).to_be_bytes());
+    out.extend(name);
+    nbt_write(&mut out, &tree);
+    if !gz {
+        return Ok(out);
+    }
+    use std::io::Write;
+    let mut e = flate2::write::GzEncoder::new(vec![], flate2::Compression::default());
+    e.write_all(&out).map_err(err)?;
+    e.finish().map_err(err)
 }
 
 fn read_nbt_gz(p: &Path) -> Option<Value> {
@@ -5882,6 +6025,46 @@ mod tests {
         assert!(is_text_config(&odd) && !is_nbt(&odd));
         assert!(!is_text_config(&dat) && is_nbt(&dat));
         assert_eq!(nbt_root(&fs::read(&dat).unwrap()).unwrap()["servers"][0]["ip"], "x");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
+    fn nbt_merge_takes_and_drops_tags_losslessly() {
+        use std::io::Write;
+        // {Data: {GameType: int, Seed: long, a.b: string}}, gzipped like level.dat
+        let level = |game: i32, seed: i64, name: &str| {
+            let mut b = vec![10, 0, 0, 10];
+            nbt_put_str(&mut b, "Data");
+            b.push(3);
+            nbt_put_str(&mut b, "GameType");
+            b.extend(game.to_be_bytes());
+            b.push(4);
+            nbt_put_str(&mut b, "Seed");
+            b.extend(seed.to_be_bytes());
+            b.push(8);
+            nbt_put_str(&mut b, "a.b");
+            nbt_put_str(&mut b, name);
+            b.extend([0, 0]);
+            let mut e = flate2::write::GzEncoder::new(vec![], flate2::Compression::default());
+            e.write_all(&b).unwrap();
+            e.finish().unwrap()
+        };
+        let root = std::env::temp_dir().join(format!("mim-nbt-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let (a, b) = (root.join("a.dat"), root.join("b.dat"));
+        fs::write(&a, level(0, 1, "mine")).unwrap();
+        fs::write(&b, level(1, 2, "theirs")).unwrap();
+        let out = nbt_merge(&a, &b, &["Data.GameType".into(), "Data.a.b".into()], &["Data.Seed".into()]).unwrap();
+        fs::write(&a, &out).unwrap();
+        let (gz, raw) = nbt_bytes(&a).unwrap();
+        let d = &nbt_root(&raw).unwrap()["Data"];
+        assert!(gz);
+        assert_eq!((d["GameType"].as_i64(), d["a.b"].as_str(), d.get("Seed")), (Some(1), Some("theirs"), None));
+        // nothing picked: byte-for-byte the same NBT
+        let before = nbt_bytes(&b).unwrap().1;
+        fs::write(&b, nbt_merge(&b, &a, &[], &[]).unwrap()).unwrap();
+        assert_eq!(nbt_bytes(&b).unwrap().1, before);
         let _ = fs::remove_dir_all(&root);
     }
 

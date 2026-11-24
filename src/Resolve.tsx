@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, OptionsSource } from "./api";
-import { compare, mergeText, sameValue } from "./compare";
+import { compare, mergeText, NBT, sameValue } from "./compare";
 import { plural } from "./LinkEditor";
 import { LineDiff, TEXT } from "./LinkWizard";
 import { Modal } from "./Modal";
@@ -53,6 +53,9 @@ export interface ResolveDraft {
   whole: boolean;
   text: string;
   changes: number;
+  /** NBT only: flattened paths to copy from otherPath / remove; the backend merges the real tags */
+  take?: string[];
+  skip?: string[];
 }
 
 /** Which file's value a setting takes; null: not set, so it's removed. */
@@ -108,7 +111,13 @@ export function ResolveDialog({
 
   const a = sides?.[pair[0]];
   const b = sides?.[pair[1]];
-  const cmp = useMemo(() => (a && b ? compare([a.text, b.text], dest) : null), [a, b, dest]);
+  const nbt = NBT.test(dest);
+  const cmp = useMemo(() => {
+    if (!a || !b) return null;
+    const c = compare([a.text, b.text], dest);
+    // NBT shows as JSON; picks are applied to the real tags on save, so it can be mixed here
+    return nbt && c.kind !== "unknown" ? { ...c, mergeable: true } : c;
+  }, [a, b, dest, nbt]);
   const keys = cmp?.keys ?? [];
   const isOptions = dest === "options.txt";
   const allKeys = useMemo(
@@ -154,7 +163,8 @@ export function ResolveDialog({
       const skip = new Set(allKeys.filter((k) => chosen(k) === null));
       const text = whole ? b.text : mergeText([a.text, b.text], cmp, dest, 0, picks, skip);
       if (text == null) throw new Error("This file can't be merged");
-      onStage({ path: a.path, otherPath: b.path, choice, whole, text, changes });
+      const tags = nbt && !whole ? { take: Object.keys(picks), skip: [...skip] } : {};
+      onStage({ path: a.path, otherPath: b.path, choice, whole, text, changes, ...tags });
       onClose();
     } catch (e) {
       setError(String(e));
