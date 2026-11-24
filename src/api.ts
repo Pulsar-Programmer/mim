@@ -458,13 +458,22 @@ export const api = {
   readConfig: (path: string) => invoke<string>("read_config", { path }),
   writeConfig: (path: string, text: string) => invoke<void>("write_config", { path, text }),
   /** saves a resolved file through any link; the old version goes to the Trash */
-  writeMerged: (d: { path: string; text: string; whole: boolean; otherPath: string; take?: string[]; skip?: string[] }) =>
+  writeMerged: (d: {
+    path: string;
+    text: string;
+    whole: boolean;
+    otherPath: string;
+    take?: string[];
+    skip?: string[];
+    lists?: [string, [0 | 1, number][]][];
+  }) =>
     invoke<void>("write_merged", {
       path: d.path,
       text: d.text,
       from: d.whole || d.take ? d.otherPath : null,
       take: d.take ?? null,
       skip: d.skip ?? null,
+      lists: d.lists ?? null,
     }),
   /** every place that could hold a copy of this file */
   diffSources: (dest: string) => invoke<OptionsSource[]>("diff_sources", { dest }),

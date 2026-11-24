@@ -53,9 +53,56 @@ export interface ResolveDraft {
   whole: boolean;
   text: string;
   changes: number;
-  /** NBT only: flattened paths to copy from otherPath / remove; the backend merges the real tags */
+  /** list items (`key#n`) left out */
+  dropped?: string[];
+  /** NBT only: flattened paths to copy from otherPath / remove, and lists as
+   * [side, index] items; the backend merges the real tags */
   take?: string[];
   skip?: string[];
+  lists?: [string, [0 | 1, number][]][];
+}
+
+/** One distinct item of a list setting, from either file. */
+interface Item {
+  id: string;
+  value: unknown;
+  from: 0 | 1;
+  at: number;
+  in: [boolean, boolean];
+}
+
+const asList = (v?: string) => {
+  try {
+    const x = v === undefined ? null : JSON.parse(v);
+    return Array.isArray(x) ? (x as unknown[]) : null;
+  } catch {
+    return null;
+  }
+};
+
+/** A short name for a list item: its name/ip/id if it has one. */
+function itemLabel(v: unknown) {
+  if (v && typeof v === "object" && !Array.isArray(v)) {
+    const o = v as Record<string, unknown>;
+    const name = ["name", "Name", "ip", "id", "title"].map((k) => o[k]).find((x) => typeof x === "string");
+    if (name) return String(name);
+  }
+  return JSON.stringify(v);
+}
+
+/** Every distinct item of two lists: the first's in order, then what only the second has. */
+function itemsOf(key: string, a: unknown[], b: unknown[]): Item[] {
+  const str = a.map((x) => JSON.stringify(x));
+  const out: Item[] = a.map((value, at) => ({ id: "", value, from: 0, at, in: [true, false] }));
+  b.forEach((value, at) => {
+    const i = str.indexOf(JSON.stringify(value));
+    if (i >= 0) out[i].in[1] = true;
+    else {
+      str.push(JSON.stringify(value));
+      out.push({ id: "", value, from: 1, at, in: [false, true] });
+    }
+  });
+  return out.map((it, n) => ({ ...it, id: `${key}#${n}` }));
 }
 
 /** Which file's value a setting takes; null: not set, so it's removed. */
@@ -87,6 +134,7 @@ export function ResolveDialog({
   const [pair, setPair] = useState<[number, number]>([0, 1]);
   const [choice, setChoice] = useState<Record<string, Choice>>(draft?.choice ?? {});
   const [whole, setWhole] = useState(draft?.whole ?? false);
+  const [dropped, setDropped] = useState<Set<string>>(new Set(draft?.dropped));
   const [showAll, setShowAll] = useState(false);
   const [error, setError] = useState("");
 
@@ -127,6 +175,21 @@ export function ResolveDialog({
         : [],
     [cmp, isOptions]
   );
+  // differing lists open up item by item (json and NBT, where a list can be written back)
+  const lists = useMemo(() => {
+    const out = new Map<string, Item[]>();
+    if (!cmp?.mergeable || !a || !(nbt || a.text.trimStart().startsWith("{"))) return out;
+    for (const k of cmp.keys) {
+      const [x, y] = [asList(cmp.maps[0].get(k)), asList(cmp.maps[1].get(k))];
+      if (x && y) out.set(k, itemsOf(k, x, y));
+    }
+    return out;
+  }, [cmp, a, nbt]);
+  const kept = (k: string) => lists.get(k)!.filter((it) => !dropped.has(it.id));
+  const listChanges = [...lists.keys()].reduce(
+    (n, k) => n + kept(k).filter((it) => !it.in[0]).length + lists.get(k)!.filter((it) => it.in[0] && dropped.has(it.id)).length,
+    0
+  );
   const rows = showAll ? allKeys : keys;
   // what's already in the saved file stays; settings only the other has come along
   const chosen = (k: string): Choice => {
@@ -138,12 +201,13 @@ export function ResolveDialog({
     const mine = cmp!.maps[0].get(k);
     return c === null ? mine !== undefined : c === 1 && !sameValue(mine, cmp!.maps[1].get(k));
   };
-  const changes = cmp?.mergeable ? allKeys.filter(changed).length : whole ? 1 : 0;
+  const changes = cmp?.mergeable ? allKeys.filter((k) => !lists.has(k) && changed(k)).length + listChanges : whole ? 1 : 0;
   const value = (k: string, v?: string) => (isOptions ? show(k, v) : (v ?? "not set"));
 
   function choosePair(next: [number, number]) {
     setPair(next);
     setChoice({});
+    setDropped(new Set());
     setWhole(false);
     setError("");
   }
@@ -159,12 +223,21 @@ export function ResolveDialog({
     }
     setError("");
     try {
-      const picks = Object.fromEntries(allKeys.filter((k) => changed(k) && chosen(k) === 1).map((k) => [k, 1]));
-      const skip = new Set(allKeys.filter((k) => chosen(k) === null));
-      const text = whole ? b.text : mergeText([a.text, b.text], cmp, dest, 0, picks, skip);
+      const plain = allKeys.filter((k) => !lists.has(k));
+      const picks = Object.fromEntries(plain.filter((k) => changed(k) && chosen(k) === 1).map((k) => [k, 1]));
+      const skip = new Set(plain.filter((k) => chosen(k) === null));
+      const listed = new Map([...lists.keys()].map((k) => [k, kept(k).map((it) => it.value)]));
+      const text = whole ? b.text : mergeText([a.text, b.text], cmp, dest, 0, picks, skip, listed);
       if (text == null) throw new Error("This file can't be merged");
-      const tags = nbt && !whole ? { take: Object.keys(picks), skip: [...skip] } : {};
-      onStage({ path: a.path, otherPath: b.path, choice, whole, text, changes, ...tags });
+      const tags =
+        nbt && !whole
+          ? {
+              take: Object.keys(picks),
+              skip: [...skip],
+              lists: [...lists.keys()].map((k) => [k, kept(k).map((it) => [it.from, it.at])] as [string, [0 | 1, number][]]),
+            }
+          : {};
+      onStage({ path: a.path, otherPath: b.path, choice, whole, text, changes, dropped: [...dropped], ...tags });
       onClose();
     } catch (e) {
       setError(String(e));
@@ -249,6 +322,47 @@ export function ResolveDialog({
                 </div>
               ) : (
                 rows.map((k) => {
+                  const items = lists.get(k);
+                  if (items)
+                    return (
+                      <div key={k} className="rs-list-group">
+                        <div className="rs-grid rs-row">
+                          <span className="rs-key" title={k}>{k}</span>
+                          <span className="rs-value unset">{plural(items.filter((it) => it.in[0]).length, "item")}</span>
+                          <span className="rs-value unset">{plural(items.filter((it) => it.in[1]).length, "item")}</span>
+                          <span />
+                        </div>
+                        {items.map((it) => {
+                          const on = !dropped.has(it.id);
+                          const label = itemLabel(it.value);
+                          const toggle = () => {
+                            const next = new Set(dropped);
+                            if (on) next.add(it.id);
+                            else next.delete(it.id);
+                            setDropped(next);
+                          };
+                          return (
+                            <div key={it.id} className={`rs-grid rs-row rs-item ${it.in[0] && it.in[1] ? "same" : ""}`}>
+                              <span className="rs-key" title={JSON.stringify(it.value, null, 2)}>{label}</span>
+                              {([0, 1] as const).map((at) => (
+                                <span key={at} className={`rs-value ${it.in[at] ? "" : "unset"}`}>
+                                  {it.in[at] ? "has it" : "—"}
+                                </span>
+                              ))}
+                              <button
+                                className="rs-value rs-unset"
+                                aria-pressed={on}
+                                aria-label={`${k}: ${on ? "drop" : "keep"} ${label}`}
+                                title={on ? "Kept · click to leave it out" : "Left out · click to keep it"}
+                                onClick={toggle}
+                              >
+                                {on ? "Keep" : "Drop"}
+                              </button>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
                   const c = chosen(k);
                   const both = cmp.maps[0].has(k) && cmp.maps[1].has(k);
                   return (

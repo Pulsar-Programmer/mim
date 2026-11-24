@@ -45,6 +45,13 @@ assert.equal(mergeText([into, other], rc, "options.txt", 0, { y: 1 }, new Set(["
 // resolving can also drop a setting only the saved file has
 assert.equal(mergeText([into, other], rc, "options.txt", 0, { y: 1 }, new Set(["mine"])), "x:1\ny:new\nadd:1\nskip:2\n");
 
+// a list written item by item; NBT is shown as JSON but never mixed outside Resolve
+const s1 = `{"servers":[{"ip":"x"},{"ip":"y"}],"k":1}`, s2 = `{"servers":[{"ip":"y"},{"ip":"z"}],"k":1}`;
+const sc = compare([s1, s2], "m.json");
+const kept = new Map([["servers", [{ ip: "x" }, { ip: "z" }]]]);
+assert.deepEqual(JSON.parse(mergeText([s1, s2], sc, "m.json", 0, {}, new Set(), kept)!).servers, [{ ip: "x" }, { ip: "z" }]);
+assert.equal(compare([s1, s2], "servers.dat").mergeable, false);
+
 // unreadable stays unknown
 assert.equal(compare(["a=1", null], "a.properties").kind, "unknown");
 assert.ok(sameValue("1", "1.0") && !sameValue("1", "2") && !sameValue("true", "1"));

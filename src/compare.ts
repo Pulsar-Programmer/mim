@@ -192,7 +192,9 @@ export function mergeText(
   dest: string,
   base: number,
   picks: Record<string, number> = {},
-  skip: ReadonlySet<string> = new Set()
+  skip: ReadonlySet<string> = new Set(),
+  /** json only: lists to write as given */
+  lists: ReadonlyMap<string, unknown[]> = new Map()
 ): string | null {
   if (!cmp.mergeable) return null;
   const choose = chooser(cmp.maps, base, picks, dest);
@@ -208,6 +210,8 @@ export function mergeText(
         if (present.every((v) => isObj(v) && Object.keys(v).length)) {
           const inner = join(vals.map((v) => v as Record<string, unknown> | undefined), p);
           if (Object.keys(inner).length) out[n] = inner; // empty only if all of it was skipped
+        } else if (lists.has(p)) {
+          out[n] = lists.get(p);
         } else if (!skip.has(p)) {
           const c = choose(p);
           out[n] = c >= 0 && vals[c] !== undefined ? vals[c] : vals[base] !== undefined ? vals[base] : present[0];

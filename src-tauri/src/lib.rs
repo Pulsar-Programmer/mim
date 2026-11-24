@@ -2373,13 +2373,21 @@ fn write_merged(
     from: Option<String>,
     take: Option<Vec<String>>,
     skip: Option<Vec<String>>,
+    lists: Option<Vec<(String, Vec<(u8, usize)>)>>,
 ) -> CmdResult<()> {
     let p = inside_mc(&path)?;
-    let text = match (from, take) {
-        (Some(f), Some(take)) if is_nbt(&p) => nbt_merge(&p, &inside_mc(&f)?, &take, &skip.unwrap_or_default())?,
-        (Some(f), _) => fs::read(inside_mc(&f)?).map_err(err)?,
-        (None, _) if is_text_config(&p) => text.into_bytes(),
-        (None, _) => return Err("MIM only edits existing text config files".into()),
+    let tags = take.is_some() || lists.is_some();
+    let text = match from {
+        Some(f) if tags && is_nbt(&p) => nbt_merge(
+            &p,
+            &inside_mc(&f)?,
+            &take.unwrap_or_default(),
+            &skip.unwrap_or_default(),
+            &lists.unwrap_or_default(),
+        )?,
+        Some(f) => fs::read(inside_mc(&f)?).map_err(err)?,
+        None if is_text_config(&p) => text.into_bytes(),
+        None => return Err("MIM only edits existing text config files".into()),
     };
     if !p.is_file() {
         return Err("MIM only edits existing config files".into());
@@ -3087,6 +3095,51 @@ fn nbt_take(base: &mut Entries, other: &[(Vec<u8>, Tag)], path: &str) {
     }
 }
 
+/// A list tag's item type and each item's bytes.
+fn nbt_items(raw: &[u8]) -> Option<(u8, Vec<&[u8]>)> {
+    let mut r = raw;
+    let t = be::<1>(&mut r)?[0];
+    let n = i32::from_be_bytes(be(&mut r)?).max(0);
+    let mut v = vec![];
+    for _ in 0..n {
+        let start = r;
+        nbt_payload(t, &mut r, 0)?;
+        v.push(&start[..start.len() - r.len()]);
+    }
+    Some((t, v))
+}
+
+/// Rebuilds the list at `path` (in both files) from picked items: (0, i) is
+/// item i of `base`'s list, (1, i) of `other`'s, each kept as its bytes.
+fn nbt_list(base: &mut Entries, other: &[(Vec<u8>, Tag)], path: &str, picks: &[(u8, usize)]) -> CmdResult<()> {
+    let bad = || "That list changed since it was read".to_string();
+    let (i, rest) = nbt_find(other, path).ok_or_else(bad)?;
+    let (k, from) = &other[i];
+    let at = base.iter().position(|(b, _)| b == k).ok_or_else(bad)?;
+    match (rest, from, &mut base[at].1) {
+        (Some(rest), Tag::Compound(inner), Tag::Compound(b)) => nbt_list(b, inner, rest, picks),
+        (None, Tag::Raw(9, theirs), Tag::Raw(9, mine)) => {
+            let sides = [nbt_items(mine).ok_or_else(bad)?, nbt_items(theirs).ok_or_else(bad)?];
+            let mut items = vec![];
+            let mut t = None;
+            for &(side, n) in picks {
+                let (ty, list) = &sides[(side as usize).min(1)];
+                if t.is_some_and(|t| t != *ty) {
+                    return Err("Those lists hold different kinds of items".into());
+                }
+                t = Some(*ty);
+                items.push(*list.get(n).ok_or_else(bad)?);
+            }
+            let mut raw = vec![t.unwrap_or(sides[0].0)];
+            raw.extend((items.len() as i32).to_be_bytes());
+            items.iter().for_each(|x| raw.extend(*x));
+            *mine = raw;
+            Ok(())
+        }
+        _ => Err(bad()),
+    }
+}
+
 fn nbt_drop(base: &mut Entries, path: &str) {
     let Some((i, rest)) = nbt_find(base, path) else { return };
     match (rest, &mut base[i].1) {
@@ -3100,7 +3153,13 @@ fn nbt_drop(base: &mut Entries, path: &str) {
 
 /// `base`'s NBT with the `take` tags from `other` and without the `skip` ones,
 /// gzipped again if `base` was.
-fn nbt_merge(base: &Path, other: &Path, take: &[String], skip: &[String]) -> CmdResult<Vec<u8>> {
+fn nbt_merge(
+    base: &Path,
+    other: &Path,
+    take: &[String],
+    skip: &[String],
+    lists: &[(String, Vec<(u8, usize)>)],
+) -> CmdResult<Vec<u8>> {
     let read = |p: &Path| -> CmdResult<(bool, Vec<u8>, Tag)> {
         let (gz, buf) = nbt_bytes(p)?;
         let bad = || "That file isn't readable NBT".to_string();
@@ -3116,6 +3175,9 @@ fn nbt_merge(base: &Path, other: &Path, take: &[String], skip: &[String]) -> Cmd
     let (_, _, o) = read(other)?;
     if let (Tag::Compound(b), Tag::Compound(o)) = (&mut tree, &o) {
         take.iter().for_each(|k| nbt_take(b, o, k));
+        for (k, picks) in lists {
+            nbt_list(b, o, k, picks)?;
+        }
         skip.iter().for_each(|k| nbt_drop(b, k));
     }
     let mut out = vec![10];
@@ -6038,6 +6100,23 @@ mod tests {
 
     // throwaway temp folder, never the real minecraft dir
     #[test]
+    fn nbt_list_keeps_picked_items() {
+        let srv = |ip: &str| Server { name: ip.into(), ip: ip.into(), icon: None, accept_textures: None, hidden: false };
+        let root = std::env::temp_dir().join(format!("mim-join-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let (a, b) = (root.join("a.dat"), root.join("b.dat"));
+        fs::write(&a, servers_nbt(&[srv("x"), srv("y")])).unwrap();
+        fs::write(&b, servers_nbt(&[srv("y"), srv("z")])).unwrap();
+        // keep x, drop y, add their z
+        let lists = [("servers".to_string(), vec![(0, 0), (1, 1)])];
+        fs::write(&a, nbt_merge(&a, &b, &[], &[], &lists).unwrap()).unwrap();
+        let ips: Vec<String> = read_servers(&a).into_iter().map(|s| s.ip).collect();
+        assert_eq!(ips, ["x", "z"]);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
     fn nbt_merge_takes_and_drops_tags_losslessly() {
         use std::io::Write;
         // {Data: {GameType: int, Seed: long, a.b: string}}, gzipped like level.dat
@@ -6063,7 +6142,7 @@ mod tests {
         let (a, b) = (root.join("a.dat"), root.join("b.dat"));
         fs::write(&a, level(0, 1, "mine")).unwrap();
         fs::write(&b, level(1, 2, "theirs")).unwrap();
-        let out = nbt_merge(&a, &b, &["Data.GameType".into(), "Data.a.b".into()], &["Data.Seed".into()]).unwrap();
+        let out = nbt_merge(&a, &b, &["Data.GameType".into(), "Data.a.b".into()], &["Data.Seed".into()], &[]).unwrap();
         fs::write(&a, &out).unwrap();
         let (gz, raw) = nbt_bytes(&a).unwrap();
         let d = &nbt_root(&raw).unwrap()["Data"];
@@ -6071,7 +6150,7 @@ mod tests {
         assert_eq!((d["GameType"].as_i64(), d["a.b"].as_str(), d.get("Seed")), (Some(1), Some("theirs"), None));
         // nothing picked: byte-for-byte the same NBT
         let before = nbt_bytes(&b).unwrap().1;
-        fs::write(&b, nbt_merge(&b, &a, &[], &[]).unwrap()).unwrap();
+        fs::write(&b, nbt_merge(&b, &a, &[], &[], &[]).unwrap()).unwrap();
         assert_eq!(nbt_bytes(&b).unwrap().1, before);
         let _ = fs::remove_dir_all(&root);
     }
