@@ -247,7 +247,7 @@ export function StandardFiles({
     setSaving(true);
     try {
       for (const [r, d] of pending) {
-        await api.writeMerged(d.path, d.text);
+        await api.writeMerged(d);
         setDrafts(({ [r]: _, ...rest }) => rest);
       }
       notify(`Saved ${plural(pending.length, "resolved file")} · old versions in Trash`);

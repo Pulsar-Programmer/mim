@@ -64,7 +64,7 @@ export function AddToStandard({
         setClash(inWay);
       } else {
         // after the add: replacing copies the source over the standard's file
-        for (const d of resolved) await api.writeMerged(d.path, d.text);
+        for (const d of resolved) await api.writeMerged(d);
         notify(
           `Added ${names.length === 1 ? names[0] : `${names.length} items`} to ${std.name}` +
             (from ? ` · ${from} now links to it` : "") +

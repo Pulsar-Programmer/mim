@@ -196,7 +196,7 @@ export function LinkEditor({
     setBusy(true);
     try {
       // first, so links and copies below carry the resolved version
-      for (const [, d] of draftList) await api.writeMerged(d.path, d.text);
+      for (const [, d] of draftList) await api.writeMerged(d);
       let renamed: string[] = [];
       if (merge.length) renamed = await api.mergeShared(inst.name, merge.map((r) => r.split("/")[1]));
       // every file first, so unticked ones can still keep a copy below

@@ -2280,12 +2280,14 @@ struct ConfigOverview {
     loose: Vec<FolderItem>,
 }
 
-const TEXT_EXTS: [&str; 13] = [
-    "json", "json5", "jsonc", "toml", "properties", "txt", "cfg", "conf", "yml", "yaml", "ini", "snbt", "hjson",
-];
-
+/// Any UTF-8 file without NULs, whatever its extension (mods use many).
 fn is_text_config(p: &Path) -> bool {
-    p.extension().is_some_and(|e| TEXT_EXTS.contains(&e.to_string_lossy().to_lowercase().as_str()))
+    fs::read(p).is_ok_and(|b| !b.contains(&0) && std::str::from_utf8(&b).is_ok())
+}
+
+/// level.dat, servers.dat, hotbar.nbt… binary NBT, gzipped or not.
+fn is_nbt(p: &Path) -> bool {
+    p.extension().is_some_and(|e| matches!(e.to_string_lossy().to_lowercase().as_str(), "dat" | "dat_old" | "nbt"))
 }
 
 #[tauri::command(async)]
@@ -2326,13 +2328,28 @@ fn list_config(installation: Option<String>) -> CmdResult<ConfigOverview> {
 #[tauri::command(async)]
 fn read_config(path: String) -> CmdResult<String> {
     let p = inside_mc(&path)?;
-    if !is_text_config(&p) {
-        return Err("MIM only opens text config files".into());
-    }
     if fs::metadata(&p).map_err(err)?.len() > 2 << 20 {
         return Err("That file is too big to edit here — reveal it instead".into());
     }
-    fs::read_to_string(&p).map_err(|_| "That file isn't plain text".into())
+    if is_nbt(&p) {
+        // read-only view: shown as JSON, replaced whole (see write_merged)
+        let raw = fs::read(&p).map_err(err)?;
+        let buf = if raw.starts_with(&[0x1f, 0x8b]) {
+            use std::io::Read;
+            let mut v = vec![];
+            flate2::read::MultiGzDecoder::new(&raw[..]).read_to_end(&mut v).map_err(err)?;
+            v
+        } else {
+            raw
+        };
+        let v = nbt_root(&buf).ok_or("That file isn't readable NBT")?;
+        return serde_json::to_string_pretty(&v).map_err(err);
+    }
+    let text = fs::read_to_string(&p).map_err(|_| "That file isn't plain text")?;
+    if text.contains('\0') {
+        return Err("That file isn't plain text".into());
+    }
+    Ok(text)
 }
 
 #[tauri::command(async)]
@@ -2345,14 +2362,20 @@ fn write_config(path: String, text: String) -> CmdResult<()> {
 }
 
 /// Saves a resolved file through any link, so everyone sharing it gets it.
+/// With `from`, that file's bytes replace it whole (how binary NBT resolves).
 /// A copy of what it replaces goes to the Trash first.
 #[tauri::command(async)]
-fn write_merged(path: String, text: String) -> CmdResult<()> {
+fn write_merged(path: String, text: String, from: Option<String>) -> CmdResult<()> {
     let p = inside_mc(&path)?;
-    if !is_text_config(&p) || !p.is_file() {
-        return Err("MIM only edits existing text config files".into());
+    let text = match from {
+        Some(f) => fs::read(inside_mc(&f)?).map_err(err)?,
+        None if is_text_config(&p) => text.into_bytes(),
+        None => return Err("MIM only edits existing text config files".into()),
+    };
+    if !p.is_file() {
+        return Err("MIM only edits existing config files".into());
     }
-    if fs::read(&p).ok().as_deref() == Some(text.as_bytes()) {
+    if fs::read(&p).ok().as_deref() == Some(&text[..]) {
         return Ok(());
     }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(err)?.as_nanos();
@@ -2894,7 +2917,7 @@ fn nbt_str(r: &mut &[u8]) -> Option<String> {
 }
 
 /// One tag payload as JSON. Longs become strings (seeds overflow JS numbers);
-/// byte/int/long arrays are skipped as null.
+/// byte/int/long arrays come out as arrays.
 fn nbt_payload(t: u8, r: &mut &[u8], depth: u8) -> Option<Value> {
     if depth > 64 {
         return None;
@@ -2913,8 +2936,16 @@ fn nbt_payload(t: u8, r: &mut &[u8], depth: u8) -> Option<Value> {
                 11 => 4,
                 _ => 8,
             };
-            take(r, n.checked_mul(width)?)?;
-            Value::Null
+            let raw = take(r, n.checked_mul(width)?)?;
+            Value::Array(
+                raw.chunks(width)
+                    .map(|c| match t {
+                        7 => json!(c[0] as i8),
+                        11 => json!(i32::from_be_bytes(c.try_into().unwrap())),
+                        _ => json!(i64::from_be_bytes(c.try_into().unwrap()).to_string()),
+                    })
+                    .collect(),
+            )
         }
         8 => json!(nbt_str(r)?),
         9 => {
@@ -5837,6 +5868,21 @@ mod tests {
         assert_eq!(standard_dest("PvP/1.21.10/config"), Some("config"));
         assert_eq!(standard_dest("PvP/config/sodium.json"), Some("config/sodium.json"));
         assert_eq!(standard_dest("options.txt"), None); // loose, not in a standard
+    }
+
+    // throwaway temp folder, never the real minecraft dir
+    #[test]
+    fn any_text_file_reads_and_nbt_is_binary() {
+        let root = std::env::temp_dir().join(format!("mim-text-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).unwrap();
+        let (odd, dat) = (root.join("mod.config"), root.join("servers.dat"));
+        fs::write(&odd, "a=1\n").unwrap();
+        let s = Server { name: "Hi".into(), ip: "x".into(), icon: None, accept_textures: None, hidden: false };
+        fs::write(&dat, servers_nbt(&[s])).unwrap();
+        assert!(is_text_config(&odd) && !is_nbt(&odd));
+        assert!(!is_text_config(&dat) && is_nbt(&dat));
+        assert_eq!(nbt_root(&fs::read(&dat).unwrap()).unwrap()["servers"][0]["ip"], "x");
+        let _ = fs::remove_dir_all(&root);
     }
 
     // throwaway temp folder, never the real minecraft dir

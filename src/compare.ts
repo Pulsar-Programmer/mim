@@ -23,6 +23,9 @@ export interface Comparison {
   mergeable: boolean;
 }
 
+/** Binary NBT files, read as JSON. */
+export const NBT = /\.(dat|dat_old|nbt)$/i;
+
 const NUM = /^-?\d+(\.\d+)?$/;
 /** 1 and 1.0 are the same setting. */
 export const sameValue = (a?: string, b?: string) =>
@@ -160,7 +163,8 @@ export function compare(texts: (string | null)[], dest: string): Comparison {
   const conflicts = keys.filter((k) => distinct(k) > 1);
   const superset = conflicts.length ? -1 : maps.findIndex((m) => all.every((k) => m.has(k)));
   const format = ps[0].format;
-  const mergeable = format !== "nested" && ps.every((p) => p.format === format);
+  // binary NBT (.dat, .nbt) is shown as JSON but can only be replaced whole
+  const mergeable = !NBT.test(dest) && format !== "nested" && ps.every((p) => p.format === format);
   const kind = !keys.length ? "same" : conflicts.length ? "conflict" : superset >= 0 ? "additive" : "combine";
   return { kind, maps, keys, conflicts, superset, mergeable };
 }

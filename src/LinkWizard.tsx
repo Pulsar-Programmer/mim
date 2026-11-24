@@ -13,7 +13,8 @@ const FOLDER_LABEL: Record<string, string> = {
   screenshots: "Screenshots",
 };
 // mirrors TEXT_EXTS in lib.rs: what read_config will open
-export const TEXT = /\.(json5?|jsonc|toml|properties|txt|cfg|conf|ya?ml|ini|snbt|hjson)$/i;
+/** Anything not known binary: mods use all sorts of config extensions (the backend checks the bytes). */
+export const TEXT = /^(?!.*\.(jar|zip|gz|png|jpe?g|gif|webp|ogg|mp3|wav|mca|mcr|class|exe|dll|so|dylib|ttf|otf|db|sqlite|lock)$)/i;
 const letter = (k: number) => String.fromCharCode(65 + (k % 26));
 const ago = (secs: number) => (secs > 0 && secs < 8e12 ? timeAgo(new Date(secs * 1000).toISOString()) : "—");
 const plural = (n: number, w: string, ws = `${w}s`) => `${n} ${n === 1 ? w : ws}`;

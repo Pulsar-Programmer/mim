@@ -332,7 +332,7 @@ export function OptionsView({
     if (!source || !entries) return;
     try {
       if (draft) {
-        await api.writeMerged(draft.path, draft.text);
+        await api.writeMerged(draft);
         notify(`Saved ${draft.changes} resolved change${draft.changes === 1 ? "" : "s"} · old version in Trash`);
         setDraft(null);
         reload();

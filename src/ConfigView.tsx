@@ -13,6 +13,7 @@ import { brief } from "./settings";
 import { useCached } from "./hooks";
 import { instancePlaces, PlacePicker, StandardAvatar } from "./Places";
 import { canDiff, ResolveDialog, ResolveDraft, stdKey } from "./Resolve";
+import { NBT } from "./compare";
 
 /**
  * Folders mods make right in the game folder instead of config/. `mod` is
@@ -85,7 +86,6 @@ const LINK = (
   </svg>
 );
 
-const EDITABLE = /\.(json5?|jsonc|toml|properties|txt|cfg|conf|ya?ml|ini|snbt|hjson)$/i;
 
 function ModBadge({ mod, fallback }: { mod?: Mod; fallback: string }) {
   return (
@@ -370,7 +370,8 @@ function ConfigEditor({
   const [text, setText] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const editable = EDITABLE.test(file.rel);
+  const editable = canDiff(file.rel);
+  const nbt = NBT.test(file.rel); // shown as JSON, not editable
 
   useEffect(() => {
     if (!editable) return;
@@ -439,6 +440,7 @@ function ConfigEditor({
           <textarea
             className="cfg-text"
             value={draft}
+            readOnly={nbt}
             spellCheck={false}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
@@ -533,7 +535,7 @@ function ShareDialog({
         notify(`"${std}" already has ${blocked.join(", ")} — pick again to use its copy`);
         return onDone();
       }
-      for (const d of resolved) await api.writeMerged(d.path, d.text);
+      for (const d of resolved) await api.writeMerged(d);
       notify(
         `Shared ${rels.length === 1 ? rels[0] : `${rels.length} files`} through "${std}"` +
           (inWay.length ? ` · ${installation}'s own ${inWay.length === 1 ? "copy" : "copies"} moved to Trash` : "") +
