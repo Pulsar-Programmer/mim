@@ -1251,13 +1251,21 @@ fn linked_entries(inst: &Path, entries: &[StandardEntry]) -> Vec<String> {
 /// The live links from `inst` into standard `std`.
 fn links_of(inst: &Path, std: &str) -> Vec<PathBuf> {
     if std == SHARED {
-        shared_entries()
+        let mut links: Vec<PathBuf> = shared_entries()
             .iter()
             .filter_map(|e| entry_src(&e.rel_path).ok())
             .map(|(src, dest)| (inst.join(dest), src))
             .filter(|(link, src)| links_to(link, src))
             .map(|(link, _)| link)
-            .collect()
+            .collect();
+        // config/ (or a folder in it) linked whole to the Minecraft folder's
+        let mut under = vec![inst.join(MERGED)];
+        links_under(&inst.join(MERGED), &mut under);
+        let mc = mc_dir();
+        links.extend(under.into_iter().filter(|l| l.strip_prefix(inst).is_ok_and(|r| links_to(l, &mc.join(r)))));
+        links.sort();
+        links.dedup();
+        links
     } else {
         let dir = standards_dir().join(std);
         let mut all: Vec<PathBuf> = visible_children(inst).into_iter().map(|(_, p)| p).collect();
@@ -1356,10 +1364,10 @@ struct FolderLink {
     in_way: Vec<String>,
 }
 
-/// The standard's folder holding entries `rels`. Shared is left out: its list
-/// is a picked part of the Minecraft folder, and a folder link would expose it all.
+/// The standard's folder holding entries `rels`. For Shared that's the Minecraft
+/// folder's own, so a folder link shares all of it, not just the listed files.
 fn folder_src(name: &str, folder: &str, rels: &[String]) -> CmdResult<PathBuf> {
-    if name == SHARED || !(folder == MERGED || folder.starts_with("config/")) || !valid_dest(folder) {
+    if !(folder == MERGED || folder.starts_with("config/")) || !valid_dest(folder) {
         return Err(format!("can't link {folder} as a folder"));
     }
     let mut found: Option<PathBuf> = None;
@@ -1463,7 +1471,7 @@ fn folder_links(name: String, installation: String, folders: Vec<(String, Vec<St
 fn link_folder(name: String, installation: String, folder: String, rel_paths: Vec<String>, replace: bool) -> CmdResult<Vec<String>> {
     let src = folder_src(&name, &folder, &rel_paths)?;
     let way = link_folder_in(&game_dir(Some(&installation))?, &src, &folder, replace)?;
-    if way.is_empty() || replace {
+    if (way.is_empty() || replace) && name != SHARED {
         add_link(&standard_dir(&name)?, &installation)?;
     }
     Ok(way)
@@ -6245,6 +6253,26 @@ mod tests {
     }
 
     // throwaway temp folder, never the real minecraft dir
+        // sets the Minecraft folder: cargo test shared_config -- --ignored
+    #[test]
+    #[ignore]
+    fn shared_config_can_be_one_folder_link() {
+        let root = std::env::temp_dir().join(format!("mim-shcfg-{}", uuid::Uuid::new_v4()));
+        let inst = root.join("installations/A");
+        fs::create_dir_all(root.join("config")).unwrap();
+        fs::create_dir_all(&inst).unwrap();
+        fs::write(root.join("config/sodium.json"), "mc").unwrap();
+        std::env::set_var(MC_DIR_ENV, &root);
+        let rels = vec![format!("{SHARED}/config/sodium.json")];
+        let src = folder_src(SHARED, "config", &rels).unwrap();
+        assert!(link_folder_in(&inst, &src, "config", false).unwrap().is_empty());
+        assert!(links_to(&inst.join("config"), &root.join("config")));
+        assert_eq!(links_of(&inst, SHARED), [inst.join("config")]);
+        detach(&links_of(&inst, SHARED), true).unwrap();
+        assert!(!inst.join("config").is_symlink() && inst.join("config/sodium.json").is_file());
+        fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn config_can_be_one_folder_link() {
         let root = std::env::temp_dir().join(format!("mim-whole-{}", uuid::Uuid::new_v4()));

@@ -99,7 +99,7 @@ export function LinkEditor({
     const folders = foldersOf(tree).map((f): [string, string[]] => [f.path, leaves(f)]);
     Promise.all([
       api.linkStates(std.name, inst.name, rels),
-      std.builtin ? Promise.resolve([]) : api.folderLinks(std.name, inst.name, folders),
+      api.folderLinks(std.name, inst.name, folders),
     ])
       .then(([list, flinks]) => {
         const whole = new Set(flinks.filter((f) => f.whole).map((f) => f.folder));
